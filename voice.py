@@ -23,6 +23,10 @@ class Speaker:
 
         threading.Thread(target=self._synth_worker, daemon=True).start()
         threading.Thread(target=self._play_worker, daemon=True).start()
+        threading.Thread(
+          target=lambda: self.kokoro.create("a", voice=self.voice, speed=self.speed, lang="en-us"),
+          daemon=True,
+        ).start()
 
     def _synth_worker(self):
         while True:
