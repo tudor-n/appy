@@ -31,7 +31,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": "Get the current local weather, a 12-hour hourly forecast, and a 3-day daily forecast.",
+            "description": "Get the current local weather, 12-hour hourly forecast, and 3-day daily forecast. Only call this when the user asks about weather, temperature, rain, or forecast.",
             "parameters": {
                 "type": "object",
                 "properties": {},

@@ -51,6 +51,7 @@ def stream_turn(client, model, temperature, messages, speaker):
             messages=messages,
             tools=TOOL_SCHEMAS,
             temperature=temperature,
+            presence_penalty=0.3,
             reasoning_effort="none",
             stream=True,
         )
