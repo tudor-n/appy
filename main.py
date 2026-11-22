@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Must run before importing voice/kokoro so ONNX_PROVIDER is set
 
 from openai import OpenAI
-from hearing import listen
+from hearing import Ear
 from voice import Speaker
 from tools import TOOL_SCHEMAS, run_tool
 
@@ -116,6 +116,9 @@ def main():
     temperature = float(os.getenv("TEMPERATURE", "0.4"))
 
     speaker = Speaker()
+    ear = Ear()
+    ear.start()
+
     system_prompt = load_system_prompt()
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -126,11 +129,11 @@ def main():
         daemon=True,
     ).start()
 
-    print("Appy ready. Type 'quit' to exit.\n")
+    print("Appy ready. Say 'quit' or press Ctrl+C to exit.\n")
 
     while True:
-        user_input = listen()
-        if user_input is None or user_input.lower() in {"quit", "exit"}:
+        user_input = ear.listen()
+        if user_input is None or user_input.lower().strip(".!?") in {"quit", "exit", "shutdown"}:
             print("\nExiting...")
             break
         if not user_input:
@@ -139,11 +142,13 @@ def main():
         now = datetime.now().strftime("%I:%M %p")
         messages.append({"role": "user", "content": f"[{now}] {user_input}"})
 
+        ear.pause()
         stream_turn(client, model, temperature, messages, speaker)
         speaker.wait()
+        ear.resume()
 
+    ear.stop()
     speaker.close()
-
 
 if __name__ == "__main__":
     main()
