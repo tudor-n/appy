@@ -8,3 +8,5 @@ prompt.txt
 prototype.py
 __pycache__/
 .venv
+appy-ui/Cargo.lock
+appy-ui/target/

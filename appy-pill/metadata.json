@@ -1,0 +1,12 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Id": "dev.appy.pill",
+    "Name": "Appy Pill",
+    "Description": "Native taskbar pill for Appy",
+    "Category": "Utilities",
+    "Version": "1.0",
+    "Icon": "face-smile"
+  },
+  "X-Plasma-API-Minimum-Version": "6.0"
+}
