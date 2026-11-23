@@ -5,7 +5,7 @@ use crate::AppyState;
 
 pub struct MascotCanvas {
     pub state: AppyState,
-    pub phase: f32, // incremented at ~60fps when animating
+    pub phase: f32,
 }
 
 impl<Message> canvas::Program<Message> for MascotCanvas {
@@ -30,7 +30,11 @@ impl<Message> canvas::Program<Message> for MascotCanvas {
             width: w * 0.80,
             height: h * 0.72,
         };
-        let body = Path::rounded_rectangle(body_rect.position(), body_rect.size(), (w * 0.24).into());
+        let body = Path::rounded_rectangle(
+            body_rect.position(),
+            body_rect.size(),
+            (w * 0.24).into(),
+        );
         frame.fill(&body, Color::from_rgba8(218, 216, 208, 0.88));
         frame.stroke(
             &body,
@@ -48,11 +52,10 @@ impl<Message> canvas::Program<Message> for MascotCanvas {
         });
         frame.fill(&leaf, Color::from_rgba8(251, 242, 242, 0.94));
 
-        // 3. Face: 3-dot wave when busy, vertical/happy eyes otherwise
+        // 3. Face: 3-dot wave when busy, happy arcs when active, capsule eyes when idle
         let cy = h * 0.59;
         match self.state {
             AppyState::Booting | AppyState::Thinking | AppyState::Compacting => {
-                // Gemini-style 3-dot wave across the face
                 let spacing = w * 0.14;
                 let base_x = w * 0.50 - spacing;
                 for i in 0..3 {
@@ -64,7 +67,6 @@ impl<Message> canvas::Program<Message> for MascotCanvas {
                 }
             }
             AppyState::Listening | AppyState::Speaking => {
-                // Happy ^ ^ arcs
                 let eye_stroke = Stroke::default()
                     .with_color(Color::from_rgb8(20, 20, 24))
                     .with_width(w * 0.055)
@@ -72,13 +74,15 @@ impl<Message> canvas::Program<Message> for MascotCanvas {
                 for &ex in &[w * 0.36, w * 0.64] {
                     let arc = Path::new(|b| {
                         b.move_to(Point::new(ex - w * 0.07, cy + h * 0.03));
-                        b.quadratic_curve_to(Point::new(ex, cy - h * 0.07), Point::new(ex + w * 0.07, cy + h * 0.03));
+                        b.quadratic_curve_to(
+                            Point::new(ex, cy - h * 0.07),
+                            Point::new(ex + w * 0.07, cy + h * 0.03),
+                        );
                     });
                     frame.stroke(&arc, eye_stroke);
                 }
             }
             AppyState::Idle => {
-                // Minimal vertical capsule eyes (matching your sketch)
                 for &ex in &[w * 0.37, w * 0.63] {
                     let eye = Path::rounded_rectangle(
                         Point::new(ex - w * 0.035, cy - h * 0.08),
