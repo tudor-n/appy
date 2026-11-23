@@ -64,7 +64,8 @@ class SmartTurnDetector:
 
 
 class Ear:
-    def __init__(self):
+    def __init__(self, on_speech_start=None):
+        self.on_speech_start = on_speech_start
         print("[hearing] Loading Silero VAD (ONNX)...", flush=True)
         self.vad = load_silero_vad(onnx=True)
 
@@ -190,6 +191,8 @@ class Ear:
                             silence_chunks = 0
                             checked_pause = False
                             buffer = list(ring_buffer)
+                            if self.on_speech_start:
+                                self.on_speech_start()
                     else:
                         buffer.append(audio_np)
                         silence_chunks = 0

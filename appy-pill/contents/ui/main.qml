@@ -22,13 +22,16 @@ PlasmoidItem {
     ]
 
     property string appyState: "idle"
+    property string appyExpression: "neutral"
     property int msgCount: 0
     property bool minimized: false
     property bool connected: false
     property real phase: 0.0
+    property real talkPhase: 0.0
     property real blinkScale: 1.0
 
     readonly property bool isBusy: appyState === "booting" || appyState === "thinking" || appyState === "compacting"
+    readonly property bool isSpeaking: appyState === "speaking"
     readonly property bool inEditMode: (Plasmoid.containment && Plasmoid.containment.corona) ? Plasmoid.containment.corona.editMode : false
     readonly property bool showPill: (connected && minimized) || inEditMode
 
@@ -46,6 +49,7 @@ PlasmoidItem {
                             var data = JSON.parse(xhr.responseText);
                             root.connected = true;
                             root.appyState = data.state || "idle";
+                            root.appyExpression = data.expression || "neutral";
                             root.msgCount = data.msg_count || 0;
                             root.minimized = !!data.minimized;
                         } catch (e) {}
@@ -59,24 +63,29 @@ PlasmoidItem {
         }
     }
 
-    // 60fps animation when busy
+    // 60fps animation when busy or speaking
     Timer {
         interval: 16
-        running: root.showPill && root.isBusy
+        running: root.showPill && (root.isBusy || root.isSpeaking)
         repeat: true
         onTriggered: {
-            root.phase = (root.phase + 0.14) % (Math.PI * 2);
+            if (root.isBusy) {
+                root.phase = (root.phase + 0.14) % (Math.PI * 2);
+            }
+            if (root.isSpeaking) {
+                root.talkPhase = (root.talkPhase + 0.28) % (Math.PI * 20);
+            }
             if (root.fullRepresentationItem && root.fullRepresentationItem.faceCanvas) {
                 root.fullRepresentationItem.faceCanvas.requestPaint();
             }
         }
     }
 
-    // Natural human blinking in Idle state (2.8s–5.4s random intervals)
+    // Natural human blinking
     Timer {
         id: blinkTrigger
         interval: 3400
-        running: root.showPill && root.appyState === "idle"
+        running: root.showPill && !root.isBusy && root.appyState !== "listening"
         repeat: false
         onTriggered: {
             blinkAnim.restart();
@@ -110,10 +119,16 @@ PlasmoidItem {
     }
 
     onAppyStateChanged: {
-        if (appyState !== "idle") {
+        if (isBusy) {
             blinkAnim.stop();
             blinkScale = 1.0;
         }
+        if (fullRepresentationItem && fullRepresentationItem.faceCanvas) {
+            fullRepresentationItem.faceCanvas.requestPaint();
+        }
+    }
+
+    onAppyExpressionChanged: {
         if (fullRepresentationItem && fullRepresentationItem.faceCanvas) {
             fullRepresentationItem.faceCanvas.requestPaint();
         }
@@ -166,6 +181,12 @@ PlasmoidItem {
                         var h = height;
                         ctx.clearRect(0, 0, w, h);
 
+                        ctx.save();
+                        if (root.isSpeaking) {
+                            var bounce = Math.abs(Math.sin(root.talkPhase)) * 2.2;
+                            ctx.translate(0, -bounce);
+                        }
+
                         // 1. Squircle body
                         roundedRect(ctx, w * 0.10, h * 0.22, w * 0.80, h * 0.72, w * 0.24);
                         ctx.fillStyle = "rgba(218, 216, 208, 0.94)";
@@ -196,7 +217,15 @@ PlasmoidItem {
                                 ctx.arc(baseX + i * spacing, y, r, 0, Math.PI * 2);
                                 ctx.fill();
                             }
-                        } else if (root.appyState === "listening" || root.appyState === "speaking") {
+                        } else if (root.appyState === "listening" || root.appyExpression === "happy" || root.appyExpression === "excited") {
+                            if (root.appyExpression === "excited") {
+                                ctx.fillStyle = "rgba(240, 128, 138, 0.48)";
+                                ctx.beginPath();
+                                ctx.arc(w * 0.27, cy + h * 0.09, w * 0.06, 0, Math.PI * 2);
+                                ctx.arc(w * 0.73, cy + h * 0.09, w * 0.06, 0, Math.PI * 2);
+                                ctx.fill();
+                                ctx.fillStyle = "rgb(20, 20, 24)";
+                            }
                             ctx.lineWidth = Math.max(w * 0.065, 1.8);
                             ctx.lineCap = "round";
                             var eyes = [w * 0.36, w * 0.64];
@@ -205,12 +234,29 @@ PlasmoidItem {
                                 ctx.beginPath();
                                 ctx.moveTo(ex - w * 0.07, cy + h * 0.03);
                                 ctx.bezierCurveTo(
-                                    ex - w * 0.02, cy - h * 0.06,
-                                    ex + w * 0.02, cy - h * 0.06,
+                                    ex - w * 0.02, cy - h * 0.07,
+                                    ex + w * 0.02, cy - h * 0.07,
                                     ex + w * 0.07, cy + h * 0.03
                                 );
                                 ctx.stroke();
                             }
+                        } else if (root.appyExpression === "surprised") {
+                            ctx.beginPath();
+                            ctx.arc(w * 0.37, cy, w * 0.068, 0, Math.PI * 2);
+                            ctx.arc(w * 0.63, cy, w * 0.068, 0, Math.PI * 2);
+                            ctx.fill();
+                        } else if (root.appyExpression === "skeptical") {
+                            roundedRect(ctx, w * 0.37 - w * 0.06, cy - h * 0.028, w * 0.12, h * 0.056, h * 0.028);
+                            ctx.fill();
+                            var rH = Math.max(h * 0.24 * root.blinkScale, h * 0.03);
+                            roundedRect(ctx, w * 0.63 - w * 0.038, cy - rH * 0.5 - h * 0.02, w * 0.076, rH, w * 0.038);
+                            ctx.fill();
+                        } else if (root.appyExpression === "focused") {
+                            var fH = Math.max(h * 0.14 * root.blinkScale, h * 0.03);
+                            roundedRect(ctx, w * 0.375 - w * 0.048, cy - fH * 0.5, w * 0.096, fH, w * 0.035);
+                            ctx.fill();
+                            roundedRect(ctx, w * 0.625 - w * 0.048, cy - fH * 0.5, w * 0.096, fH, w * 0.035);
+                            ctx.fill();
                         } else {
                             var eyeH = Math.max(h * 0.24 * root.blinkScale, h * 0.03);
                             var eyeW = w * 0.076;
@@ -221,6 +267,8 @@ PlasmoidItem {
                                 ctx.fill();
                             }
                         }
+
+                        ctx.restore();
                     }
                 }
 

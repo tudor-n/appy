@@ -5,12 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use gtk4::gdk::Display;
+use gtk4::gdk::{Display, Key};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, DrawingArea, Entry,
-    EventControllerFocus, EventControllerMotion, GestureClick, GestureDrag, Label, Orientation,
+    EventControllerFocus, EventControllerKey, EventControllerMotion, EventControllerScroll,
+    EventControllerScrollFlags, GestureClick, GestureDrag, Label, Orientation, PickFlags,
     PolicyType, ScrolledWindow, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -22,7 +23,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMsg};
 const WS_URL: &str = "ws://127.0.0.1:8001/ws";
 const PILL_BRIDGE_ADDR: &str = "127.0.0.1:8002";
 const VOICE_COOLDOWN: Duration = Duration::from_secs(8);
-const MAX_MESSAGES: usize = 24;
+const MAX_MESSAGES: usize = 500;
 const BLINK_DURATION_MS: f64 = 160.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -63,15 +64,41 @@ impl AppyState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Expression {
+    #[default]
+    Neutral,
+    Happy,
+    Excited,
+    Curious,
+    Surprised,
+    Focused,
+    Skeptical,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BackendEvent {
     Wake,
-    Transcript { text: String, is_final: bool },
-    Status { state: AppyState, label: String },
-    Response { text: String },
-    OpenTool { tool: String, payload: serde_json::Value },
+    Transcript {
+        text: String,
+        is_final: bool,
+    },
+    Status {
+        state: AppyState,
+        label: String,
+    },
+    Response {
+        text: String,
+        #[serde(default)]
+        expression: Expression,
+    },
+    OpenTool {
+        tool: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -90,16 +117,9 @@ enum UiEvent {
 #[derive(Debug, Clone, serde::Serialize)]
 struct PillSyncState {
     state: AppyState,
+    expression: Expression,
     msg_count: usize,
     minimized: bool,
-}
-
-fn format_live_dots(word: &str, step: u128) -> String {
-    match step % 3 {
-        0 => format!("{word}.<span alpha=\"1\">..</span>"),
-        1 => format!("{word}..<span alpha=\"1\">.</span>"),
-        _ => format!("{word}..."),
-    }
 }
 
 fn format_duration(d: Duration) -> String {
@@ -113,11 +133,23 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
+fn format_live_dots(word: &str, step: u128) -> String {
+    match step % 3 {
+        0 => format!("{word}.<span alpha=\"1\">..</span>"),
+        1 => format!("{word}..<span alpha=\"1\">.</span>"),
+        _ => format!("{word}..."),
+    }
+}
+
 struct SharedState {
     state: AppyState,
+    expression: Expression,
     phase: f64,
+    talk_phase: f64,
+    speaking_until: Option<Instant>,
     hovered: bool,
     dragging: bool,
+    locked: bool,
     voice_cooldown_until: Option<Instant>,
     chat_open: bool,
     message_count: usize,
@@ -134,6 +166,7 @@ struct SharedState {
     next_blink: Instant,
     blink_seed: u64,
     active_status_pill: Option<(AppyState, Label, Instant)>,
+    scroll_target: Option<f64>,
 }
 
 impl SharedState {
@@ -146,7 +179,7 @@ impl SharedState {
     }
 
     fn should_show_chat(&self, input_selected: bool) -> bool {
-        if self.hovered || self.dragging || input_selected || self.is_busy() {
+        if self.locked || self.hovered || self.dragging || input_selected || self.is_busy() {
             return true;
         }
         self.voice_cooldown_until
@@ -155,7 +188,6 @@ impl SharedState {
     }
 
     fn next_blink_delay(&mut self) -> Duration {
-        // Simple LCG for natural 2.8s–5.4s human blink intervals without extra crates
         self.blink_seed = self
             .blink_seed
             .wrapping_mul(6364136223846793005)
@@ -178,11 +210,13 @@ impl SharedState {
 fn sync_pill(
     pill_sync: &Arc<Mutex<PillSyncState>>,
     state: AppyState,
+    expression: Expression,
     msg_count: usize,
     minimized: bool,
 ) {
     if let Ok(mut p) = pill_sync.lock() {
         p.state = state;
+        p.expression = expression;
         p.msg_count = msg_count;
         p.minimized = minimized;
     }
@@ -219,6 +253,7 @@ fn spawn_background_services(
                                 let snapshot =
                                     sync.lock().map(|g| g.clone()).unwrap_or(PillSyncState {
                                         state: AppyState::Idle,
+                                        expression: Expression::Neutral,
                                         msg_count: 0,
                                         minimized: true,
                                     });
@@ -278,34 +313,55 @@ fn draw_rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, 
     cr.close_path();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_mascot(
     cr: &gtk4::cairo::Context,
     canvas_w: f64,
     canvas_h: f64,
     state: AppyState,
+    expression: Expression,
     phase: f64,
+    talk_phase: f64,
     wobble_x: f64,
     wobble_y: f64,
     blink_scale: f64,
 ) {
     let _ = cr.save();
 
-    // Center the 96x96 mascot inside the 120x120 padded canvas
     let w = 96.0;
     let h = 96.0;
     let pad_x = (canvas_w - w) * 0.5;
-    let pad_y = (canvas_h - h) * 0.5;
+    let pad_y = canvas_h - h - 12.0; // Extra headroom at top for talking hops
     let cx = canvas_w * 0.5;
-    let cy_pivot = canvas_h * 0.58;
+    let cy_pivot = pad_y + h * 0.62;
 
-    // KDE Wobbly Windows style shear + tilt + squash/stretch
+    // Talking bounce synced to Kokoro audio playback
+    let (talk_dy, talk_sx, talk_sy, talk_rot) = if state == AppyState::Speaking {
+        let bounce = talk_phase.sin().abs();
+        let cadence = bounce * (0.78 + 0.22 * (talk_phase * 0.43).cos().abs());
+        let dy = -cadence * 14.0;
+        let sy = 1.0 + cadence * 0.11 - (1.0 - bounce) * 0.05;
+        let sx = 1.0 - cadence * 0.07 + (1.0 - bounce) * 0.04;
+        let rot = (talk_phase * 0.5).sin() * 0.06;
+        (dy, sx, sy, rot)
+    } else {
+        (0.0, 1.0, 1.0, 0.0)
+    };
+
+    let expr_tilt = if expression == Expression::Curious && !state.is_busy() {
+        0.075
+    } else {
+        0.0
+    };
+
+    // KDE Wobbly Windows shear + tilt + squash/stretch + talking bounce
     let shear_x = (wobble_x * 0.015).clamp(-0.30, 0.30);
-    let rot = (wobble_x * 0.005).clamp(-0.16, 0.16);
+    let rot = (wobble_x * 0.005).clamp(-0.16, 0.16) + talk_rot + expr_tilt;
     let stretch_y = (wobble_y * 0.009).clamp(-0.18, 0.18);
-    let scale_x = 1.0 - stretch_y * 0.55;
-    let scale_y = 1.0 + stretch_y;
+    let scale_x = (1.0 - stretch_y * 0.55) * talk_sx;
+    let scale_y = (1.0 + stretch_y) * talk_sy;
 
-    cr.translate(cx, cy_pivot);
+    cr.translate(cx, cy_pivot + talk_dy);
     cr.rotate(rot);
     cr.transform(gtk4::cairo::Matrix::new(
         scale_x, 0.0, shear_x, scale_y, 0.0, 0.0,
@@ -314,7 +370,7 @@ fn draw_mascot(
 
     // 1. Squircle body
     draw_rounded_rect(cr, w * 0.10, h * 0.22, w * 0.80, h * 0.72, w * 0.24);
-    cr.set_source_rgba(218.0 / 255.0, 216.0 / 255.0, 208.0 / 255.0, 0.92);
+    cr.set_source_rgba(218.0 / 255.0, 216.0 / 255.0, 208.0 / 255.0, 0.94);
     let _ = cr.fill();
 
     // 2. Blush-white leaf
@@ -322,51 +378,155 @@ fn draw_mascot(
     cr.curve_to(w * 0.52, h * 0.06, w * 0.58, h * 0.05, w * 0.67, h * 0.04);
     cr.curve_to(w * 0.66, h * 0.16, w * 0.60, h * 0.21, w * 0.50, h * 0.23);
     cr.close_path();
-    cr.set_source_rgba(251.0 / 255.0, 242.0 / 255.0, 242.0 / 255.0, 0.94);
+    cr.set_source_rgba(251.0 / 255.0, 242.0 / 255.0, 242.0 / 255.0, 0.96);
     let _ = cr.fill();
 
     // 3. Face
     let cy = h * 0.59;
     cr.set_source_rgb(20.0 / 255.0, 20.0 / 255.0, 24.0 / 255.0);
-    match state {
-        AppyState::Booting | AppyState::Thinking | AppyState::Compacting => {
-            let spacing = w * 0.14;
-            let base_x = w * 0.50 - spacing;
-            for i in 0..3 {
-                let offset = (phase - (i as f64 * 0.7)).sin();
-                let y = cy - offset * (h * 0.045);
-                let r = w * (0.042 + 0.008 * offset.max(0.0));
-                cr.arc(base_x + i as f64 * spacing, y, r, 0.0, TAU);
-                let _ = cr.fill();
-            }
+
+    if state.is_busy() {
+        let spacing = w * 0.14;
+        let base_x = w * 0.50 - spacing;
+        for i in 0..3 {
+            let offset = (phase - (i as f64 * 0.7)).sin();
+            let y = cy - offset * (h * 0.045);
+            let r = w * (0.042 + 0.008 * offset.max(0.0));
+            cr.arc(base_x + i as f64 * spacing, y, r, 0.0, TAU);
+            let _ = cr.fill();
         }
-        AppyState::Listening | AppyState::Speaking => {
-            cr.set_line_width((w * 0.06).max(1.6));
-            cr.set_line_cap(gtk4::cairo::LineCap::Round);
-            for &ex in &[w * 0.36, w * 0.64] {
-                cr.move_to(ex - w * 0.07, cy + h * 0.03);
-                cr.curve_to(
-                    ex - w * 0.02,
-                    cy - h * 0.06,
-                    ex + w * 0.02,
-                    cy - h * 0.06,
-                    ex + w * 0.07,
-                    cy + h * 0.03,
-                );
-                let _ = cr.stroke();
-            }
+    } else if state == AppyState::Listening {
+        cr.set_line_width((w * 0.06).max(1.6));
+        cr.set_line_cap(gtk4::cairo::LineCap::Round);
+        for &ex in &[w * 0.36, w * 0.64] {
+            cr.move_to(ex - w * 0.07, cy + h * 0.03);
+            cr.curve_to(
+                ex - w * 0.02,
+                cy - h * 0.06,
+                ex + w * 0.02,
+                cy - h * 0.06,
+                ex + w * 0.07,
+                cy + h * 0.03,
+            );
+            let _ = cr.stroke();
         }
-        AppyState::Idle => {
-            let eye_h = (h * 0.24 * blink_scale).max(h * 0.025);
-            let eye_w = w * 0.072;
-            for &ex in &[w * 0.37, w * 0.63] {
+    } else {
+        match expression {
+            Expression::Neutral => {
+                let eye_h = (h * 0.24 * blink_scale).max(h * 0.025);
+                let eye_w = w * 0.072;
+                for &ex in &[w * 0.37, w * 0.63] {
+                    draw_rounded_rect(
+                        cr,
+                        ex - eye_w * 0.5,
+                        cy - eye_h * 0.5,
+                        eye_w,
+                        eye_h,
+                        eye_w * 0.5,
+                    );
+                    let _ = cr.fill();
+                }
+            }
+            Expression::Happy => {
+                cr.set_line_width((w * 0.06).max(1.6));
+                cr.set_line_cap(gtk4::cairo::LineCap::Round);
+                for &ex in &[w * 0.36, w * 0.64] {
+                    cr.move_to(ex - w * 0.07, cy + h * 0.03);
+                    cr.curve_to(
+                        ex - w * 0.02,
+                        cy - h * 0.065,
+                        ex + w * 0.02,
+                        cy - h * 0.065,
+                        ex + w * 0.07,
+                        cy + h * 0.03,
+                    );
+                    let _ = cr.stroke();
+                }
+            }
+            Expression::Excited => {
+                cr.set_source_rgba(240.0 / 255.0, 128.0 / 255.0, 138.0 / 255.0, 0.42);
+                for &bx in &[w * 0.27, w * 0.73] {
+                    cr.arc(bx, cy + h * 0.09, w * 0.055, 0.0, TAU);
+                    let _ = cr.fill();
+                }
+                cr.set_source_rgb(20.0 / 255.0, 20.0 / 255.0, 24.0 / 255.0);
+                cr.set_line_width((w * 0.062).max(1.6));
+                cr.set_line_cap(gtk4::cairo::LineCap::Round);
+                for &ex in &[w * 0.36, w * 0.64] {
+                    cr.move_to(ex - w * 0.075, cy + h * 0.035);
+                    cr.curve_to(
+                        ex - w * 0.02,
+                        cy - h * 0.095,
+                        ex + w * 0.02,
+                        cy - h * 0.095,
+                        ex + w * 0.075,
+                        cy + h * 0.035,
+                    );
+                    let _ = cr.stroke();
+                }
+            }
+            Expression::Curious => {
+                let left_h = (h * 0.21 * blink_scale).max(h * 0.025);
+                let right_h = (h * 0.27 * blink_scale).max(h * 0.025);
                 draw_rounded_rect(
                     cr,
-                    ex - eye_w * 0.5,
-                    cy - eye_h * 0.5,
-                    eye_w,
+                    w * 0.37 - w * 0.034,
+                    cy - left_h * 0.5 + h * 0.015,
+                    w * 0.068,
+                    left_h,
+                    w * 0.034,
+                );
+                let _ = cr.fill();
+                draw_rounded_rect(
+                    cr,
+                    w * 0.63 - w * 0.042,
+                    cy - right_h * 0.5 - h * 0.02,
+                    w * 0.084,
+                    right_h,
+                    w * 0.042,
+                );
+                let _ = cr.fill();
+            }
+            Expression::Surprised => {
+                let r = w * 0.066;
+                for &ex in &[w * 0.37, w * 0.63] {
+                    cr.arc(ex, cy - h * 0.01, r, 0.0, TAU);
+                    let _ = cr.fill();
+                }
+            }
+            Expression::Focused => {
+                let eye_h = (h * 0.14 * blink_scale).max(h * 0.025);
+                let eye_w = w * 0.092;
+                for &ex in &[w * 0.375, w * 0.625] {
+                    draw_rounded_rect(
+                        cr,
+                        ex - eye_w * 0.5,
+                        cy - eye_h * 0.5 + h * 0.01,
+                        eye_w,
+                        eye_h,
+                        w * 0.035,
+                    );
+                    let _ = cr.fill();
+                }
+            }
+            Expression::Skeptical => {
+                draw_rounded_rect(
+                    cr,
+                    w * 0.37 - w * 0.055,
+                    cy - h * 0.025,
+                    w * 0.11,
+                    h * 0.05,
+                    h * 0.025,
+                );
+                let _ = cr.fill();
+                let eye_h = (h * 0.24 * blink_scale).max(h * 0.025);
+                draw_rounded_rect(
+                    cr,
+                    w * 0.63 - w * 0.036,
+                    cy - eye_h * 0.5 - h * 0.02,
+                    w * 0.072,
                     eye_h,
-                    eye_w * 0.5,
+                    w * 0.036,
                 );
                 let _ = cr.fill();
             }
@@ -398,17 +558,20 @@ fn trim_history(messages_box: &GtkBox) {
     }
 }
 
-fn scroll_to_bottom(scrolled: &ScrolledWindow) {
+fn scroll_to_bottom_smooth(scrolled: &ScrolledWindow, state: &Rc<RefCell<SharedState>>) {
     let scrolled_clone = scrolled.clone();
+    let state_clone = state.clone();
     glib::idle_add_local_once(move || {
         let adj = scrolled_clone.vadjustment();
-        adj.set_value(adj.upper());
+        let max_v = (adj.upper() - adj.page_size()).max(0.0);
+        state_clone.borrow_mut().scroll_target = Some(max_v);
     });
 }
 
 fn append_message_bubble(
     messages_box: &GtkBox,
     scrolled: &ScrolledWindow,
+    state: &Rc<RefCell<SharedState>>,
     text: &str,
     from_user: bool,
 ) {
@@ -447,13 +610,14 @@ fn append_message_bubble(
         bubble_anim.add_css_class("visible");
     });
 
-    scroll_to_bottom(scrolled);
+    scroll_to_bottom_smooth(scrolled, state);
 }
 
 fn append_status_pill(
     messages_box: &GtkBox,
     scrolled: &ScrolledWindow,
-    text: &str,
+    state: &Rc<RefCell<SharedState>>,
+    markup: &str,
 ) -> Label {
     trim_history(messages_box);
 
@@ -463,7 +627,7 @@ fn append_status_pill(
     pill.set_halign(Align::Start);
 
     let label = Label::new(None);
-    label.set_markup(text);
+    label.set_markup(markup);
     label.add_css_class("status-pill-text");
     pill.append(&label);
     messages_box.append(&pill);
@@ -473,7 +637,7 @@ fn append_status_pill(
         pill_anim.add_css_class("visible");
     });
 
-    scroll_to_bottom(scrolled);
+    scroll_to_bottom_smooth(scrolled, state);
     label
 }
 
@@ -486,13 +650,56 @@ fn main() {
         let css = CssProvider::new();
         css.load_from_data(
             r#"
-            window {
+            window, window.background {
                 background-color: transparent;
-                background: none;
+                background-image: none;
+                box-shadow: none;
                 font-family: "SF Pro Text", "Inter", sans-serif;
             }
 
-            /* macOS-style spring container */
+            .appy-shell {
+                background-color: transparent;
+                border: none;
+                border-radius: 28px;
+                padding: 16px 18px 14px 16px;
+                box-shadow: none;
+                transition: background-color 240ms cubic-bezier(0.22, 1.0, 0.36, 1.0);
+            }
+
+            .appy-shell.glass-locked {
+                background-color: rgba(24, 24, 22, 0.84);
+                border: none;
+                box-shadow: none;
+            }
+
+            .brand-header {
+                opacity: 0;
+                transform: translateY(-6px);
+                margin-left: 6px;
+                margin-top: 2px;
+                transition:
+                    opacity 220ms ease,
+                    transform 260ms cubic-bezier(0.22, 1.1, 0.36, 1.0);
+            }
+            .appy-shell.glass-locked .brand-header {
+                opacity: 1;
+                transform: translateY(0px);
+            }
+            .brand-title {
+                font-family: "SF Pro Display", "SF Pro Text", "Inter", sans-serif;
+                font-size: 20px;
+                font-weight: 600;
+                color: #f5f5f7;
+                letter-spacing: -0.03em;
+            }
+            .brand-subtitle {
+                font-family: "SF Pro Text", "Inter", sans-serif;
+                font-size: 11px;
+                font-weight: 500;
+                color: rgba(245, 245, 247, 0.52);
+                letter-spacing: -0.01em;
+            }
+
             .chat-panel {
                 opacity: 0;
                 transform: translateX(-28px) scale(0.94);
@@ -509,8 +716,12 @@ fn main() {
                 background: transparent;
                 border: none;
             }
+            scrollbar {
+                opacity: 0;
+                min-width: 0;
+                min-height: 0;
+            }
 
-            /* Borderless solid-black comic / WhatsApp bubbles */
             .bubble {
                 background-color: #000000;
                 border: none;
@@ -545,7 +756,6 @@ fn main() {
                 margin-top: 2px;
             }
 
-            /* White status pills for thinking / loading / compacting -> thought / loaded / compacted */
             .status-pill {
                 background-color: #ffffff;
                 border: none;
@@ -571,7 +781,6 @@ fn main() {
                 letter-spacing: -0.01em;
             }
 
-            /* Full-width borderless gray pill input bar */
             .input-bubble {
                 background-color: #242626;
                 border: none;
@@ -609,9 +818,13 @@ fn main() {
 
         let state = Rc::new(RefCell::new(SharedState {
             state: AppyState::Idle,
+            expression: Expression::Neutral,
             phase: 0.0,
+            talk_phase: 0.0,
+            speaking_until: None,
             hovered: false,
             dragging: false,
+            locked: false,
             voice_cooldown_until: None,
             chat_open: false,
             message_count: 0,
@@ -628,10 +841,12 @@ fn main() {
             next_blink: Instant::now() + Duration::from_millis(3200),
             blink_seed: 0x517cc1b727220a95,
             active_status_pill: None,
+            scroll_target: None,
         }));
 
         let pill_sync = Arc::new(Mutex::new(PillSyncState {
             state: AppyState::Idle,
+            expression: Expression::Neutral,
             msg_count: 0,
             minimized: true,
         }));
@@ -653,31 +868,62 @@ fn main() {
 
         let mascot = DrawingArea::new();
         mascot.set_content_width(120);
-        mascot.set_content_height(120);
+        mascot.set_content_height(136);
+        mascot.set_vexpand(true);
         mascot.set_valign(Align::End);
         let state_draw = state.clone();
         mascot.set_draw_func(move |_area, cr, width, height| {
             let st = state_draw.borrow();
+            let wobble_mul = if st.locked { 0.3 } else { 1.0 };
             draw_mascot(
                 cr,
                 width as f64,
                 height as f64,
                 st.state,
+                st.expression,
                 st.phase,
-                st.wobble_x,
-                st.wobble_y,
+                st.talk_phase,
+                st.wobble_x * wobble_mul,
+                st.wobble_y * wobble_mul,
                 st.blink_scale,
             );
         });
+
+        let brand_title = Label::builder()
+            .label("Appy")
+            .xalign(0.0)
+            .halign(Align::Start)
+            .build();
+        brand_title.add_css_class("brand-title");
+
+        let brand_subtitle = Label::builder()
+            .label("AI assistant v4.0")
+            .xalign(0.0)
+            .halign(Align::Start)
+            .build();
+        brand_subtitle.add_css_class("brand-subtitle");
+
+        let brand_header = GtkBox::new(Orientation::Vertical, 1);
+        brand_header.add_css_class("brand-header");
+        brand_header.set_halign(Align::Start);
+        brand_header.set_valign(Align::Start);
+        brand_header.set_can_target(false);
+        brand_header.append(&brand_title);
+        brand_header.append(&brand_subtitle);
+
+        let left_col = GtkBox::new(Orientation::Vertical, 6);
+        left_col.set_valign(Align::Fill);
+        left_col.append(&brand_header);
+        left_col.append(&mascot);
 
         let messages_box = GtkBox::new(Orientation::Vertical, 6);
         messages_box.set_valign(Align::End);
 
         let scrolled = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
-            .vscrollbar_policy(PolicyType::Automatic)
+            .vscrollbar_policy(PolicyType::External)
             .propagate_natural_height(true)
-            .max_content_height(300)
+            .max_content_height(360)
             .width_request(290)
             .child(&messages_box)
             .build();
@@ -709,16 +955,69 @@ fn main() {
         chat_panel.set_sensitive(false);
         chat_panel.append(&chat_wobble_box);
 
-        let root = GtkBox::new(Orientation::Horizontal, 12);
+        let root = GtkBox::new(Orientation::Horizontal, 10);
+        root.add_css_class("appy-shell");
         root.set_valign(Align::End);
-        root.set_margin_end(16);
-        root.set_margin_top(12);
-        root.set_margin_bottom(8);
-        root.append(&mascot);
+        root.set_margin_start(18);
+        root.set_margin_end(18);
+        root.set_margin_top(16);
+        root.set_margin_bottom(16);
+        root.append(&left_col);
         root.append(&chat_panel);
-        window.set_child(Some(&root));
 
-        // Hover on/off main overlay
+        // Untransformed outer wrapper isolates pointer & drag coordinates from CSS wobble
+        let outer = GtkBox::new(Orientation::Horizontal, 0);
+        outer.append(&root);
+        window.set_child(Some(&outer));
+
+        let scroll_ctrl = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+        let st_scroll = state.clone();
+        let sw_scroll = scrolled.clone();
+        scroll_ctrl.connect_scroll(move |_, _dx, dy| {
+            let mut s = st_scroll.borrow_mut();
+            if s.locked || s.chat_open {
+                let adj = sw_scroll.vadjustment();
+                let max_v = (adj.upper() - adj.page_size()).max(0.0);
+                let base = s.scroll_target.unwrap_or_else(|| adj.value());
+                s.scroll_target = Some((base + dy * 64.0).clamp(0.0, max_v));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        chat_panel.add_controller(scroll_ctrl);
+
+        let key_ctrl = EventControllerKey::new();
+        let st_key = state.clone();
+        let sw_key = scrolled.clone();
+        let root_key = root.clone();
+        key_ctrl.connect_key_pressed(move |_, keyval, _, _| {
+            let mut s = st_key.borrow_mut();
+            if !s.locked {
+                return glib::Propagation::Proceed;
+            }
+            let delta = match keyval {
+                Key::Up => Some(-72.0),
+                Key::Down => Some(72.0),
+                Key::Page_Up => Some(-220.0),
+                Key::Page_Down => Some(220.0),
+                Key::Escape => {
+                    s.locked = false;
+                    root_key.remove_css_class("glass-locked");
+                    return glib::Propagation::Stop;
+                }
+                _ => None,
+            };
+            if let Some(d) = delta {
+                let adj = sw_key.vadjustment();
+                let max_v = (adj.upper() - adj.page_size()).max(0.0);
+                let base = s.scroll_target.unwrap_or_else(|| adj.value());
+                s.scroll_target = Some((base + d).clamp(0.0, max_v));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(key_ctrl);
+
         let motion = EventControllerMotion::new();
         let st_enter = state.clone();
         motion.connect_enter(move |_, _, _| {
@@ -730,34 +1029,56 @@ fn main() {
             s.hovered = false;
             s.voice_cooldown_until = None;
         });
-        root.add_controller(motion);
+        outer.add_controller(motion);
 
-        // Double-click mascot -> minimize into native KDE panel pill
-        let click = GestureClick::new();
+        let left_click = GestureClick::new();
+        left_click.set_button(1);
         let win_min = window.clone();
         let st_min = state.clone();
         let sync_min = pill_sync.clone();
-        click.connect_pressed(move |_, n_press, _, _| {
+        left_click.connect_pressed(move |_, n_press, _, _| {
             if n_press == 2 {
                 win_min.set_visible(false);
                 let s = st_min.borrow();
-                sync_pill(&sync_min, s.state, s.message_count, true);
+                sync_pill(&sync_min, s.state, s.expression, s.message_count, true);
             }
         });
-        mascot.add_controller(click);
+        mascot.add_controller(left_click);
 
-        // Drag mascot (with Wayland cooldown)
+        let right_click = GestureClick::new();
+        right_click.set_button(3);
+        let st_lock = state.clone();
+        let root_lock = root.clone();
+        right_click.connect_pressed(move |_, n_press, _, _| {
+            if n_press == 2 {
+                let mut s = st_lock.borrow_mut();
+                s.locked = !s.locked;
+                if s.locked {
+                    root_lock.add_css_class("glass-locked");
+                } else {
+                    root_lock.remove_css_class("glass-locked");
+                }
+            }
+        });
+        mascot.add_controller(right_click);
+
         let drag = GestureDrag::new();
         let st_drag_start = state.clone();
-        drag.connect_drag_begin(move |_, _, _| {
+        let outer_drag = outer.clone();
+        let mascot_drag = mascot.clone();
+        drag.connect_drag_begin(move |_, start_x, start_y| {
+            let hit_mascot = outer_drag
+                .pick(start_x, start_y, PickFlags::DEFAULT)
+                .map(|w| w == mascot_drag.clone().upcast::<gtk4::Widget>())
+                .unwrap_or(false);
             let mut s = st_drag_start.borrow_mut();
-            s.dragging = true;
+            s.dragging = hit_mascot;
             s.pending_drag = None;
         });
         let st_drag_upd = state.clone();
         drag.connect_drag_update(move |_, dx, dy| {
             let mut s = st_drag_upd.borrow_mut();
-            if s.drag_cooldown == 0 {
+            if s.dragging && s.drag_cooldown == 0 {
                 s.pending_drag = Some((dx, dy));
             }
         });
@@ -767,14 +1088,12 @@ fn main() {
             s.dragging = false;
             s.pending_drag = None;
         });
-        mascot.add_controller(drag);
+        outer.add_controller(drag);
 
-        // Wire background services (Panel Pill Bridge + WebSocket)
         let (ui_tx, ui_rx) = async_channel::unbounded::<UiEvent>();
         let (ws_out_tx, ws_out_rx) = mpsc::unbounded_channel::<ClientEvent>();
         spawn_background_services(ui_tx, ws_out_rx, pill_sync.clone());
 
-        // Submitting text from bottom bar
         let st_sub = state.clone();
         let win_sub = window.clone();
         let sync_sub = pill_sync.clone();
@@ -785,23 +1104,32 @@ fn main() {
         input_entry.connect_activate(move |entry| {
             let txt = entry.text().trim().to_string();
             if !txt.is_empty() {
-                append_message_bubble(&msgs_sub, &scroll_sub, &txt, true);
+                append_message_bubble(&msgs_sub, &scroll_sub, &st_sub, &txt, true);
                 let _ = ws_tx_sub.send(ClientEvent::UserText { text: txt });
                 entry.set_text("");
 
                 let mut s = st_sub.borrow_mut();
                 s.finish_active_status();
-                let status_label =
-                    append_status_pill(&msgs_sub, &scroll_sub, &format_live_dots("thinking", 0));
+                let status_label = append_status_pill(
+                    &msgs_sub,
+                    &scroll_sub,
+                    &st_sub,
+                    &format_live_dots("thinking", 0),
+                );
                 s.active_status_pill = Some((AppyState::Thinking, status_label, Instant::now()));
                 s.message_count += 1;
                 s.state = AppyState::Thinking;
-                sync_pill(&sync_sub, s.state, s.message_count, !win_sub.is_visible());
+                sync_pill(
+                    &sync_sub,
+                    s.state,
+                    s.expression,
+                    s.message_count,
+                    !win_sub.is_visible(),
+                );
                 mascot_sub.queue_draw();
             }
         });
 
-        // Handle Panel Pill and WebSocket events
         let st_ev = state.clone();
         let win_ev = window.clone();
         let sync_ev = pill_sync.clone();
@@ -817,7 +1145,7 @@ fn main() {
                         let show_main = !win_ev.is_visible();
                         win_ev.set_visible(show_main);
                         let s = st_ev.borrow();
-                        sync_pill(&sync_ev, s.state, s.message_count, !show_main);
+                        sync_pill(&sync_ev, s.state, s.expression, s.message_count, !show_main);
                     }
                     UiEvent::Quit => app_ev.quit(),
                     UiEvent::Backend(bev) => {
@@ -832,13 +1160,18 @@ fn main() {
                                 s.state = AppyState::Listening;
                                 if is_final {
                                     input_ev.set_text("");
-                                    append_message_bubble(&msgs_ev, &scroll_ev, &text, true);
+                                    drop(s);
+                                    append_message_bubble(&msgs_ev, &scroll_ev, &st_ev, &text, true);
+                                    s = st_ev.borrow_mut();
                                     s.message_count += 1;
                                 } else {
                                     input_ev.set_text(&text);
                                 }
                             }
-                            BackendEvent::Status { state: next_state, label } => {
+                            BackendEvent::Status {
+                                state: next_state,
+                                label,
+                            } => {
                                 let already_same_busy = s
                                     .active_status_pill
                                     .as_ref()
@@ -850,51 +1183,80 @@ fn main() {
                                         s.finish_active_status();
                                         let text = next_state
                                             .live_status_text()
-                                            .unwrap_or(label.as_str());
+                                            .unwrap_or(label.as_str())
+                                            .to_string();
+                                        drop(s);
                                         let lbl = append_status_pill(
                                             &msgs_ev,
                                             &scroll_ev,
-                                            &format_live_dots(text, 0),
+                                            &st_ev,
+                                            &format_live_dots(&text, 0),
                                         );
+                                        s = st_ev.borrow_mut();
                                         s.active_status_pill =
                                             Some((next_state, lbl, Instant::now()));
                                     }
                                 } else {
                                     s.finish_active_status();
                                 }
+
+                                if next_state == AppyState::Speaking {
+                                    if s.state != AppyState::Speaking {
+                                        s.talk_phase = 0.0;
+                                    }
+                                    s.speaking_until =
+                                        Some(Instant::now() + Duration::from_secs(30));
+                                } else if next_state == AppyState::Idle {
+                                    s.speaking_until = None;
+                                    s.talk_phase = 0.0;
+                                }
                                 s.state = next_state;
                             }
-                            BackendEvent::Response { text } => {
+                            BackendEvent::Response { text, expression } => {
                                 s.finish_active_status();
-                                s.state = AppyState::Speaking;
-                                append_message_bubble(&msgs_ev, &scroll_ev, &text, false);
+                                s.expression = expression;
+                                if s.state != AppyState::Speaking {
+                                    s.state = AppyState::Speaking;
+                                    s.talk_phase = 0.0;
+                                    let speak_ms = (1600 + (text.len() as u64 * 35)).min(5500);
+                                    s.speaking_until =
+                                        Some(Instant::now() + Duration::from_millis(speak_ms));
+                                }
+                                drop(s);
+                                append_message_bubble(&msgs_ev, &scroll_ev, &st_ev, &text, false);
+                                s = st_ev.borrow_mut();
                                 s.message_count += 1;
                             }
                             BackendEvent::OpenTool { tool, payload } => {
                                 println!("OpenTool requested: {tool} -> {payload}");
                             }
                         }
-                        sync_pill(&sync_ev, s.state, s.message_count, !win_ev.is_visible());
+                        sync_pill(
+                            &sync_ev,
+                            s.state,
+                            s.expression,
+                            s.message_count,
+                            !win_ev.is_visible(),
+                        );
                         mascot_ev.queue_draw();
                     }
                 }
             }
         });
 
-        // 60fps animation, blinking, smooth drag + wobbly spring physics, & chat sync
         let st_tick = state.clone();
         let win_tick = window.clone();
         let sync_tick = pill_sync.clone();
         let mascot_tick = mascot.clone();
         let panel_tick = chat_panel.clone();
         let focus_tick = input_focus.clone();
+        let sw_tick = scrolled.clone();
         let wobble_css_tick = wobble_css.clone();
         let mut was_wobbling = false;
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut s = st_tick.borrow_mut();
             let now = Instant::now();
 
-            // 1. Smooth drag commit with Wayland cooldown
             if s.drag_cooldown > 0 {
                 s.drag_cooldown -= 1;
                 s.pending_drag = None;
@@ -920,7 +1282,6 @@ fn main() {
                 }
             }
 
-            // 2. Spring-damper wobble physics
             s.wobble_vx = (s.wobble_vx - s.wobble_x * 0.22) * 0.78;
             s.wobble_vy = (s.wobble_vy - s.wobble_y * 0.22) * 0.78;
             s.wobble_x += s.wobble_vx;
@@ -943,41 +1304,43 @@ fn main() {
                 let ty = (s.wobble_y * 0.35).clamp(-10.0, 10.0);
                 let skew_x = (s.wobble_x * 0.35).clamp(-8.0, 8.0);
                 let rot = (s.wobble_x * 0.12).clamp(-3.5, 3.5);
-                wobble_css_tick.load_from_data(&format!(
-                    ".chat-wobble {{ transform: translate({tx:.2}px, {ty:.2}px) skewX({skew_x:.2}deg) rotate({rot:.2}deg); }}"
-                ));
+
+                if s.locked {
+                    let g_tx = (tx * 0.75).clamp(-10.0, 10.0);
+                    let g_ty = (ty * 0.75).clamp(-8.0, 8.0);
+                    let g_skew = (skew_x * 0.60).clamp(-4.5, 4.5);
+                    let g_rot = (rot * 0.65).clamp(-2.2, 2.2);
+                    wobble_css_tick.load_from_data(&format!(
+                        ".appy-shell.glass-locked {{ transform: translate({g_tx:.2}px, {g_ty:.2}px) skewX({g_skew:.2}deg) rotate({g_rot:.2}deg); }}\n.chat-wobble {{ transform: none; }}"
+                    ));
+                } else {
+                    wobble_css_tick.load_from_data(&format!(
+                        ".appy-shell.glass-locked {{ transform: none; }}\n.chat-wobble {{ transform: translate({tx:.2}px, {ty:.2}px) skewX({skew_x:.2}deg) rotate({rot:.2}deg); }}"
+                    ));
+                }
                 was_wobbling = true;
             } else if was_wobbling {
-                wobble_css_tick.load_from_data(".chat-wobble { transform: none; }");
+                wobble_css_tick.load_from_data(
+                    ".appy-shell.glass-locked, .chat-wobble { transform: none; }",
+                );
                 was_wobbling = false;
             }
 
-            // 3. Natural human blinking (Idle state)
-            let mut needs_blink_draw = false;
-            if s.state == AppyState::Idle {
-                if let Some(start) = s.blink_start {
-                    let elapsed = now.duration_since(start).as_secs_f64() * 1000.0;
-                    if elapsed >= BLINK_DURATION_MS {
-                        s.blink_scale = 1.0;
-                        s.blink_start = None;
-                        let delay = s.next_blink_delay();
-                        s.next_blink = now + delay;
-                    } else {
-                        let t = elapsed / BLINK_DURATION_MS;
-                        // Smooth sine close & open
-                        s.blink_scale = 1.0 - (t * PI).sin();
-                    }
-                    needs_blink_draw = true;
-                } else if now >= s.next_blink {
-                    s.blink_start = Some(now);
+            if let Some(target) = s.scroll_target {
+                let adj = sw_tick.vadjustment();
+                let max_v = (adj.upper() - adj.page_size()).max(0.0);
+                let clamped = target.clamp(0.0, max_v);
+                let cur = adj.value();
+                let diff = clamped - cur;
+                if diff.abs() < 0.6 {
+                    adj.set_value(clamped);
+                    s.scroll_target = None;
+                } else {
+                    adj.set_value(cur + diff * 0.22);
+                    s.scroll_target = Some(clamped);
                 }
-            } else if s.blink_start.is_some() || (s.blink_scale - 1.0).abs() > f64::EPSILON {
-                s.blink_start = None;
-                s.blink_scale = 1.0;
-                needs_blink_draw = true;
             }
 
-            // Animate live status pill dots (. -> .. -> ...) without resizing the pill
             if let Some((st, ref label, started)) = s.active_status_pill {
                 if let Some(live_word) = st.live_status_text() {
                     let step = started.elapsed().as_millis() / 400;
@@ -988,7 +1351,29 @@ fn main() {
                 }
             }
 
-            // 4. Chat panel open/close sync
+            let mut needs_redraw = is_wobbling;
+            if !s.is_busy() && s.state != AppyState::Listening {
+                if let Some(start) = s.blink_start {
+                    let elapsed = now.duration_since(start).as_secs_f64() * 1000.0;
+                    if elapsed >= BLINK_DURATION_MS {
+                        s.blink_scale = 1.0;
+                        s.blink_start = None;
+                        let delay = s.next_blink_delay();
+                        s.next_blink = now + delay;
+                    } else {
+                        let t = elapsed / BLINK_DURATION_MS;
+                        s.blink_scale = 1.0 - (t * PI).sin();
+                    }
+                    needs_redraw = true;
+                } else if now >= s.next_blink {
+                    s.blink_start = Some(now);
+                }
+            } else if s.blink_start.is_some() || (s.blink_scale - 1.0).abs() > f64::EPSILON {
+                s.blink_start = None;
+                s.blink_scale = 1.0;
+                needs_redraw = true;
+            }
+
             let input_selected = win_tick.is_active() && focus_tick.contains_focus();
             let show = s.should_show_chat(input_selected);
             if s.chat_open != show {
@@ -998,25 +1383,50 @@ fn main() {
                     panel_tick.add_css_class("open");
                 } else {
                     panel_tick.remove_css_class("open");
+                    if s.state == AppyState::Idle && s.expression != Expression::Neutral {
+                        s.expression = Expression::Neutral;
+                        sync_pill(
+                            &sync_tick,
+                            s.state,
+                            s.expression,
+                            s.message_count,
+                            !win_tick.is_visible(),
+                        );
+                        needs_redraw = true;
+                    }
                 }
             }
 
-            // 5. Mascot redraws
             if s.is_busy() {
                 s.phase = (s.phase + 0.14) % TAU;
-                mascot_tick.queue_draw();
-            } else if is_wobbling || needs_blink_draw {
-                mascot_tick.queue_draw();
-            } else if s.state == AppyState::Speaking && !show {
-                s.state = AppyState::Idle;
-                sync_pill(&sync_tick, s.state, s.message_count, !win_tick.is_visible());
+                needs_redraw = true;
+            } else if s.state == AppyState::Speaking {
+                let still_speaking = s.speaking_until.map(|u| now < u).unwrap_or(false);
+                if still_speaking {
+                    s.talk_phase = (s.talk_phase + 0.28) % (TAU * 10.0);
+                    needs_redraw = true;
+                } else {
+                    s.state = AppyState::Idle;
+                    s.speaking_until = None;
+                    s.talk_phase = 0.0;
+                    sync_pill(
+                        &sync_tick,
+                        s.state,
+                        s.expression,
+                        s.message_count,
+                        !win_tick.is_visible(),
+                    );
+                    needs_redraw = true;
+                }
+            }
+
+            if needs_redraw {
                 mascot_tick.queue_draw();
             }
 
             glib::ControlFlow::Continue
         });
 
-        // Start minimized in the KDE panel pill
         window.set_visible(false);
     });
 

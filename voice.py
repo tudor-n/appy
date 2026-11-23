@@ -8,9 +8,13 @@ from kokoro_onnx import Kokoro
 
 
 class Speaker:
-    def __init__(self):
+    def __init__(self, on_speak_start=None, on_speak_end=None):
         ort.set_default_logger_severity(3)
         ort.preload_dlls()
+
+        self.on_speak_start = on_speak_start
+        self.on_speak_end = on_speak_end
+        self._is_playing = False
 
         model = os.getenv("KOKORO_MODEL", "kokoro-v1.0.onnx")
         voices = os.getenv("KOKORO_VOICES", "voices-v1.0.bin")
@@ -24,8 +28,10 @@ class Speaker:
         threading.Thread(target=self._synth_worker, daemon=True).start()
         threading.Thread(target=self._play_worker, daemon=True).start()
         threading.Thread(
-          target=lambda: self.kokoro.create("a", voice=self.voice, speed=self.speed, lang="en-us"),
-          daemon=True,
+            target=lambda: self.kokoro.create(
+                "a", voice=self.voice, speed=self.speed, lang="en-us"
+            ),
+            daemon=True,
         ).start()
 
     def _synth_worker(self):
@@ -52,8 +58,19 @@ class Speaker:
                 if samples is None:
                     self.audio_queue.task_done()
                     break
+
+                if not self._is_playing:
+                    self._is_playing = True
+                    if self.on_speak_start:
+                        self.on_speak_start()
+
                 stream.write(samples)
                 self.audio_queue.task_done()
+
+                if self.audio_queue.empty() and self.speech_queue.unfinished_tasks == 0:
+                    self._is_playing = False
+                    if self.on_speak_end:
+                        self.on_speak_end()
 
     def speak(self, text: str):
         clean = text.strip()
