@@ -1,0 +1,14 @@
+[package]
+name = "appy-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iced = { version = "0.14", features = ["canvas", "tokio"] }
+iced_exwlshell = "0.21"
+ksni = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

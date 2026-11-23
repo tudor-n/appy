@@ -1,13 +1,22 @@
 import collections
 import os
 import queue
+import subprocess
 import threading
+import time
 import numpy as np
-import sounddevice as sd
+import onnxruntime as ort
 import torch
 from faster_whisper import WhisperModel
+from huggingface_hub import hf_hub_download
+from silero_vad import load_silero_vad
+from transformers import WhisperFeatureExtractor
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
+
+SAMPLE_RATE = 16000
+CHUNK_SIZE = 512  # 32ms at 16kHz
+SMART_TURN_SAMPLES = SAMPLE_RATE * 8  # 8-second window
 
 JUNK_PHRASES = {
     "thank you", "thank you.", "thanks for watching", "thanks for watching.",
@@ -15,30 +24,90 @@ JUNK_PHRASES = {
 }
 
 
+class SmartTurnDetector:
+    """Pipecat Smart Turn v3.2 (8MB int8 ONNX on CPU)."""
+
+    def __init__(self):
+        model_path = hf_hub_download(
+            repo_id="pipecat-ai/smart-turn-v3",
+            filename="smart-turn-v3.2-cpu.onnx",
+        )
+        so = ort.SessionOptions()
+        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        so.inter_op_num_threads = 1
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        self.session = ort.InferenceSession(
+            model_path, sess_options=so, providers=["CPUExecutionProvider"]
+        )
+        self.extractor = WhisperFeatureExtractor(chunk_length=8)
+
+    def is_complete(self, audio: np.ndarray) -> tuple[bool, float]:
+        # Keep the last 8s; zero-pad at the BEGINNING so speech ends at the right edge
+        if len(audio) > SMART_TURN_SAMPLES:
+            window = audio[-SMART_TURN_SAMPLES:]
+        else:
+            window = np.pad(audio, (SMART_TURN_SAMPLES - len(audio), 0), mode="constant")
+
+        features = self.extractor(
+            window,
+            sampling_rate=SAMPLE_RATE,
+            return_tensors="np",
+            padding="max_length",
+            max_length=SMART_TURN_SAMPLES,
+            truncation=True,
+            do_normalize=True,
+        )["input_features"].astype(np.float32)
+
+        prob = float(self.session.run(None, {"input_features": features})[0][0].item())
+        return prob > 0.5, prob
+
+
 class Ear:
     def __init__(self):
-        model_size = os.getenv("WHISPER_MODEL", "small.en")
+        print("[hearing] Loading Silero VAD (ONNX)...", flush=True)
+        self.vad = load_silero_vad(onnx=True)
+
+        print("[hearing] Loading Smart Turn v3.2 (CPU)...", flush=True)
+        self.turn_detector = SmartTurnDetector()
+
+        model_size = os.getenv("WHISPER_MODEL", "turbo")
         device = os.getenv("WHISPER_DEVICE", "cuda")
         compute = os.getenv("WHISPER_COMPUTE", "float16")
-
         print(f"[hearing] Loading Whisper ({model_size}) on {device}...", flush=True)
-        self.whisper = WhisperModel(model_size, device=device, compute_type=compute)
+        self.asr = WhisperModel(model_size, device=device, compute_type=compute)
 
-        print("[hearing] Loading Silero VAD...", flush=True)
-        self.vad, _ = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-            trust_repo=True,
-        )
-        # Silero VAD is tiny (~2MB) and runs in <0.2ms on CPU—keeps VRAM free
-        self.vad.to("cpu")
-
-        self.sample_rate = 16000
-        self.chunk_size = 512
         self.queue = queue.Queue()
         self.running = False
         self.paused = False
+        self._proc = None
+        self._bt_card = None
+
+    def _set_bt_profile(self, profile: str) -> str | None:
+        """Flip connected Bluetooth card to HFP or back to A2DP."""
+        try:
+            out = subprocess.check_output(["pactl", "list", "cards", "short"], text=True)
+            for line in out.splitlines():
+                if "bluez_card." in line:
+                    card = line.split()[1]
+                    subprocess.run(
+                        ["pactl", "set-card-profile", card, profile],
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return card
+        except Exception:
+            pass
+        return None
+
+    def _find_bt_source(self) -> str | None:
+        try:
+            out = subprocess.check_output(["pactl", "list", "sources", "short"], text=True)
+            for line in out.splitlines():
+                if "bluez_input." in line:
+                    return line.split()[1]
+        except Exception:
+            pass
+        return None
 
     def start(self):
         self.running = True
@@ -46,6 +115,13 @@ class Ear:
 
     def stop(self):
         self.running = False
+        if self._proc:
+            self._proc.terminate()
+        if self._bt_card:
+            subprocess.run(
+                ["pactl", "set-card-profile", self._bt_card, "a2dp-sink"],
+                stderr=subprocess.DEVNULL,
+            )
 
     def pause(self):
         self.paused = True
@@ -54,72 +130,126 @@ class Ear:
         self.paused = False
 
     def _vad_loop(self):
-        ring_buffer = collections.deque(maxlen=15)  # ~0.5s pre-roll
+        ring_buffer = collections.deque(maxlen=15)  # ~480ms pre-roll
         buffer = []
         is_speaking = False
         speech_chunks = 0
         silence_chunks = 0
-        max_silence = int((self.sample_rate / self.chunk_size) * 0.6)  # ~0.6s silence
+        checked_pause = False
 
-        with sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-            blocksize=self.chunk_size,
-        ) as stream:
+        # 200ms pause -> ask Smart Turn; 2.0s pause -> force-close fallback
+        smart_turn_chunks = int((SAMPLE_RATE / CHUNK_SIZE) * 0.20)
+        max_silence_chunks = int((SAMPLE_RATE / CHUNK_SIZE) * 2.0)
+
+        cmd = [
+            "parec",
+            f"--rate={SAMPLE_RATE}",
+            "--channels=1",
+            "--format=float32le",
+        ]
+        mic_device = os.getenv("MIC_DEVICE") or self._find_bt_source()
+        if mic_device:
+            print(f"[hearing] Using mic: {mic_device}", flush=True)
+            subprocess.run(
+                ["pactl", "set-source-mute", mic_device, "0"],
+                stderr=subprocess.DEVNULL,
+            )
+            cmd.extend(["-d", mic_device])
+
+        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        if mic_device and "bluez_input." in mic_device:
+            self._bt_card = self._set_bt_profile("headset-head-unit")
+
+        chunk_bytes = CHUNK_SIZE * 4  # 512 float32 samples = 2048 bytes
+
+        try:
             while self.running:
-                audio_chunk, overflow = stream.read(self.chunk_size)
-                if overflow or self.paused:
+                raw = self._proc.stdout.read(chunk_bytes)
+                if len(raw) < chunk_bytes:
+                    break
+                if self.paused:
                     is_speaking = False
                     speech_chunks = 0
+                    silence_chunks = 0
+                    checked_pause = False
                     buffer.clear()
                     continue
 
-                audio_np = audio_chunk.flatten()
+                audio_np = np.frombuffer(raw, dtype=np.float32).copy()
                 ring_buffer.append(audio_np)
 
-                with torch.no_grad():
-                    speech_prob = self.vad(
-                        torch.from_numpy(audio_np).unsqueeze(0), self.sample_rate
-                    ).item()
+                speech_prob = self.vad(
+                    torch.from_numpy(audio_np), SAMPLE_RATE
+                ).item()
 
                 if speech_prob > 0.45:
                     if not is_speaking:
                         speech_chunks += 1
-                        if speech_chunks >= 3:  # ~96ms of sustained speech
+                        if speech_chunks >= 3:  # ~96ms sustained speech
                             is_speaking = True
                             silence_chunks = 0
+                            checked_pause = False
                             buffer = list(ring_buffer)
                     else:
                         buffer.append(audio_np)
                         silence_chunks = 0
+                        checked_pause = False
                 else:
                     speech_chunks = 0
                     if is_speaking:
                         buffer.append(audio_np)
                         silence_chunks += 1
-                        if silence_chunks > max_silence:
+
+                        should_finish = False
+                        if silence_chunks >= smart_turn_chunks and not checked_pause:
+                            checked_pause = True
+                            t0 = time.monotonic()
+                            complete, prob = self.turn_detector.is_complete(
+                                np.concatenate(buffer)
+                            )
+                            dt_ms = (time.monotonic() - t0) * 1000
+                            if complete:
+                                print(
+                                    f"[turn: {dt_ms:.0f}ms, p={prob:.2f}] ",
+                                    end="",
+                                    flush=True,
+                                )
+                                should_finish = True
+                        elif silence_chunks >= max_silence_chunks:
+                            should_finish = True
+
+                        if should_finish:
                             is_speaking = False
+                            silence_chunks = 0
+                            checked_pause = False
                             full_audio = np.concatenate(buffer)
                             buffer = []
                             threading.Thread(
-                                target=self._transcribe, args=(full_audio,), daemon=True
+                                target=self._transcribe,
+                                args=(full_audio,),
+                                daemon=True,
                             ).start()
+        finally:
+            self._proc.terminate()
 
-    def _transcribe(self, audio_array):
-        if np.abs(audio_array).mean() < 0.005:
+    def _transcribe(self, audio_array: np.ndarray):
+        if np.abs(audio_array).mean() < 0.004:
             return
 
-        segments, _ = self.whisper.transcribe(
+        t0 = time.monotonic()
+        segments, _ = self.asr.transcribe(
             audio_array,
             language="en",
-            beam_size=1,
+            beam_size=3,
             condition_on_previous_text=False,
-            initial_prompt="Appy, Dummy, Fifi",
+            no_speech_threshold=0.6,
+            log_prob_threshold=-1.0,
+            initial_prompt="Hey Appy, this is Tudor talking about Dummy, Fifi, Sibiu, Atlas, and Jarvis.",
         )
         text = " ".join(s.text.strip() for s in segments).strip()
+        dt_ms = (time.monotonic() - t0) * 1000
 
-        if len(text) < 3:
+        if len(text) < 2:
             return
 
         # Filter repetitive hallucinations
@@ -131,6 +261,7 @@ class Ear:
         if text.lower() in JUNK_PHRASES:
             return
 
+        print(f"[stt: {dt_ms:.0f}ms]")
         self.queue.put(text)
 
     def listen(self) -> str | None:
