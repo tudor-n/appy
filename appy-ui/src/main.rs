@@ -11,7 +11,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, DrawingArea, Entry,
     EventControllerFocus, EventControllerKey, EventControllerMotion, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, GestureDrag, Label, Orientation, PickFlags,
+    EventControllerScrollFlags, Fixed, GestureClick, GestureDrag, Label, Orientation, PickFlags,
     PolicyType, ScrolledWindow, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -141,6 +141,31 @@ fn format_live_dots(word: &str, step: u128) -> String {
     }
 }
 
+fn update_input_region(window: &ApplicationWindow, root: &GtkBox, dragging: bool) {
+    let Some(surface) = window.surface() else {
+        return;
+    };
+    let region = if dragging {
+        // Capture pointer across the whole monitor while dragging
+        gtk4::cairo::Region::create_rectangle(&gtk4::cairo::RectangleInt::new(
+            0,
+            0,
+            window.width(),
+            window.height(),
+        ))
+    } else if let Some(bounds) = root.compute_bounds(window) {
+        gtk4::cairo::Region::create_rectangle(&gtk4::cairo::RectangleInt::new(
+            bounds.x().floor() as i32,
+            bounds.y().floor() as i32,
+            bounds.width().ceil() as i32,
+            bounds.height().ceil() as i32,
+        ))
+    } else {
+        return;
+    };
+    surface.set_input_region(&region);
+}
+
 struct SharedState {
     state: AppyState,
     expression: Expression,
@@ -153,10 +178,15 @@ struct SharedState {
     voice_cooldown_until: Option<Instant>,
     chat_open: bool,
     message_count: usize,
-    margin_right: f64,
-    margin_bottom: f64,
-    pending_drag: Option<(f64, f64)>,
-    drag_cooldown: u8,
+    pos_x: f64,
+    pos_y: f64,
+    pos_initialized: bool,
+    last_root_h: f64,
+    drag_start_x: f64,
+    drag_start_y: f64,
+    last_drag_dx: f64,
+    last_drag_dy: f64,
+    last_input_bounds: Option<(i32, i32, i32, i32)>,
     wobble_x: f64,
     wobble_y: f64,
     wobble_vx: f64,
@@ -737,6 +767,7 @@ fn main() {
                 transform: translateY(0px) scale(1.0);
             }
             .bubble-appy {
+                background-color: rgba(232, 230, 230, 0.91);
                 border-radius: 16px 16px 16px 2px;
             }
             .bubble-user {
@@ -749,6 +780,20 @@ fn main() {
                 font-weight: 400;
                 letter-spacing: -0.01em;
             }
+            .bubble-appy .bubble-text {
+                color: #000000;
+            }
+
+            .bubble-time {
+                color: #8e8e93;
+                font-size: 10px;
+                font-weight: 500;
+                margin-top: 2px;
+            }
+            .bubble-appy .bubble-time {
+                color: #636366;
+            }
+                
             .bubble-time {
                 color: #8e8e93;
                 font-size: 10px;
@@ -757,7 +802,7 @@ fn main() {
             }
 
             .status-pill {
-                background-color: #ffffff;
+                background-color: #626262;
                 border: none;
                 border-radius: 999px;
                 padding: 4px 11px;
@@ -775,7 +820,7 @@ fn main() {
                 opacity: 1.0;
             }
             .status-pill-text {
-                color: #000000;
+                color: #ffffff;
                 font-size: 11px;
                 font-weight: 600;
                 letter-spacing: -0.01em;
@@ -828,10 +873,15 @@ fn main() {
             voice_cooldown_until: None,
             chat_open: false,
             message_count: 0,
-            margin_right: 24.0,
-            margin_bottom: 56.0,
-            pending_drag: None,
-            drag_cooldown: 0,
+            pos_x: 0.0,
+            pos_y: 0.0,
+            pos_initialized: false,
+            last_root_h: 0.0,
+            drag_start_x: 0.0,
+            drag_start_y: 0.0,
+            last_drag_dx: 0.0,
+            last_drag_dy: 0.0,
+            last_input_bounds: None,
             wobble_x: 0.0,
             wobble_y: 0.0,
             wobble_vx: 0.0,
@@ -860,10 +910,11 @@ fn main() {
         window.init_layer_shell();
         window.set_namespace(Some("appy-overlay"));
         window.set_layer(Layer::Top);
+        window.set_anchor(Edge::Top, true);
         window.set_anchor(Edge::Bottom, true);
+        window.set_anchor(Edge::Left, true);
         window.set_anchor(Edge::Right, true);
-        window.set_margin(Edge::Right, 24);
-        window.set_margin(Edge::Bottom, 56);
+        window.set_exclusive_zone(0);
         window.set_keyboard_mode(KeyboardMode::OnDemand);
 
         let mascot = DrawingArea::new();
@@ -965,10 +1016,18 @@ fn main() {
         root.append(&left_col);
         root.append(&chat_panel);
 
-        // Untransformed outer wrapper isolates pointer & drag coordinates from CSS wobble
-        let outer = GtkBox::new(Orientation::Horizontal, 0);
-        outer.append(&root);
-        window.set_child(Some(&outer));
+        // Fullscreen Fixed container keeps the layer-shell surface stationary for 1:1 drag coords
+        let fixed = Fixed::new();
+        fixed.put(&root, 0.0, 0.0);
+        window.set_child(Some(&fixed));
+
+        let root_map = root.clone();
+        let st_map = state.clone();
+        window.connect_map(move |win| {
+            let mut s = st_map.borrow_mut();
+            s.last_input_bounds = None;
+            update_input_region(win, &root_map, s.dragging);
+        });
 
         let scroll_ctrl = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
         let st_scroll = state.clone();
@@ -1029,7 +1088,7 @@ fn main() {
             s.hovered = false;
             s.voice_cooldown_until = None;
         });
-        outer.add_controller(motion);
+        root.add_controller(motion);
 
         let left_click = GestureClick::new();
         left_click.set_button(1);
@@ -1064,31 +1123,63 @@ fn main() {
 
         let drag = GestureDrag::new();
         let st_drag_start = state.clone();
-        let outer_drag = outer.clone();
+        let win_drag_start = window.clone();
+        let fixed_drag_start = fixed.clone();
+        let root_drag_start = root.clone();
         let mascot_drag = mascot.clone();
         drag.connect_drag_begin(move |_, start_x, start_y| {
-            let hit_mascot = outer_drag
+            let hit_mascot = fixed_drag_start
                 .pick(start_x, start_y, PickFlags::DEFAULT)
                 .map(|w| w == mascot_drag.clone().upcast::<gtk4::Widget>())
                 .unwrap_or(false);
             let mut s = st_drag_start.borrow_mut();
             s.dragging = hit_mascot;
-            s.pending_drag = None;
-        });
-        let st_drag_upd = state.clone();
-        drag.connect_drag_update(move |_, dx, dy| {
-            let mut s = st_drag_upd.borrow_mut();
-            if s.dragging && s.drag_cooldown == 0 {
-                s.pending_drag = Some((dx, dy));
+            if hit_mascot {
+                s.drag_start_x = s.pos_x;
+                s.drag_start_y = s.pos_y;
+                s.last_drag_dx = 0.0;
+                s.last_drag_dy = 0.0;
+                s.last_input_bounds = None;
+                update_input_region(&win_drag_start, &root_drag_start, true);
             }
         });
+
+        let st_drag_upd = state.clone();
+        let win_drag_upd = window.clone();
+        let fixed_drag_upd = fixed.clone();
+        let root_drag_upd = root.clone();
+        drag.connect_drag_update(move |_, dx, dy| {
+            let mut s = st_drag_upd.borrow_mut();
+            if !s.dragging {
+                return;
+            }
+            let max_x = (win_drag_upd.width() as f64 - root_drag_upd.width() as f64).max(0.0);
+            let max_y = (win_drag_upd.height() as f64 - root_drag_upd.height() as f64).max(0.0);
+
+            s.pos_x = (s.drag_start_x + dx).clamp(0.0, max_x);
+            s.pos_y = (s.drag_start_y + dy).clamp(0.0, max_y);
+            fixed_drag_upd.move_(&root_drag_upd, s.pos_x, s.pos_y);
+
+            let step_dx = dx - s.last_drag_dx;
+            let step_dy = dy - s.last_drag_dy;
+            s.last_drag_dx = dx;
+            s.last_drag_dy = dy;
+            s.wobble_vx = (s.wobble_vx - step_dx * 0.55).clamp(-35.0, 35.0);
+            s.wobble_vy = (s.wobble_vy + step_dy * 0.55).clamp(-35.0, 35.0);
+        });
+
         let st_drag_end = state.clone();
+        let win_drag_end = window.clone();
+        let root_drag_end = root.clone();
         drag.connect_drag_end(move |_, _, _| {
             let mut s = st_drag_end.borrow_mut();
-            s.dragging = false;
-            s.pending_drag = None;
+            if s.dragging {
+                s.dragging = false;
+                s.last_input_bounds = None;
+                update_input_region(&win_drag_end, &root_drag_end, false);
+            }
         });
-        outer.add_controller(drag);
+        fixed.add_controller(drag);
 
         let (ui_tx, ui_rx) = async_channel::unbounded::<UiEvent>();
         let (ws_out_tx, ws_out_rx) = mpsc::unbounded_channel::<ClientEvent>();
@@ -1144,7 +1235,8 @@ fn main() {
                     UiEvent::ToggleOverlay => {
                         let show_main = !win_ev.is_visible();
                         win_ev.set_visible(show_main);
-                        let s = st_ev.borrow();
+                        let mut s = st_ev.borrow_mut();
+                        s.last_input_bounds = None;
                         sync_pill(&sync_ev, s.state, s.expression, s.message_count, !show_main);
                     }
                     UiEvent::Quit => app_ev.quit(),
@@ -1246,6 +1338,8 @@ fn main() {
 
         let st_tick = state.clone();
         let win_tick = window.clone();
+        let fixed_tick = fixed.clone();
+        let root_tick = root.clone();
         let sync_tick = pill_sync.clone();
         let mascot_tick = mascot.clone();
         let panel_tick = chat_panel.clone();
@@ -1257,28 +1351,45 @@ fn main() {
             let mut s = st_tick.borrow_mut();
             let now = Instant::now();
 
-            if s.drag_cooldown > 0 {
-                s.drag_cooldown -= 1;
-                s.pending_drag = None;
-            } else if let Some((dx, dy)) = s.pending_drag.take() {
-                if dx.abs() >= 0.5 || dy.abs() >= 0.5 {
-                    let prev_r = s.margin_right.round() as i32;
-                    let prev_b = s.margin_bottom.round() as i32;
+            // Place mascot at bottom-right once the fullscreen surface & root have layout sizes
+            let win_w = win_tick.width() as f64;
+            let win_h = win_tick.height() as f64;
+            let root_w = root_tick.width() as f64;
+            let root_h = root_tick.height() as f64;
+            if win_w > 0.0 && win_h > 0.0 && root_w > 0.0 && root_h > 0.0 {
+                if !s.pos_initialized {
+                    s.pos_x = (win_w - root_w - 24.0).max(0.0);
+                    s.pos_y = (win_h - root_h - 56.0).max(0.0);
+                    s.last_root_h = root_h;
+                    s.pos_initialized = true;
+                    fixed_tick.move_(&root_tick, s.pos_x, s.pos_y);
+                } else if !s.dragging && (root_h - s.last_root_h).abs() > 0.5 {
+                    // Keep the bottom edge pinned when chat messages grow/shrink root
+                    let dh = root_h - s.last_root_h;
+                    let max_y = (win_h - root_h).max(0.0);
+                    s.pos_y = (s.pos_y - dh).clamp(0.0, max_y);
+                    s.last_root_h = root_h;
+                    fixed_tick.move_(&root_tick, s.pos_x, s.pos_y);
+                }
+            }
 
-                    s.margin_right = (s.margin_right - dx).max(0.0);
-                    s.margin_bottom = (s.margin_bottom - dy).max(0.0);
-
-                    let next_r = s.margin_right.round() as i32;
-                    let next_b = s.margin_bottom.round() as i32;
-
-                    if next_r != prev_r || next_b != prev_b {
-                        win_tick.set_margin(Edge::Right, next_r);
-                        win_tick.set_margin(Edge::Bottom, next_b);
-                        s.drag_cooldown = 1;
-                    }
-
-                    s.wobble_vx = (s.wobble_vx - dx * 0.55).clamp(-35.0, 35.0);
-                    s.wobble_vy = (s.wobble_vy + dy * 0.55).clamp(-35.0, 35.0);
+            // Keep Wayland click-through input region synced with root bounds / resize / drag
+            if win_tick.is_visible() {
+                let desired_bounds = if s.dragging {
+                    Some((0, 0, win_tick.width(), win_tick.height()))
+                } else {
+                    root_tick.compute_bounds(&win_tick).map(|b| {
+                        (
+                            b.x().floor() as i32,
+                            b.y().floor() as i32,
+                            b.width().ceil() as i32,
+                            b.height().ceil() as i32,
+                        )
+                    })
+                };
+                if desired_bounds.is_some() && desired_bounds != s.last_input_bounds {
+                    update_input_region(&win_tick, &root_tick, s.dragging);
+                    s.last_input_bounds = desired_bounds;
                 }
             }
 

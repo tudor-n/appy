@@ -161,6 +161,11 @@ def stream_turn(client, model, temperature, messages, speaker, ui, speak_aloud=T
             buffer += tag_buf
 
         if tool_calls:
+            if speak_aloud and buffer.strip():
+               speaker.speak(buffer)
+            if reply.strip():
+               ui.response(reply.strip(), expression)
+               ui.status("thinking")
             calls_list = [tool_calls[i] for i in sorted(tool_calls)]
             messages.append({"role": "assistant", "content": reply or None, "tool_calls": calls_list})
             for call in calls_list:
