@@ -12,7 +12,7 @@ from openai import OpenAI
 from hearing import Ear
 from voice import Speaker
 from tools import TOOL_SCHEMAS, run_tool
-from ui_bridge import UiBridge
+from ui_bridge import UiBridge, VALID_EFFORTS
 
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 CLAUSE_END = re.compile(r"(?<=[.!?,;:\u2014])\s+")
@@ -74,27 +74,15 @@ def prune_old_tool_outputs(messages, keep_recent=6):
             msg["content"] = "[pruned]"
 
 
-def stream_turn(client, model, temperature, messages, speaker, ui, speak_aloud=True):
-    preamble = ""
-
+def stream_turn(client, model, temperature, messages, speaker, ui, speak_aloud=True, effort="none"):
     while True:
-        req_messages = messages
-        if preamble:
-            req_messages = messages[:-1] + [
-                {
-                    **messages[-1],
-                    "content": f"{messages[-1]['content']}\n[previous message]: {preamble}",
-                }
-            ]
-            preamble = ""
-
         stream = client.chat.completions.create(
             model=model,
-            messages=req_messages,
+            messages=messages,
             tools=TOOL_SCHEMAS,
             temperature=temperature,
             presence_penalty=0.3,
-            reasoning_effort="none",
+            reasoning_effort=effort,
             stream=True,
         )
 
@@ -174,16 +162,12 @@ def stream_turn(client, model, temperature, messages, speaker, ui, speak_aloud=T
 
         if tool_calls:
             if speak_aloud and buffer.strip():
-                speaker.speak(buffer)
-
-            preamble = reply.strip()
-            if preamble:
-                print()  # Newline before [tool: ...] in terminal
-                ui.response(preamble, expression)
-                ui.status("thinking")
-
+               speaker.speak(buffer)
+            if reply.strip():
+               ui.response(reply.strip(), expression)
+               ui.status("thinking")
             calls_list = [tool_calls[i] for i in sorted(tool_calls)]
-            messages.append({"role": "assistant", "content": preamble or None, "tool_calls": calls_list})
+            messages.append({"role": "assistant", "content": reply or None, "tool_calls": calls_list})
             for call in calls_list:
                 name = call["function"]["name"]
                 args = call["function"]["arguments"]
@@ -211,8 +195,21 @@ def stream_turn(client, model, temperature, messages, speaker, ui, speak_aloud=T
 def main():
     turn_queue: queue.Queue[tuple[str, str]] = queue.Queue()
 
+    # Reasoning effort is switchable at runtime from the UI's effort picker
+    initial_effort = os.getenv("REASONING_EFFORT", "none").strip().lower()
+    effort_state = {"value": initial_effort if initial_effort in VALID_EFFORTS else "none"}
+
+    def set_effort(value: str):
+        effort_state["value"] = value
+        print(f"[effort -> {value}]")
+        ui.effort(value)  # echo so every connected UI converges on the same value
+
     # Start WebSocket bridge immediately so the UI shows "loading..." during boot
-    ui = UiBridge(on_user_text=lambda txt: turn_queue.put(("text", txt)))
+    ui = UiBridge(
+        on_user_text=lambda txt: turn_queue.put(("text", txt)),
+        on_set_effort=set_effort,
+        get_effort=lambda: effort_state["value"],
+    )
     ui.start()
     ui.status("booting", "loading")
 
@@ -273,7 +270,10 @@ def main():
             messages.append({"role": "user", "content": f"[{now}] {user_input}"})
 
             ear.pause()
-            stream_turn(client, model, temperature, messages, speaker, ui, speak_aloud=True)
+            stream_turn(
+                client, model, temperature, messages, speaker, ui,
+                speak_aloud=True, effort=effort_state["value"],
+            )
             speaker.wait()
             ear.resume()
     except KeyboardInterrupt:

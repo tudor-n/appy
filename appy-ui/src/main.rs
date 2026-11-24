@@ -5,14 +5,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use gtk4::gdk::{Display, Key};
+use gtk4::gdk::{Display, Key, ModifierType};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, DrawingArea, Entry,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, DrawingArea,
     EventControllerFocus, EventControllerKey, EventControllerMotion, EventControllerScroll,
-    EventControllerScrollFlags, Fixed, GestureClick, GestureDrag, Label, Orientation, PickFlags,
-    PolicyType, ScrolledWindow, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    EventControllerScrollFlags, Fixed, GestureClick, GestureDrag, Label, Orientation, Overlay,
+    PickFlags, PolicyType, PropagationPhase, Revealer, RevealerTransitionType, ScrolledWindow,
+    TextView, WrapMode, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,6 +26,10 @@ const PILL_BRIDGE_ADDR: &str = "127.0.0.1:8002";
 const VOICE_COOLDOWN: Duration = Duration::from_secs(8);
 const MAX_MESSAGES: usize = 500;
 const BLINK_DURATION_MS: f64 = 160.0;
+// How long the chat stays open after the pointer leaves the mascot, so you can
+// cross the gap to the messages without them collapsing.
+const HOVER_GRACE: Duration = Duration::from_millis(300);
+const INPUT_MAX_HEIGHT: i32 = 132;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +69,42 @@ impl AppyState {
     }
 }
 
+/// Reasoning effort sent to the LLM backend (`reasoning_effort`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+enum Effort {
+    #[default]
+    #[serde(rename = "none")]
+    Off,
+    #[serde(rename = "low")]
+    Low,
+    #[serde(rename = "medium")]
+    Medium,
+    #[serde(rename = "high")]
+    High,
+}
+
+impl Effort {
+    const ALL: [Effort; 4] = [Effort::Off, Effort::Low, Effort::Medium, Effort::High];
+
+    fn short(self) -> &'static str {
+        match self {
+            Effort::Off => "off",
+            Effort::Low => "low",
+            Effort::Medium => "med",
+            Effort::High => "high",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Effort::Off => "No reasoning (fastest)",
+            Effort::Low => "Low reasoning effort",
+            Effort::Medium => "Medium reasoning effort",
+            Effort::High => "High reasoning effort (slowest)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Expression {
@@ -99,12 +140,16 @@ enum BackendEvent {
         tool: String,
         payload: serde_json::Value,
     },
+    Effort {
+        value: Effort,
+    },
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientEvent {
     UserText { text: String },
+    SetEffort { effort: Effort },
 }
 
 #[derive(Debug)]
@@ -141,7 +186,48 @@ fn format_live_dots(word: &str, step: u128) -> String {
     }
 }
 
-fn update_input_region(window: &ApplicationWindow, root: &GtkBox, dragging: bool) {
+/// While the chat is hidden, only the mascot should catch the pointer; the (invisible)
+/// message column must stay click-through. Once the chat is open, the whole shell counts.
+fn input_target(
+    chat_open: bool,
+    locked: bool,
+    root: &GtkBox,
+    mascot: &DrawingArea,
+) -> gtk4::Widget {
+    if chat_open || locked {
+        root.clone().upcast()
+    } else {
+        mascot.clone().upcast()
+    }
+}
+
+/// True when (x, y) in mascot-canvas coordinates lies on the mascot body (not the empty
+/// headroom / side padding of its drawing area).
+fn mascot_body_contains(canvas_w: f64, canvas_h: f64, x: f64, y: f64) -> bool {
+    let size = 96.0; // keep in sync with draw_mascot
+    let left = (canvas_w - size) * 0.5;
+    let top = canvas_h - size - 12.0;
+    x >= left && x <= left + size && y >= top && y <= top + size
+}
+
+fn refresh_effort_ui(effort: Effort, chip: &Button, options: &[(Effort, Button)]) {
+    chip.set_label(effort.short());
+    chip.set_tooltip_text(Some(&format!("Reasoning effort: {}", effort.tooltip())));
+    if effort == Effort::Off {
+        chip.add_css_class("off");
+    } else {
+        chip.remove_css_class("off");
+    }
+    for (e, b) in options {
+        if *e == effort {
+            b.add_css_class("active");
+        } else {
+            b.remove_css_class("active");
+        }
+    }
+}
+
+fn update_input_region(window: &ApplicationWindow, root: &gtk4::Widget, dragging: bool) {
     let Some(surface) = window.surface() else {
         return;
     };
@@ -172,7 +258,10 @@ struct SharedState {
     phase: f64,
     talk_phase: f64,
     speaking_until: Option<Instant>,
-    hovered: bool,
+    mascot_hovered: bool,
+    panel_hovered: bool,
+    hover_grace_until: Option<Instant>,
+    effort: Effort,
     dragging: bool,
     locked: bool,
     voice_cooldown_until: Option<Instant>,
@@ -208,8 +297,40 @@ impl SharedState {
         self.voice_cooldown_until = Some(Instant::now() + VOICE_COOLDOWN);
     }
 
+    fn is_hovered(&self) -> bool {
+        self.mascot_hovered
+            || self.panel_hovered
+            || self
+                .hover_grace_until
+                .map(|until| Instant::now() < until)
+                .unwrap_or(false)
+    }
+
+    fn after_hover_change(&mut self) {
+        if self.mascot_hovered || self.panel_hovered {
+            self.hover_grace_until = None;
+        } else {
+            self.hover_grace_until = Some(Instant::now() + HOVER_GRACE);
+            self.voice_cooldown_until = None;
+        }
+    }
+
+    fn set_mascot_hover(&mut self, hovered: bool) {
+        if self.mascot_hovered != hovered {
+            self.mascot_hovered = hovered;
+            self.after_hover_change();
+        }
+    }
+
+    fn set_panel_hover(&mut self, hovered: bool) {
+        if self.panel_hovered != hovered {
+            self.panel_hovered = hovered;
+            self.after_hover_change();
+        }
+    }
+
     fn should_show_chat(&self, input_selected: bool) -> bool {
-        if self.locked || self.hovered || self.dragging || input_selected || self.is_busy() {
+        if self.locked || self.is_hovered() || self.dragging || input_selected || self.is_busy() {
             return true;
         }
         self.voice_cooldown_until
@@ -620,6 +741,9 @@ fn append_message_bubble(
         .label(text)
         .xalign(0.0)
         .wrap(true)
+        // WordChar so a very long unbroken string wraps instead of forcing the whole
+        // overlay wider (the default Word mode can't break inside a word).
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
         .max_width_chars(30)
         .build();
     msg_label.add_css_class("bubble-text");
@@ -830,21 +954,71 @@ fn main() {
                 background-color: #242626;
                 border: none;
                 border-radius: 22px;
-                padding: 6px 14px;
+                padding: 6px 8px 6px 14px;
             }
-            entry.chat-input {
+            textview.chat-input,
+            textview.chat-input text {
                 background: transparent;
+                background-color: transparent;
                 color: #ffffff;
                 border: none;
                 box-shadow: none;
                 outline: none;
-                min-height: 24px;
                 font-size: 13px;
                 letter-spacing: -0.01em;
                 caret-color: #ffffff;
             }
-            entry.chat-input placeholder {
+            textview.chat-input text selection {
+                background-color: rgba(255, 255, 255, 0.28);
+                color: #ffffff;
+            }
+            .chat-placeholder {
                 color: #8e8e93;
+                font-size: 13px;
+                letter-spacing: -0.01em;
+            }
+
+            .effort-row {
+                margin: 2px 0 8px 0;
+            }
+            .effort-caption {
+                color: #8e8e93;
+                font-size: 11px;
+                font-weight: 600;
+                margin-right: 4px;
+            }
+            button.effort-chip,
+            button.effort-opt {
+                background-image: none;
+                background-color: rgba(255, 255, 255, 0.08);
+                color: #d1d1d6;
+                border: none;
+                box-shadow: none;
+                outline: none;
+                border-radius: 999px;
+                min-height: 0;
+                min-width: 0;
+                padding: 3px 10px;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: -0.01em;
+                transition: background-color 160ms ease, color 160ms ease;
+            }
+            button.effort-chip.off {
+                color: #8e8e93;
+            }
+            button.effort-chip.open,
+            button.effort-opt.active {
+                background-color: #f5f5f7;
+                color: #000000;
+            }
+            button.effort-chip:hover,
+            button.effort-opt:hover {
+                background-color: rgba(255, 255, 255, 0.16);
+            }
+            button.effort-chip.open:hover,
+            button.effort-opt.active:hover {
+                background-color: #ffffff;
             }
             "#,
         );
@@ -867,7 +1041,10 @@ fn main() {
             phase: 0.0,
             talk_phase: 0.0,
             speaking_until: None,
-            hovered: false,
+            mascot_hovered: false,
+            panel_hovered: false,
+            hover_grace_until: None,
+            effort: Effort::Off,
             dragging: false,
             locked: false,
             voice_cooldown_until: None,
@@ -979,20 +1156,117 @@ fn main() {
             .child(&messages_box)
             .build();
 
-        let input_entry = Entry::builder()
-            .placeholder_text("Type a message")
+        // Multi-line input: a TextView that wraps and grows with the text (up to
+        // INPUT_MAX_HEIGHT, then it scrolls). Enter sends, Shift+Enter inserts a newline.
+        let input_view = TextView::builder()
+            .wrap_mode(WrapMode::WordChar)
+            .accepts_tab(false)
             .hexpand(true)
+            .top_margin(4)
+            .bottom_margin(4)
+            .left_margin(0)
+            .right_margin(0)
             .build();
-        input_entry.add_css_class("chat-input");
+        input_view.add_css_class("chat-input");
+        let input_buffer = input_view.buffer();
+
+        let input_scroll = ScrolledWindow::builder()
+            .hscrollbar_policy(PolicyType::Never)
+            // External (not Automatic): Automatic reserves room for a scrollbar track,
+            // which made the pill ~20px taller than one line and pushed the text off-centre.
+            .vscrollbar_policy(PolicyType::External)
+            .propagate_natural_height(true)
+            .min_content_height(26)
+            .max_content_height(INPUT_MAX_HEIGHT)
+            .hexpand(true)
+            .child(&input_view)
+            .build();
+
+        let placeholder = Label::builder()
+            .label("Type a message")
+            .xalign(0.0)
+            .halign(Align::Start)
+            .valign(Align::Center)
+            .build();
+        placeholder.add_css_class("chat-placeholder");
+        placeholder.set_can_target(false);
+
+        let placeholder_sync = placeholder.clone();
+        input_buffer.connect_changed(move |buf| {
+            placeholder_sync.set_visible(buf.char_count() == 0);
+        });
+
+        let input_overlay = Overlay::new();
+        input_overlay.set_hexpand(true);
+        input_overlay.set_child(Some(&input_scroll));
+        input_overlay.add_overlay(&placeholder);
 
         let input_focus = EventControllerFocus::new();
-        input_entry.add_controller(input_focus.clone());
+        input_view.add_controller(input_focus.clone());
 
-        let input_bubble = GtkBox::new(Orientation::Horizontal, 0);
+        // Effort picker: a chip at the bottom-right of the pill that expands an option row
+        let effort_chip = Button::builder()
+            .label(Effort::Off.short())
+            .valign(Align::End)
+            .margin_bottom(3) // centres the chip on a single line, stays bottom-aligned when it grows
+            .focus_on_click(false)
+            .build();
+        effort_chip.add_css_class("effort-chip");
+        effort_chip.add_css_class("off");
+        effort_chip.set_tooltip_text(Some("Reasoning effort"));
+
+        let effort_row = GtkBox::new(Orientation::Horizontal, 4);
+        effort_row.add_css_class("effort-row");
+        let effort_caption = Label::new(Some("effort"));
+        effort_caption.add_css_class("effort-caption");
+        effort_row.append(&effort_caption);
+
+        let mut effort_buttons: Vec<(Effort, Button)> = Vec::new();
+        for e in Effort::ALL {
+            let b = Button::builder()
+                .label(e.short())
+                .focus_on_click(false)
+                .build();
+            b.add_css_class("effort-opt");
+            b.set_tooltip_text(Some(e.tooltip()));
+            effort_row.append(&b);
+            effort_buttons.push((e, b));
+        }
+        let effort_options: Rc<Vec<(Effort, Button)>> = Rc::new(effort_buttons);
+        refresh_effort_ui(Effort::Off, &effort_chip, &effort_options);
+
+        let effort_revealer = Revealer::builder()
+            .transition_type(RevealerTransitionType::SlideUp)
+            .transition_duration(180)
+            .reveal_child(false)
+            .child(&effort_row)
+            .build();
+
+        let chip_for_notify = effort_chip.clone();
+        effort_revealer.connect_reveal_child_notify(move |r| {
+            if r.reveals_child() {
+                chip_for_notify.add_css_class("open");
+            } else {
+                chip_for_notify.remove_css_class("open");
+            }
+        });
+
+        let revealer_toggle = effort_revealer.clone();
+        effort_chip.connect_clicked(move |_| {
+            revealer_toggle.set_reveal_child(!revealer_toggle.reveals_child());
+        });
+
+        let input_row = GtkBox::new(Orientation::Horizontal, 8);
+        input_row.set_hexpand(true);
+        input_row.append(&input_overlay);
+        input_row.append(&effort_chip);
+
+        let input_bubble = GtkBox::new(Orientation::Vertical, 0);
         input_bubble.add_css_class("input-bubble");
         input_bubble.set_hexpand(true);
         input_bubble.set_halign(Align::Fill);
-        input_bubble.append(&input_entry);
+        input_bubble.append(&effort_revealer);
+        input_bubble.append(&input_row);
 
         let chat_wobble_box = GtkBox::new(Orientation::Vertical, 8);
         chat_wobble_box.add_css_class("chat-wobble");
@@ -1022,11 +1296,13 @@ fn main() {
         window.set_child(Some(&fixed));
 
         let root_map = root.clone();
+        let mascot_map = mascot.clone();
         let st_map = state.clone();
         window.connect_map(move |win| {
             let mut s = st_map.borrow_mut();
             s.last_input_bounds = None;
-            update_input_region(win, &root_map, s.dragging);
+            let target = input_target(s.chat_open, s.locked, &root_map, &mascot_map);
+            update_input_region(win, &target, s.dragging);
         });
 
         let scroll_ctrl = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
@@ -1077,18 +1353,48 @@ fn main() {
         });
         window.add_controller(key_ctrl);
 
-        let motion = EventControllerMotion::new();
-        let st_enter = state.clone();
-        motion.connect_enter(move |_, _, _| {
-            st_enter.borrow_mut().hovered = true;
+        // Hover model: only the mascot body pushes the messages out. Once they are out,
+        // hovering the message panel keeps them in view. A short grace period covers the
+        // gap between the two.
+        let mascot_motion = EventControllerMotion::new();
+        let st_m_enter = state.clone();
+        let mascot_m_enter = mascot.clone();
+        mascot_motion.connect_enter(move |_, x, y| {
+            let inside = mascot_body_contains(
+                mascot_m_enter.width() as f64,
+                mascot_m_enter.height() as f64,
+                x,
+                y,
+            );
+            st_m_enter.borrow_mut().set_mascot_hover(inside);
         });
-        let st_leave = state.clone();
-        motion.connect_leave(move |_| {
-            let mut s = st_leave.borrow_mut();
-            s.hovered = false;
-            s.voice_cooldown_until = None;
+        let st_m_move = state.clone();
+        let mascot_m_move = mascot.clone();
+        mascot_motion.connect_motion(move |_, x, y| {
+            let inside = mascot_body_contains(
+                mascot_m_move.width() as f64,
+                mascot_m_move.height() as f64,
+                x,
+                y,
+            );
+            st_m_move.borrow_mut().set_mascot_hover(inside);
         });
-        root.add_controller(motion);
+        let st_m_leave = state.clone();
+        mascot_motion.connect_leave(move |_| {
+            st_m_leave.borrow_mut().set_mascot_hover(false);
+        });
+        mascot.add_controller(mascot_motion);
+
+        let panel_motion = EventControllerMotion::new();
+        let st_p_enter = state.clone();
+        panel_motion.connect_enter(move |_, _, _| {
+            st_p_enter.borrow_mut().set_panel_hover(true);
+        });
+        let st_p_leave = state.clone();
+        panel_motion.connect_leave(move |_| {
+            st_p_leave.borrow_mut().set_panel_hover(false);
+        });
+        chat_panel.add_controller(panel_motion);
 
         let left_click = GestureClick::new();
         left_click.set_button(1);
@@ -1140,7 +1446,8 @@ fn main() {
                 s.last_drag_dx = 0.0;
                 s.last_drag_dy = 0.0;
                 s.last_input_bounds = None;
-                update_input_region(&win_drag_start, &root_drag_start, true);
+                let target: gtk4::Widget = root_drag_start.clone().upcast();
+                update_input_region(&win_drag_start, &target, true);
             }
         });
 
@@ -1171,12 +1478,15 @@ fn main() {
         let st_drag_end = state.clone();
         let win_drag_end = window.clone();
         let root_drag_end = root.clone();
+        let mascot_drag_end = mascot.clone();
         drag.connect_drag_end(move |_, _, _| {
             let mut s = st_drag_end.borrow_mut();
             if s.dragging {
                 s.dragging = false;
                 s.last_input_bounds = None;
-                update_input_region(&win_drag_end, &root_drag_end, false);
+                let target =
+                    input_target(s.chat_open, s.locked, &root_drag_end, &mascot_drag_end);
+                update_input_region(&win_drag_end, &target, false);
             }
         });
         fixed.add_controller(drag);
@@ -1191,41 +1501,77 @@ fn main() {
         let msgs_sub = messages_box.clone();
         let scroll_sub = scrolled.clone();
         let mascot_sub = mascot.clone();
+        let buf_sub = input_buffer.clone();
         let ws_tx_sub: UnboundedSender<ClientEvent> = ws_out_tx.clone();
-        input_entry.connect_activate(move |entry| {
-            let txt = entry.text().trim().to_string();
-            if !txt.is_empty() {
-                append_message_bubble(&msgs_sub, &scroll_sub, &st_sub, &txt, true);
-                let _ = ws_tx_sub.send(ClientEvent::UserText { text: txt });
-                entry.set_text("");
-
-                let mut s = st_sub.borrow_mut();
-                s.finish_active_status();
-                let status_label = append_status_pill(
-                    &msgs_sub,
-                    &scroll_sub,
-                    &st_sub,
-                    &format_live_dots("thinking", 0),
-                );
-                s.active_status_pill = Some((AppyState::Thinking, status_label, Instant::now()));
-                s.message_count += 1;
-                s.state = AppyState::Thinking;
-                sync_pill(
-                    &sync_sub,
-                    s.state,
-                    s.expression,
-                    s.message_count,
-                    !win_sub.is_visible(),
-                );
-                mascot_sub.queue_draw();
+        let submit: Rc<dyn Fn()> = Rc::new(move || {
+            let (start, end) = buf_sub.bounds();
+            let txt = buf_sub.text(&start, &end, false).trim().to_string();
+            if txt.is_empty() {
+                return;
             }
+            append_message_bubble(&msgs_sub, &scroll_sub, &st_sub, &txt, true);
+            let _ = ws_tx_sub.send(ClientEvent::UserText { text: txt });
+            buf_sub.set_text("");
+
+            let mut s = st_sub.borrow_mut();
+            s.finish_active_status();
+            let status_label = append_status_pill(
+                &msgs_sub,
+                &scroll_sub,
+                &st_sub,
+                &format_live_dots("thinking", 0),
+            );
+            s.active_status_pill = Some((AppyState::Thinking, status_label, Instant::now()));
+            s.message_count += 1;
+            s.state = AppyState::Thinking;
+            sync_pill(
+                &sync_sub,
+                s.state,
+                s.expression,
+                s.message_count,
+                !win_sub.is_visible(),
+            );
+            mascot_sub.queue_draw();
         });
+
+        // Enter sends; Shift+Enter falls through to the TextView and inserts a newline.
+        // Capture phase so the TextView's own Return handling never sees a plain Enter.
+        let send_key = EventControllerKey::new();
+        send_key.set_propagation_phase(PropagationPhase::Capture);
+        let submit_key = submit.clone();
+        send_key.connect_key_pressed(move |_, keyval, _, modifiers| {
+            let is_enter = matches!(keyval, Key::Return | Key::KP_Enter);
+            if is_enter && !modifiers.contains(ModifierType::SHIFT_MASK) {
+                submit_key();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        input_view.add_controller(send_key);
+
+        // Effort option buttons: update local state + UI, tell the backend, collapse the row
+        for (effort, button) in effort_options.iter() {
+            let effort = *effort;
+            let st_eff = state.clone();
+            let chip_eff = effort_chip.clone();
+            let options_eff = effort_options.clone();
+            let revealer_eff = effort_revealer.clone();
+            let ws_tx_eff: UnboundedSender<ClientEvent> = ws_out_tx.clone();
+            button.connect_clicked(move |_| {
+                st_eff.borrow_mut().effort = effort;
+                refresh_effort_ui(effort, &chip_eff, &options_eff);
+                let _ = ws_tx_eff.send(ClientEvent::SetEffort { effort });
+                revealer_eff.set_reveal_child(false);
+            });
+        }
 
         let st_ev = state.clone();
         let win_ev = window.clone();
         let sync_ev = pill_sync.clone();
         let app_ev = app.clone();
-        let input_ev = input_entry.clone();
+        let input_buf_ev = input_buffer.clone();
+        let chip_ev = effort_chip.clone();
+        let options_ev = effort_options.clone();
         let msgs_ev = messages_box.clone();
         let scroll_ev = scrolled.clone();
         let mascot_ev = mascot.clone();
@@ -1242,7 +1588,10 @@ fn main() {
                     UiEvent::Quit => app_ev.quit(),
                     UiEvent::Backend(bev) => {
                         let mut s = st_ev.borrow_mut();
-                        s.trigger_voice_cooldown();
+                        // Silent config sync shouldn't pop the chat open
+                        if !matches!(bev, BackendEvent::Effort { .. }) {
+                            s.trigger_voice_cooldown();
+                        }
                         match bev {
                             BackendEvent::Wake => {
                                 s.finish_active_status();
@@ -1251,13 +1600,13 @@ fn main() {
                             BackendEvent::Transcript { text, is_final } => {
                                 s.state = AppyState::Listening;
                                 if is_final {
-                                    input_ev.set_text("");
+                                    input_buf_ev.set_text("");
                                     drop(s);
                                     append_message_bubble(&msgs_ev, &scroll_ev, &st_ev, &text, true);
                                     s = st_ev.borrow_mut();
                                     s.message_count += 1;
                                 } else {
-                                    input_ev.set_text(&text);
+                                    input_buf_ev.set_text(&text);
                                 }
                             }
                             BackendEvent::Status {
@@ -1322,6 +1671,10 @@ fn main() {
                             BackendEvent::OpenTool { tool, payload } => {
                                 println!("OpenTool requested: {tool} -> {payload}");
                             }
+                            BackendEvent::Effort { value } => {
+                                s.effort = value;
+                                refresh_effort_ui(value, &chip_ev, &options_ev);
+                            }
                         }
                         sync_pill(
                             &sync_ev,
@@ -1340,6 +1693,7 @@ fn main() {
         let win_tick = window.clone();
         let fixed_tick = fixed.clone();
         let root_tick = root.clone();
+        let revealer_tick = effort_revealer.clone();
         let sync_tick = pill_sync.clone();
         let mascot_tick = mascot.clone();
         let panel_tick = chat_panel.clone();
@@ -1375,10 +1729,12 @@ fn main() {
 
             // Keep Wayland click-through input region synced with root bounds / resize / drag
             if win_tick.is_visible() {
+                let region_target =
+                    input_target(s.chat_open, s.locked, &root_tick, &mascot_tick);
                 let desired_bounds = if s.dragging {
                     Some((0, 0, win_tick.width(), win_tick.height()))
                 } else {
-                    root_tick.compute_bounds(&win_tick).map(|b| {
+                    region_target.compute_bounds(&win_tick).map(|b| {
                         (
                             b.x().floor() as i32,
                             b.y().floor() as i32,
@@ -1388,7 +1744,7 @@ fn main() {
                     })
                 };
                 if desired_bounds.is_some() && desired_bounds != s.last_input_bounds {
-                    update_input_region(&win_tick, &root_tick, s.dragging);
+                    update_input_region(&win_tick, &region_target, s.dragging);
                     s.last_input_bounds = desired_bounds;
                 }
             }
@@ -1494,6 +1850,8 @@ fn main() {
                     panel_tick.add_css_class("open");
                 } else {
                     panel_tick.remove_css_class("open");
+                    s.panel_hovered = false;
+                    revealer_tick.set_reveal_child(false);
                     if s.state == AppyState::Idle && s.expression != Expression::Neutral {
                         s.expression = Expression::Neutral;
                         sync_pill(

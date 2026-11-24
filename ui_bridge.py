@@ -7,24 +7,42 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 
 
+VALID_EFFORTS = ("none", "low", "medium", "high")
+
+
 class UiBridge:
-    def __init__(self, on_user_text: Optional[Callable[[str], None]] = None):
+    def __init__(
+        self,
+        on_user_text: Optional[Callable[[str], None]] = None,
+        on_set_effort: Optional[Callable[[str], None]] = None,
+        get_effort: Optional[Callable[[], str]] = None,
+    ):
         self.app = FastAPI()
         self.clients: set[WebSocket] = set()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.on_user_text = on_user_text
+        self.on_set_effort = on_set_effort
+        self.get_effort = get_effort
 
         @self.app.websocket("/ws")
         async def ws_endpoint(ws: WebSocket):
             await ws.accept()
             self.clients.add(ws)
             try:
+                # Sync the UI's effort picker with the backend's current value
+                if self.get_effort:
+                    await ws.send_json({"type": "effort", "value": self.get_effort()})
                 while True:
                     data = json.loads(await ws.receive_text())
-                    if data.get("type") == "user_text" and self.on_user_text:
+                    kind = data.get("type")
+                    if kind == "user_text" and self.on_user_text:
                         text = data.get("text", "").strip()
                         if text:
                             self.on_user_text(text)
+                    elif kind == "set_effort" and self.on_set_effort:
+                        value = data.get("effort")
+                        if value in VALID_EFFORTS:
+                            self.on_set_effort(value)
             except WebSocketDisconnect:
                 self.clients.discard(ws)
 
@@ -65,3 +83,6 @@ class UiBridge:
 
     def response(self, text: str, expression: str = "neutral"):
         self.emit({"type": "response", "text": text, "expression": expression})
+
+    def effort(self, value: str):
+        self.emit({"type": "effort", "value": value})
