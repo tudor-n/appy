@@ -75,10 +75,22 @@ def prune_old_tool_outputs(messages, keep_recent=6):
 
 
 def stream_turn(client, model, temperature, messages, speaker, ui, speak_aloud=True):
+    preamble = ""
+
     while True:
+        req_messages = messages
+        if preamble:
+            req_messages = messages[:-1] + [
+                {
+                    **messages[-1],
+                    "content": f"{messages[-1]['content']}\n[previous message]: {preamble}",
+                }
+            ]
+            preamble = ""
+
         stream = client.chat.completions.create(
             model=model,
-            messages=messages,
+            messages=req_messages,
             tools=TOOL_SCHEMAS,
             temperature=temperature,
             presence_penalty=0.3,
@@ -162,12 +174,16 @@ def stream_turn(client, model, temperature, messages, speaker, ui, speak_aloud=T
 
         if tool_calls:
             if speak_aloud and buffer.strip():
-               speaker.speak(buffer)
-            if reply.strip():
-               ui.response(reply.strip(), expression)
-               ui.status("thinking")
+                speaker.speak(buffer)
+
+            preamble = reply.strip()
+            if preamble:
+                print()  # Newline before [tool: ...] in terminal
+                ui.response(preamble, expression)
+                ui.status("thinking")
+
             calls_list = [tool_calls[i] for i in sorted(tool_calls)]
-            messages.append({"role": "assistant", "content": reply or None, "tool_calls": calls_list})
+            messages.append({"role": "assistant", "content": preamble or None, "tool_calls": calls_list})
             for call in calls_list:
                 name = call["function"]["name"]
                 args = call["function"]["arguments"]
