@@ -13,6 +13,7 @@ import tools
 from agent import Agent
 from hearing import Ear
 from memory_client import MemoryClient, system_prompt
+from memory_review import MemoryReview
 from session_log import SessionLogger, default_logs_dir
 from status import StatusTracker
 from voice import Speaker
@@ -44,12 +45,25 @@ def main():
 
     # Created before the bridge so a message arriving right away finds it
     status = StatusTracker(lambda state: ui.status(state))
+    # The memory review coordinator, once memory is set up (the bridge's callbacks need it)
+    review_box: dict = {"review": None}
+
+    def on_memory_decision(slug: str, decision: str, text):
+        if review_box["review"]:
+            review_box["review"].decide(slug, decision, text)
+
+    def on_memory_undo():
+        if review_box["review"]:
+            review_box["review"].undo()
+
     # Start WebSocket bridge immediately so the UI shows "loading..." during boot
     ui = UiBridge(
         on_user_text=on_user_text,
         on_set_effort=set_effort,
         get_effort=lambda: effort_state["value"],
         on_compact=lambda: turn_queue.put(("compact", "")),
+        on_memory_decision=on_memory_decision,
+        on_memory_undo=on_memory_undo,
     )
     ui.start()
     status.announce("booting")
@@ -76,6 +90,8 @@ def main():
         """Pop a card out next to Appy for tools that have one."""
         if name == "get_weather" and (card := tools.weather_card(result)):
             ui.widget(card)
+        if review_box["review"]:  # "Remembered: ..." chip with Undo
+            review_box["review"].tool_committed(name, result)
 
     model = os.getenv("MODEL", "google/gemma-4-26b-a4b")
     log = SessionLogger(default_logs_dir())
@@ -101,6 +117,9 @@ def main():
             print(f"[memory] system prompt -> {dump}")
         except OSError as exc:
             print(f"[memory] couldn't write {dump}: {exc}")
+    if memory:  # the overlay's review card for what the consolidator learned
+        review_box["review"] = MemoryReview(memory, ui.memory_proposals, ui.memory_committed)
+        review_box["review"].start()
     if memory:  # logs left behind by a crash or while the Mac was down
         threading.Thread(target=memory.upload_leftovers, args=(log.path.parent, log.path),
                          daemon=True).start()
@@ -185,6 +204,8 @@ def main():
         raise
     finally:
         log.end(reason=reason)
+        if review_box["review"]:
+            review_box["review"].stop()
         if memory:
             uploaded = memory.upload_log(log.path)
             print(f"[memory] log {'uploaded' if uploaded else 'kept locally'}")

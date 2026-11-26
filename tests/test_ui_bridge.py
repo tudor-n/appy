@@ -49,6 +49,41 @@ class UiBridgeTests(unittest.TestCase):
             ws.send_json({"type": "user_text", "text": "  "})  # ignored; flushes the first
         self.assertEqual(calls, ["compact"])
 
+    def test_late_client_gets_proposals(self):
+        bridge = UiBridge()
+        bridge.memory_proposals([{"slug": "bench"}])
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            self.assertEqual(receive(ws), {"type": "memory_proposals", "items": [{"slug": "bench"}]})
+
+    def test_memory_committed_is_sent(self):
+        bridge = UiBridge()
+        sent = []
+        bridge.emit = sent.append
+        bridge.memory_committed("approved", "added the HUD")
+        self.assertEqual(sent, [{"type": "memory_committed", "kind": "approved", "summary": "added the HUD"}])
+
+    def test_memory_decision_and_undo_reach_callbacks(self):
+        calls = []
+        bridge = UiBridge(on_memory_decision=lambda *a: calls.append(a),
+                          on_memory_undo=lambda: calls.append("undo"))
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            ws.send_json({"type": "memory_decision", "slug": "bench", "decision": "accept"})
+            ws.send_json({"type": "memory_decision", "slug": "bench", "decision": "edit", "text": "# B\n"})
+            ws.send_json({"type": "memory_undo"})
+            ws.send_json({"type": "user_text", "text": "  "})  # flushes
+        self.assertEqual(calls, [("bench", "accept", None), ("bench", "edit", "# B\n"), "undo"])
+
+    def test_bad_decisions_ignored(self):
+        calls = []
+        bridge = UiBridge(on_memory_decision=lambda *a: calls.append(a))
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            for bad in ({"slug": "bench", "decision": "maybe"}, {"decision": "accept"},
+                        {"slug": "", "decision": "accept"}, {"slug": "bench", "decision": "edit"},
+                        {"slug": "bench", "decision": "edit", "text": "   "}):
+                ws.send_json({"type": "memory_decision", **bad})
+            ws.send_json({"type": "user_text", "text": "  "})
+        self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

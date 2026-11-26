@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from streaming import VALID_EXPRESSIONS
-from ui_bridge import VALID_EFFORTS
+from ui_bridge import MEMORY_DECISIONS, MEMORY_KINDS, VALID_EFFORTS
 
 PROTOCOL_RS = Path(__file__).resolve().parent.parent / "appy-ui" / "src" / "protocol.rs"
 
@@ -71,6 +71,16 @@ class ProtocolDriftTests(unittest.TestCase):
 
     def test_status_states_are_known_to_ui(self):
         self.assertLessEqual(PYTHON_STATES, set(rust_enum("AppyState").values()))
+
+    def test_memory_kinds_and_decisions_match(self):
+        kinds = set(rust_enum("MemoryKind").values()) - {"other"}
+        self.assertEqual(kinds, set(MEMORY_KINDS))
+        self.assertEqual(set(rust_enum("Decision").values()), set(MEMORY_DECISIONS))
+
+    def test_memory_proposal_fields_match(self):
+        import memory_client
+
+        self.assertEqual(rust_struct_fields("Proposal"), set(memory_client.PROPOSAL_FIELDS) | {"error"})
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ import uvicorn
 
 
 VALID_EFFORTS = ("none", "low", "medium", "high")
+MEMORY_DECISIONS = ("accept", "deny", "edit")
+MEMORY_KINDS = ("remember", "forget", "approved", "edited", "undo")
 
 
 class UiBridge:
@@ -17,6 +19,8 @@ class UiBridge:
         on_set_effort: Optional[Callable[[str], None]] = None,
         get_effort: Optional[Callable[[], str]] = None,
         on_compact: Optional[Callable[[], None]] = None,
+        on_memory_decision: Optional[Callable[[str, str, Optional[str]], None]] = None,
+        on_memory_undo: Optional[Callable[[], None]] = None,
     ):
         self.app = FastAPI()
         self.clients: set[WebSocket] = set()
@@ -25,6 +29,10 @@ class UiBridge:
         self.on_set_effort = on_set_effort
         self.get_effort = get_effort
         self.on_compact = on_compact
+        self.on_memory_decision = on_memory_decision
+        self.on_memory_undo = on_memory_undo
+        # The review card's list, replayed (like the status) to clients that connect later
+        self.last_proposals: Optional[dict] = None
         # The last status sent, replayed to clients that connect later. The overlay is
         # usually still reconnecting when "booting" goes out, and would otherwise sit
         # looking idle through the whole model load.
@@ -40,6 +48,8 @@ class UiBridge:
                     await ws.send_json({"type": "effort", "value": self.get_effort()})
                 if self.last_status:
                     await ws.send_json(self.last_status)
+                if self.last_proposals:
+                    await ws.send_json(self.last_proposals)
                 while True:
                     raw = await ws.receive_text()
                     try:
@@ -56,6 +66,16 @@ class UiBridge:
                             self.on_user_text(text)
                     elif kind == "compact" and self.on_compact:
                         self.on_compact()
+                    elif kind == "memory_decision" and self.on_memory_decision:
+                        slug, decision = data.get("slug"), data.get("decision")
+                        text = data.get("text")
+                        if not isinstance(slug, str) or not slug or decision not in MEMORY_DECISIONS:
+                            continue
+                        if decision == "edit" and not (isinstance(text, str) and text.strip()):
+                            continue
+                        self.on_memory_decision(slug, decision, text if decision == "edit" else None)
+                    elif kind == "memory_undo" and self.on_memory_undo:
+                        self.on_memory_undo()
                     elif kind == "set_effort" and self.on_set_effort:
                         value = data.get("effort")
                         if value in VALID_EFFORTS:
@@ -106,6 +126,14 @@ class UiBridge:
 
     def effort(self, value: str):
         self.emit({"type": "effort", "value": value})
+
+    def memory_proposals(self, items: list):
+        """The whole review list (empty = nothing to review); see PROTOCOL.md."""
+        self.last_proposals = {"type": "memory_proposals", "items": items}
+        self.emit(self.last_proposals)
+
+    def memory_committed(self, kind: str, summary: str):
+        self.emit({"type": "memory_committed", "kind": kind, "summary": summary})
 
     def widget(self, card: dict):
         """Show a card next to Appy; `card` carries its own "widget" kind (see PROTOCOL.md)."""

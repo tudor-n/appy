@@ -16,6 +16,8 @@ MEMORY_RULES = (
     "Only write memory when the user explicitly asks."
 )
 UNREACHABLE = json.dumps({"error": "long-term memory is unreachable right now"})
+# The fields of a proposal as the overlay gets them (see PROTOCOL.md memory_proposals)
+PROPOSAL_FIELDS = ("slug", "title", "summary", "before", "after", "stale")
 TIMEOUT = 3.0
 UPLOAD_TIMEOUT = 5.0
 
@@ -89,6 +91,30 @@ class MemoryClient:
 
     def forget(self, slug: str, text: str) -> str:
         return self._call("POST", "/forget", {"slug": slug, "text": text, "session": self.session_id})
+
+    # -- review (memory_review.MemoryReview) ----------------------------------------
+
+    def proposals(self) -> list[dict] | None:
+        """What the consolidator proposed, for the overlay; None if it can't be reached."""
+        try:
+            r = self.http.get("/proposals")
+            r.raise_for_status()
+            return [{"slug": str(i["slug"]), "title": str(i.get("title") or i["slug"]),
+                     "summary": str(i.get("summary", "")), "before": str(i.get("before", "")),
+                     "after": str(i.get("new_text", "")), "stale": bool(i.get("stale"))}
+                    for i in r.json()["items"]]
+        except Exception as exc:
+            print(f"[memory] proposals unavailable ({type(exc).__name__})")
+            return None
+
+    def decide(self, slug: str, decision: str, text: str | None = None) -> dict:
+        body = {"decision": decision}
+        if text is not None:
+            body["text"] = text
+        return json.loads(self._call("POST", f"/proposals/{slug}", body))
+
+    def undo(self) -> dict:
+        return json.loads(self._call("POST", "/undo", {}))
 
     def _call(self, method: str, path: str, body: dict | None = None) -> str:
         try:
