@@ -247,6 +247,31 @@ class VaultTests(unittest.TestCase):
         self.assertEqual(len(self.vault.forgotten()), 20)
         self.assertEqual(self.vault.forgotten()[-1]["line"], "- Fact 24.")
 
+    def test_forget_also_clears_a_gist_built_from_that_fact(self):
+        # a new note's gist is its first fact; forgetting that fact must not leave it in
+        # the gist, which goes into every system prompt through the index
+        self.vault.remember("Tudor's PSU is a Riden RD6024.", "bench", "s1")
+        self.vault.remember("The scope is a Rigol DS1054Z.", "bench", "s1")
+        self.vault.forget("bench", "riden", "s1")
+        self.assertEqual((self.mem / "bench.md").read_text(),
+                         "# Bench\n> The scope is a Rigol DS1054Z.\n- The scope is a Rigol DS1054Z.\n")
+        self.assertNotIn("Riden", self.vault.context()["index"])
+
+    def test_forget_last_fact_removes_the_note(self):
+        self.vault.remember("Tudor's PSU is a Riden RD6024.", "bench", "s1")
+        self.vault.forget("bench", "riden", "s1")
+        self.assertFalse((self.mem / "bench.md").exists())
+        self.assertEqual(self.vault.context()["index"], "")
+        self.assertEqual(git_out(self.root, "status", "--porcelain"), "")
+        self.vault.undo()
+        self.assertIn("Riden", (self.mem / "bench.md").read_text())
+        self.assertIn("bench |", self.vault.context()["index"])
+
+    def test_forget_last_core_fact_keeps_core(self):
+        self.vault.remember("Tudor lives in Sibiu.", None, "s1")
+        self.vault.forget("core", "sibiu", "s1")
+        self.assertEqual((self.mem / "core.md").read_text(), "")
+
     def test_failed_commit_restores_the_note(self):
         from appy_memory.gitrepo import GitError
         self.vault.remember("Tudor lives in Sibiu.", None, "s1")

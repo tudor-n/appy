@@ -150,7 +150,18 @@ class Vault:
         line = matches[0]
         lines = old.splitlines(keepends=True)
         lines.remove(next(l for l in lines if l.rstrip("\n") == line))
-        sha = self._commit(path, old, "".join(lines), f"memory: forget {slug}: {line[2:62]}", session)
+        rest = self._bullets("".join(lines))
+        new: str | None = "".join(lines)
+        if slug != CORE and not rest:
+            new = None  # nothing left in the note: drop it (and its index line)
+        elif slug != CORE and len(lines) > 1 and lines[1].startswith("> "):
+            # The gist is in every system prompt (via the index). A new note's gist is its
+            # first fact, so forgetting that fact has to take it out of the gist too.
+            gist = _match_key(lines[1][2:])
+            if gist and (gist in _match_key(line) or needle in gist):
+                lines[1] = f"> {rest[0][2:][:GIST_CHARS]}\n"
+                new = "".join(lines)
+        sha = self._commit(path, old, new, f"memory: forget {slug}: {line[2:62]}", session)
         (self.root / "pending" / f"{slug}.json").unlink(missing_ok=True)
         state = self._state()
         forgotten = state.get("forgotten", [])
@@ -203,8 +214,13 @@ class Vault:
     def _bullets(text: str) -> list[str]:
         return [l for l in text.splitlines() if l.startswith("- ")]
 
-    def _commit(self, path: Path, old: str | None, new: str, subject: str, session: str) -> str:
-        _write_atomic(path, new)
+    def _commit(self, path: Path, old: str | None, new: str | None, subject: str,
+                session: str) -> str:
+        """Write `new` to `path` (None deletes it) and commit; on failure put `old` back."""
+        if new is None:
+            path.unlink()
+        else:
+            _write_atomic(path, new)
         try:
             sha = self.git.commit(subject, f"session={session}", paths=("memory",))
         except GitError as exc:
