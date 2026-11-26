@@ -13,9 +13,11 @@ pub type Size = (f64, f64);
 /// Shell's initial distance from the bottom-right corner of the screen.
 const HOME_MARGIN_RIGHT: f64 = 24.0;
 const HOME_MARGIN_BOTTOM: f64 = 56.0;
-/// While dragging with the chat open, only switch sides once the other side sticks
-/// out this much less, so the chat doesn't flicker back and forth at the boundary.
-const FLIP_HYSTERESIS: f64 = 32.0;
+/// While dragging with the chat open, the chat moves to the left once it would stick
+/// out this far past the right edge, and comes back as soon as the right side has
+/// this much room to spare. The gap between the two keeps it from flickering at the
+/// boundary.
+const FLIP_MARGIN: f64 = 16.0;
 /// Space between the mascot body and the weather card.
 const CARD_GAP: f64 = 14.0;
 
@@ -94,8 +96,9 @@ impl Placement {
     }
 
     /// Re-pick the chat's side. Normally: the right if it fits, otherwise whichever
-    /// side sticks out less. `sticky` (dragging with the chat open) keeps the current
-    /// side until the other is clearly better. Returns true when the side changed.
+    /// side sticks out less. `sticky` (dragging with the chat open) adds a little
+    /// hysteresis around the right edge so the chat doesn't flicker there. Returns true
+    /// when the side changed.
     pub fn choose_side(&mut self, win: Size, shell: &Shell, sticky: bool) -> bool {
         let sticks_out = |h: HSide| {
             overflow(
@@ -105,11 +108,15 @@ impl Placement {
             )
         };
         let (right, left) = (sticks_out(HSide::Right), sticks_out(HSide::Left));
+        // How far the chat-on-the-right shell passes the screen's right edge
+        // (negative: room to spare)
+        let past_right_edge =
+            self.anchor.0 - shell.mascot_x[HSide::Right as usize] + shell.size.0 - win.0;
 
         let side = if sticky {
             match self.side {
-                HSide::Right if left + FLIP_HYSTERESIS < right => HSide::Left,
-                HSide::Left if right + FLIP_HYSTERESIS < left => HSide::Right,
+                HSide::Right if past_right_edge > FLIP_MARGIN && left < right => HSide::Left,
+                HSide::Left if past_right_edge < -FLIP_MARGIN => HSide::Right,
                 current => current,
             }
         } else if right <= left {
@@ -273,19 +280,24 @@ mod tests {
     }
 
     #[test]
-    fn dragging_with_the_chat_open_is_sticky() {
-        // Room on both sides: keeps the current side instead of jumping to the right
-        let mut p = placement_at(900.0, HSide::Left);
-        assert!(!p.choose_side(WIN, &shell(), true));
-        assert_eq!(p.side, HSide::Left);
+    fn dragging_with_the_chat_open_switches_with_hysteresis() {
+        // x where the chat-on-the-right shell exactly touches the right edge
+        let edge = 1920.0 - 490.0 + 34.0;
+        let side_after = |x: f64, from: HSide| {
+            let mut p = placement_at(x, from);
+            p.choose_side(WIN, &shell(), true);
+            p.side
+        };
 
-        // Just past the point where the right side stops fitting: not yet
-        let mut p = placement_at(1920.0 - 490.0 + 34.0 + 20.0, HSide::Right);
-        assert!(!p.choose_side(WIN, &shell(), true));
-        // Clearly better on the left: switch
-        let mut p = placement_at(1920.0 - 490.0 + 34.0 + 60.0, HSide::Right);
-        assert!(p.choose_side(WIN, &shell(), true));
-        assert_eq!(p.side, HSide::Left);
+        // Moving right: stays put until the chat would stick out more than 16px
+        assert_eq!(side_after(edge + 10.0, HSide::Right), HSide::Right);
+        assert_eq!(side_after(edge + 20.0, HSide::Right), HSide::Left);
+
+        // Moving back left: returns as soon as the right side has 16px to spare,
+        // not only once the left side runs out of room
+        assert_eq!(side_after(edge - 10.0, HSide::Left), HSide::Left);
+        assert_eq!(side_after(edge - 20.0, HSide::Left), HSide::Right);
+        assert_eq!(side_after(900.0, HSide::Left), HSide::Right);
     }
 
     #[test]
