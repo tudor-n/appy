@@ -3,16 +3,18 @@ import io
 import unittest
 
 import agent as agent_mod
-from agent import Agent, compact_history, prune_old_tool_outputs
+import compaction
+from agent import Agent, prune_old_tool_outputs
 from status import ActivityCounter, StatusTracker
 from compaction import estimate_tokens
 from tests.fakes import (
-    FakeClient, FakeSpeaker, FakeUi, RecordingLogger, text_chunk, tool_chunk, usage_chunk,
+    FakeClient, FakeSpeaker, FakeUi, RecordingLogger, completion, text_chunk, tool_chunk,
+    usage_chunk,
 )
 
 
-def make_agent(scripts, run_tool=None, log=None):
-    client = FakeClient(scripts)
+def make_agent(scripts, run_tool=None, log=None, client=None, **agent_kwargs):
+    client = client or FakeClient(scripts)
     speaker = FakeSpeaker()
     ui = FakeUi()
     agent = Agent(
@@ -25,6 +27,7 @@ def make_agent(scripts, run_tool=None, log=None):
         status=StatusTracker(lambda state: ui.events.append(("status", state))),
         run_tool=run_tool or (lambda name, args: '{"ok":true}'),
         log=log,
+        **agent_kwargs,
     )
     return agent, client, speaker, ui
 
@@ -134,20 +137,10 @@ class AgentTurnTests(unittest.TestCase):
         self.assertEqual(client.calls[-1]["tool_choice"], "none")
         self.assertEqual(agent.messages[-1], {"role": "assistant", "content": "Fine, it's sunny."})
 
-    def test_compaction_happens_before_request(self):
-        agent, client, _, ui = make_agent([[text_chunk("Okay.")]])
-        for i in range(agent_mod.HISTORY_MAX_MESSAGES // 2 + 1):
-            agent.messages.append({"role": "user", "content": f"u{i}"})
-            agent.messages.append({"role": "assistant", "content": f"a{i}"})
-        run_quietly(agent, "latest")
-
-        sent = client.calls[0]["messages"]
-        self.assertEqual(sent[0]["role"], "system")
-        self.assertEqual(sent[1]["role"], "user")
-        self.assertLessEqual(len(sent) - 1, agent_mod.HISTORY_KEEP_MESSAGES + 1)
-        self.assertEqual(sent[-1]["content"], "latest")
+    def test_first_status_is_still_thinking(self):
+        agent, _, _, ui = make_agent([[text_chunk("Okay.")]])
+        run_quietly(agent, "hi")
         self.assertEqual(ui.events[0], ("status", "thinking"))  # no "compacted for 0s" pill
-
 
     def test_no_idle_while_last_sentence_is_still_queued(self):
         # Regression: the last sentence is only queued when the stream ends, so the
@@ -288,25 +281,59 @@ class AgentLoggingTests(unittest.TestCase):
         self.assertEqual(log.events, [])
 
 
-class CompactHistoryTests(unittest.TestCase):
-    def test_noop_under_limit(self):
-        msgs = [{"role": "system"}] + [{"role": "user"}] * 5
-        self.assertFalse(compact_history(msgs, max_messages=10, keep=4))
-        self.assertEqual(len(msgs), 6)
+def statuses(ui) -> list[str]:
+    return [e[1] for e in ui.events if e[0] == "status"]
 
-    def test_never_starts_with_orphaned_tool_message(self):
-        msgs = [{"role": "system", "content": "sys"}]
-        for i in range(10):
-            msgs += [
-                {"role": "user", "content": f"u{i}"},
-                {"role": "assistant", "content": None, "tool_calls": []},
-                {"role": "tool", "content": "{}"},
-                {"role": "assistant", "content": f"a{i}"},
-            ]
-        self.assertTrue(compact_history(msgs, max_messages=20, keep=6))
-        self.assertEqual(msgs[0]["role"], "system")
-        self.assertEqual(msgs[1]["role"], "user")
-        self.assertEqual(msgs[-1]["content"], "a9")
+
+def prefill(agent: Agent, turns: int, size: int = 1200):
+    for i in range(turns):
+        agent.messages.append({"role": "user", "content": f"u{i} " + "x" * size})
+        agent.messages.append({"role": "assistant", "content": f"a{i} " + "x" * size})
+
+
+class MaybeCompactTests(unittest.TestCase):
+    def test_maybe_compact_noop_under_threshold(self):
+        agent, client, _, ui = make_agent([[text_chunk("Okay.")]])
+        run_quietly(agent, "hi")
+        self.assertFalse(agent.maybe_compact())
+        self.assertEqual(len(client.calls), 1)
+        self.assertNotIn("compacting", statuses(ui))
+
+    def test_maybe_compact_over_threshold(self):
+        log = RecordingLogger()
+        agent, client, _, ui = make_agent(
+            [[text_chunk("Okay."), usage_chunk(9600, 10)], completion("FACTS: x")],
+            log=log, compact_at=9500,
+        )
+        prefill(agent, 12)
+        run_quietly(agent, "hi")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(agent.maybe_compact())
+
+        self.assertEqual(statuses(ui)[-2:], ["compacting", "idle"])
+        self.assertEqual(log.events[-1], ("compaction", {"summary": "FACTS: x"}))
+        self.assertIsNone(agent.last_usage)
+        self.assertEqual(agent.messages[1]["content"], compaction.SUMMARY_PREFIX + "FACTS: x")
+
+    def test_long_conversation_stays_bounded(self):
+        def responder(kwargs):
+            if kwargs.get("stream"):
+                return iter([text_chunk("r" * 600)])  # no usage chunk: exercises the estimate
+            return completion("FACTS: " + "s" * 300)
+
+        agent, client, _, _ = make_agent([], client=FakeClient(responder=responder), compact_at=9500)
+        system = dict(agent.messages[0])
+        compactions = 0
+        for i in range(60):
+            run_quietly(agent, f"turn {i} " + "q" * 600)
+            with contextlib.redirect_stdout(io.StringIO()):
+                compactions += agent.maybe_compact()
+            size = estimate_tokens(agent.messages) + estimate_tokens(agent.tools)
+            self.assertLess(size, 9500 + 1000)
+            self.assertEqual(agent.messages[0], system)
+            for prev, cur in zip(agent.messages, agent.messages[1:]):
+                self.assertFalse(prev["role"] == cur["role"] == "user")
+        self.assertGreaterEqual(compactions, 1)
 
 
 class PruneTests(unittest.TestCase):

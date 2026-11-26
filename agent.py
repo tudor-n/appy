@@ -1,7 +1,7 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
 import openai
 
-from compaction import estimate_tokens
+from compaction import COMPACT_AT, SUMMARY_MAX, TAIL_BUDGET, compact, estimate_tokens
 from session_log import NullLogger
 from streaming import ExpressionTagParser, SpeechChunker
 from tools import TOOL_SCHEMAS, run_tool as default_run_tool
@@ -19,11 +19,6 @@ ALREADY_SAID_NOTE = (
     '\n\n(You already told the user: "{said}". Continue from there with just the answer. '
     "Don't greet them or repeat that again.)"
 )
-# Once the transcript (excluding the system prompt) grows past HISTORY_MAX_MESSAGES,
-# drop the oldest messages down to about HISTORY_KEEP_MESSAGES. Trimming in one big step
-# instead of a message at a time keeps the server's prompt cache warm between turns.
-HISTORY_MAX_MESSAGES = 60
-HISTORY_KEEP_MESSAGES = 30
 
 
 def prune_old_tool_outputs(messages: list[dict], keep_recent: int = KEEP_RECENT_TOOL_OUTPUTS):
@@ -50,30 +45,6 @@ def forget_stale_results(messages: list[dict], stale_tools: frozenset[str]):
         name = names.get(msg.get("tool_call_id"))
         if msg.get("role") == "tool" and name in stale_tools:
             msg["content"] = f"[old {name} result removed: call {name} again for fresh data]"
-
-
-def compact_history(
-    messages: list[dict],
-    max_messages: int = HISTORY_MAX_MESSAGES,
-    keep: int = HISTORY_KEEP_MESSAGES,
-) -> bool:
-    """Drop the oldest messages, keeping the system prompt. Returns True if it trimmed.
-
-    The kept part always starts at a user message so an assistant tool call is never
-    separated from its tool results.
-    """
-    body = messages[1:]
-    if len(body) <= max_messages:
-        return False
-
-    start = max(len(body) - keep, 0)
-    cut = next((i for i in range(start, len(body)) if body[i].get("role") == "user"), None)
-    if cut is None:
-        cut = next((i for i in range(start - 1, -1, -1) if body[i].get("role") == "user"), None)
-    if not cut:
-        return False
-    del messages[1 : 1 + cut]
-    return True
 
 
 def describe_error(exc: Exception) -> str:
@@ -116,6 +87,9 @@ class Agent:
         on_tool_result=None,
         stale_tools: frozenset[str] = frozenset(),
         log=None,
+        compact_at: int = COMPACT_AT,
+        tail_budget: int = TAIL_BUDGET,
+        summary_max: int = SUMMARY_MAX,
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
         UI can show a card for it. Its errors are logged, never fatal to the turn.
@@ -134,6 +108,9 @@ class Agent:
         self.on_tool_result = on_tool_result
         self.log = log or NullLogger()
         self.stale_tools = stale_tools
+        self.compact_at = compact_at
+        self.tail_budget = tail_budget
+        self.summary_max = summary_max
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
         # prompt + completion tokens of the last request, as reported by the server
         self.last_usage: int | None = None
@@ -160,9 +137,6 @@ class Agent:
 
     def run_turn(self, user_text: str, effort: str = "none", speak_aloud: bool = True):
         """Run one user turn to completion. Never raises on LLM/network errors."""
-        if compact_history(self.messages):
-            print(f"[history compacted to {len(self.messages) - 1} messages]")
-
         checkpoint = len(self.messages)
         self.messages.append({"role": "user", "content": user_text})
         self.status.set_phase("thinking")
@@ -179,6 +153,27 @@ class Agent:
             self.status.set_phase("idle")
             forget_stale_results(self.messages[checkpoint:], self.stale_tools)
             prune_old_tool_outputs(self.messages)
+
+    def maybe_compact(self) -> bool:
+        """Between turns: if the conversation has grown past `compact_at` tokens, fold the
+        older turns into the session summary. Returns True if it compacted.
+
+        Old tool results are already pruned at the end of every turn, so this goes
+        straight to summarising."""
+        if self.context_tokens() < self.compact_at:
+            return False
+        self.status.announce("compacting")
+        print("[compacting]")
+        try:
+            summary = compact(
+                self.client, self.model, self.messages, self.tail_budget, self.summary_max
+            )
+            if summary:
+                self.log.compaction(summary=summary)
+            self.last_usage = None  # the server's count is for the old, longer history
+        finally:
+            self.status.publish(force=True)
+        return True
 
     def _run_rounds(self, effort: str, speak_aloud: bool):
         for round_no in range(MAX_TOOL_ROUNDS + 1):

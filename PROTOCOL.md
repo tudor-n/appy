@@ -27,8 +27,8 @@ Python and Rust lists of expressions, efforts or states drift apart.
 **States:** `idle`, `listening`, `booting`, `thinking`, `compacting`, `speaking`.
 On the Python side `StatusTracker` (`status.py`) is the only thing that sends
 `thinking`/`speaking`/`idle`. It combines the turn phase from the agent with whether the
-speaker still has text queued or playing. `booting` is sent with `StatusTracker.announce`. The UI also
-understands `compacting`, but the backend doesn't send it: trimming history is instant.
+speaker still has text queued or playing. `booting` is sent with `StatusTracker.announce`, and so
+is `compacting`, while older turns are summarised between turns.
 
 **Expressions:** `neutral`, `happy`, `excited`, `curious`, `surprised`, `focused`,
 `skeptical`. The LLM picks one by starting its reply with a tag like `[happy]`, which

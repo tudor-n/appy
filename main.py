@@ -85,6 +85,9 @@ def main():
         on_tool_result=show_tool_card,
         stale_tools=tools.STALE_TOOLS,
         log=log,
+        compact_at=int(os.getenv("COMPACT_AT", "9500")),
+        tail_budget=int(os.getenv("TAIL_BUDGET", "2500")),
+        summary_max=int(os.getenv("SUMMARY_MAX", "700")),
     )
 
     def _voice_forwarder():
@@ -128,6 +131,9 @@ def main():
                 speaker.wait()
             finally:
                 ear.resume()
+            # Between turns, once Appy has finished speaking; anything said meanwhile is
+            # queued in turn_queue, not lost
+            agent.maybe_compact()
     except KeyboardInterrupt:
         print("\nExiting...")
     except Exception:

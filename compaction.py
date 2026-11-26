@@ -9,6 +9,7 @@ compaction edits the previous summary instead of summarising a summary.
 import json
 import math
 
+COMPACT_AT = 9500
 TAIL_BUDGET = 2500
 SUMMARY_MAX = 700
 TOOL_RESULT_CHARS = 200

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import unittest
 
 from compaction import SUMMARY_ACK, SUMMARY_PREFIX, compact, estimate_tokens, render, split
@@ -155,14 +157,17 @@ class CompactTests(unittest.TestCase):
     def test_failed_summary_still_shrinks(self):
         msgs = self.pixel_history()
         before = len(msgs)
-        self.assertIsNone(compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000)
+        self.assertIsNone(result)
         self.assertLess(len(msgs), before)
         self.assertEqual(msgs[1]["role"], "user")
         assert_valid(self, msgs)
 
     def test_failed_summary_keeps_previous_summary(self):
         msgs = [dict(SYSTEM)] + summary_pair("FACTS: cat is Pixel") + history(10)[1:]
-        compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000)
         self.assertEqual(msgs[1]["content"], SUMMARY_PREFIX + "FACTS: cat is Pixel")
         self.assertEqual(msgs[2]["content"], SUMMARY_ACK)
         assert_valid(self, msgs)

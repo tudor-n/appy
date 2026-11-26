@@ -20,13 +20,17 @@ class FakeClient:
     Each script entry is either a list of chunks or an Exception to raise.
     """
 
-    def __init__(self, scripts):
+    def __init__(self, scripts=(), responder=None):
+        """`responder(kwargs)`, if given, answers every request instead of the scripts."""
         self.scripts = list(scripts)
+        self.responder = responder
         self.calls: list[dict] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
         self.calls.append({**kwargs, "messages": [dict(m) for m in kwargs["messages"]]})
+        if self.responder:
+            return self.responder(kwargs)
         if not self.scripts:
             raise AssertionError("FakeClient ran out of scripted responses")
         script = self.scripts.pop(0)
