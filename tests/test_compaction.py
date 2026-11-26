@@ -2,6 +2,8 @@ import contextlib
 import io
 import unittest
 
+import agent as agent_mod
+
 from compaction import SUMMARY_ACK, SUMMARY_PREFIX, compact, estimate_tokens, render, split
 from tests.fakes import FakeClient, completion
 
@@ -98,11 +100,30 @@ class RenderTests(unittest.TestCase):
             {"role": "tool", "tool_call_id": "c1", "content": "z" * 500},
             {"role": "assistant", "content": "Sunny."},
         ])
-        self.assertIn("U: my cat is Pixel", text)
-        self.assertIn("A called get_weather({})", text)
-        self.assertIn("A: Sunny.", text)
+        self.assertIn("User: my cat is Pixel", text)
+        self.assertIn("Appy called get_weather({})", text)
+        self.assertIn("Appy: Sunny.", text)
         tool_line = next(line for line in text.splitlines() if line.startswith("Tool:"))
         self.assertLessEqual(len(tool_line), 206)
+
+
+    def test_render_skips_pruned_tool_output(self):
+        text = render([
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": agent_mod.PRUNED_TOOL_OUTPUT},
+            {"role": "assistant", "content": "Sunny."},
+        ])
+        self.assertNotIn("pruned", text)
+        self.assertNotIn("Tool:", text)
+        self.assertIn("Appy called get_weather({})", text)
+
+    def test_render_drops_the_already_said_note(self):
+        note = agent_mod.ALREADY_SAID_NOTE.format(said="Let me check.")
+        text = render([{"role": "tool", "tool_call_id": "c1", "content": '{"temp_c":3}' + note}])
+        self.assertEqual(text, 'Tool: {"temp_c":3}')
 
 
 class CompactTests(unittest.TestCase):
@@ -133,7 +154,7 @@ class CompactTests(unittest.TestCase):
         self.assertEqual(call["max_tokens"], 800)
         self.assertNotIn("stream", call)
         prompt = call["messages"][0]["content"]
-        self.assertIn("U: my cat is Pixel", prompt)
+        self.assertIn("User: my cat is Pixel", prompt)
         self.assertIn("Previous summary:\nnone", prompt)
 
     def test_second_compaction_folds_previous_summary(self):

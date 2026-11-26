@@ -17,6 +17,11 @@ TURN_RESERVE = 3500
 TAIL_BUDGET = 2500
 SUMMARY_MAX = 700
 TOOL_RESULT_CHARS = 200
+# What prune_old_tool_outputs leaves in place of an old tool result
+PRUNED_TOOL_OUTPUT = "[pruned]"
+# Start of agent.ALREADY_SAID_NOTE, an instruction appended to tool results; the
+# summariser doesn't need it (tests keep the two in sync)
+ALREADY_SAID_START = "\n\n(You already told the user"
 
 SUMMARY_PREFIX = "[Earlier in this session — summary]\n"
 SUMMARY_ACK = "Got it."
@@ -83,20 +88,22 @@ def split(
 
 
 def render(messages: list[dict]) -> str:
-    """Plain-text transcript for the summariser, with tool output cut short."""
+    """Plain-text transcript for the summariser, with tool output cut short and
+    placeholders for pruned tool output left out."""
     lines = []
     for msg in messages:
         role, content = msg.get("role"), msg.get("content")
         if role == "user" and content:
-            lines.append(f"U: {content}")
+            lines.append(f"User: {content}")
         elif role == "assistant":
             if content:
-                lines.append(f"A: {content}")
+                lines.append(f"Appy: {content}")
             for call in msg.get("tool_calls") or ():
                 fn = call["function"]
-                lines.append(f"A called {fn['name']}({fn['arguments']})")
-        elif role == "tool" and content:
-            lines.append("Tool: " + " ".join(content.split())[:TOOL_RESULT_CHARS])
+                lines.append(f"Appy called {fn['name']}({fn['arguments']})")
+        elif role == "tool" and content and content != PRUNED_TOOL_OUTPUT:
+            result = content.split(ALREADY_SAID_START, 1)[0]
+            lines.append("Tool: " + " ".join(result.split())[:TOOL_RESULT_CHARS])
     return "\n".join(lines)
 
 

@@ -5,8 +5,8 @@ from collections import deque
 import openai
 
 from compaction import (
-    COMPACT_AT, CONTEXT_TOKENS, SUMMARY_MAX, TAIL_BUDGET, TURN_RESERVE, compact,
-    estimate_tokens, split,
+    COMPACT_AT, CONTEXT_TOKENS, PRUNED_TOOL_OUTPUT, SUMMARY_MAX, TAIL_BUDGET, TURN_RESERVE,
+    compact, estimate_tokens, split,
 )
 from session_log import NullLogger
 from streaming import ExpressionTagParser, SpeechChunker
@@ -35,8 +35,8 @@ def prune_old_tool_outputs(messages: list[dict], keep_recent: int = KEEP_RECENT_
     if len(messages) <= keep_recent:
         return
     for msg in messages[:-keep_recent]:
-        if msg.get("role") == "tool" and msg.get("content") != "[pruned]":
-            msg["content"] = "[pruned]"
+        if msg.get("role") == "tool" and msg.get("content") != PRUNED_TOOL_OUTPUT:
+            msg["content"] = PRUNED_TOOL_OUTPUT
 
 
 def drop_stale_tool_exchanges(messages: list[dict], start: int, stale_tools: frozenset[str]):
