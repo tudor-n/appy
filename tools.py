@@ -227,7 +227,11 @@ MEMORY_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "memory_forget",
-            "description": "Remove a fact from long-term memory when the user asks you to forget it.",
+            "description": (
+                "Remove a fact from long-term memory. Call this whenever the user asks you to "
+                "forget something; nothing is forgotten unless you call it, so never say you "
+                "forgot without calling it."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -288,6 +292,19 @@ _TIME_FOLLOW_UP = re.compile(
 )
 
 
+# A clear request to forget something. Gemma answers these with "I've wiped that" and no
+# tool call (live check: 0/9 runs; forced: 9/9), so they force memory_forget. Leaves out
+# "don't forget to...", "forget it", "forget about it" and a bare "forget that" (all mean
+# something else). The fallback args are a guess the service will usually not match; its
+# reply lists the note's lines, so the model can retry with the right text.
+_FORGET = re.compile(
+    r"(?<!don't )(?<!dont )(?<!do not )\b(?:forget|stop remembering|"
+    r"(?:don'?t|do not|no longer) remember)\s+(?:that\s+|about\s+)?"
+    r"(?P<what>(?!(?:about\s+)?(?:it|this|that)\b)\w.*)",
+    re.IGNORECASE,
+)
+_FORGET_TRAILER = re.compile(r"(\s+(anymore|any more|please))?[\s.!?]*$", re.IGNORECASE)
+
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "a": 1}
 
@@ -320,7 +337,8 @@ class ForcedCall:
 
 
 def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | None:
-    """The call the next turn must make, if the message is clearly a weather question.
+    """The call the next turn must make: memory_forget for a clear request to forget
+    something (only while memory is on), get_weather for a clear weather question.
 
     Gemma often answers weather follow-ups from its earlier reply instead of calling the
     tool (no card, and for "in 3 hours" made-up or refused answers), whatever the
@@ -329,6 +347,9 @@ def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | No
     call itself. `recent_tools` is Agent.recent_tools (the last few turns), so a
     "thanks!" in between doesn't break the follow-up.
     """
+    if _memory is not None and (forget := _FORGET.search(user_text)):
+        what = _FORGET_TRAILER.sub("", forget.group("what")).strip()
+        return ForcedCall("memory_forget", {"slug": "core", "text": what})
     weather = bool(_WEATHER_WORDS.search(user_text)) or (
         "get_weather" in recent_tools and bool(_TIME_FOLLOW_UP.search(user_text))
     )

@@ -1,8 +1,9 @@
 """Live check: does the model call the memory tools when (and only when) it should?
 
 Sends a few prompts to the LLM in .env (BASE_URL / MODEL) with the real system prompt
-plus a sample memory block and all 4 tool schemas, the way main.py does, and prints
-which tools each run called. Nothing is saved anywhere; the tools are never executed.
+plus a sample memory block and all 4 tool schemas, the way main.py does (including
+tools.forced_call: a forced turn offers only that tool, with tool_choice="required"),
+and prints which tools each run called. Nothing is saved; the tools are never executed.
 
     .venv/bin/python dev/check_memory_tools.py [runs per prompt, default 3]
 """
@@ -46,18 +47,25 @@ def main():
                     api_key=os.getenv("API_KEY", "ollama"))
     model = os.getenv("MODEL", "google/gemma-4-26b-a4b")
     schemas = tools.TOOL_SCHEMAS + tools.MEMORY_TOOL_SCHEMAS
+    tools.set_memory(object())  # memory is "on", so forced_call may force memory_forget
     print(f"model {model}, {len(schemas)} tools, system prompt {len(prompt)} chars\n")
 
     all_ok = True
     for text, expected, checks in CASES:
         hits = 0
         print(f"> {text}   (expect {expected or 'no memory write'})")
+        forced = tools.forced_call(text, frozenset())
+        offered = [t for t in schemas if forced and t["function"]["name"] == forced.name]
+        extra = {"tool_choice": "required"} if offered else {}
+        if forced:
+            print(f"    (forced: {forced.name})")
         for _ in range(runs):
             r = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "system", "content": prompt},
                           {"role": "user", "content": f"[09:00 PM] {text}"}],
-                tools=schemas, temperature=0.4, reasoning_effort="none", max_tokens=300,
+                tools=offered or schemas, temperature=0.4, reasoning_effort="none",
+                max_tokens=300, **extra,
             )
             msg = r.choices[0].message
             calls = [(c.function.name, c.function.arguments) for c in msg.tool_calls or ()]

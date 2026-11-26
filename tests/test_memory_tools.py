@@ -68,5 +68,44 @@ class MemoryToolTests(unittest.TestCase):
         self.assertEqual(len(client.calls[0]["tools"]), 4)
 
 
+class ForcedForgetTests(unittest.TestCase):
+    """Gemma says "I've wiped that" without calling memory_forget (live check: 0/9 runs;
+    forced 9/9), so a clear request to forget forces the call, like weather does."""
+
+    def setUp(self):
+        tools.set_memory(StubMemory())
+
+    def tearDown(self):
+        tools.set_memory(None)
+
+    def test_forget_requests_force_memory_forget(self):
+        cases = {
+            "forget that I live in Sibiu": "I live in Sibiu",
+            "Please forget my PSU is a Riden.": "my PSU is a Riden",
+            "don't remember that I live in Sibiu anymore": "I live in Sibiu",
+            "stop remembering my address": "my address",
+            "forget about my old printer": "my old printer",
+            "forget that I hate rain": "I hate rain",  # beats the weather word
+        }
+        for text, what in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(tools.forced_call(text, frozenset()),
+                                 tools.ForcedCall("memory_forget", {"slug": "core", "text": what}))
+
+    def test_other_uses_of_forget_are_left_alone(self):
+        for text in ("don't forget to buy milk", "Don't forget that I'm out tomorrow",
+                     "forget it", "never mind, forget about it", "forget that, tell me a joke",
+                     "forget that", "I forgot my keys", "I keep forgetting things"):
+            with self.subTest(text=text):
+                self.assertIsNone(tools.forced_call(text, frozenset()))
+
+    def test_no_forced_forget_without_memory(self):
+        tools.set_memory(None)  # memory_forget isn't offered then: forcing would pick weather
+        self.assertIsNone(tools.forced_call("forget that I live in Sibiu", frozenset()))
+
+    def test_weather_is_still_forced(self):
+        self.assertEqual(tools.forced_call("what's the weather?", frozenset()).name, "get_weather")
+
+
 if __name__ == "__main__":
     unittest.main()
