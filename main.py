@@ -128,7 +128,11 @@ def main():
             ear.pause()  # don't let Appy hear itself
             status.begin_turn(queued=source == "text")
             try:
-                agent.run_turn(f"[{now}] {user_input}", effort=effort_state["value"])
+                agent.run_turn(
+                    f"[{now}] {user_input}",
+                    effort=effort_state["value"],
+                    force=tools.forced_call(user_input, agent.recent_tools),
+                )
                 speaker.wait()
             finally:
                 ear.resume()
