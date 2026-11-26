@@ -194,7 +194,8 @@ def _check(slug: str, lines: list[str], current: str | None) -> list[str]:
             raise Rejected("lost the title line")
         if current is not None:
             old_title = (current.splitlines() or [""])[0].strip()
-            if old_title.startswith("# ") and lines[0].strip() != old_title:
+            # a casing fix ("Mark i suit" -> "Mark I suit") is fine; a new name is not
+            if old_title.startswith("# ") and lines[0].strip().casefold() != old_title.casefold():
                 raise Rejected(f"renamed the title to {lines[0].strip()!r}")
         if not lines[1].startswith("> ") or not lines[1][2:].strip():
             raise Rejected("lost the gist line")
@@ -246,3 +247,174 @@ def rewrite(llm: LLM, slug: str, current: str | None, title: str, window: str,
     if current is not None and _norm(text) == _norm(current):
         raise Rejected("no change")
     return text, summary or f"updated {slug}", tokens
+
+
+class Consolidator:
+    """Works through uploaded sessions that haven't been consolidated, oldest first.
+
+    Vault access happens under `lock` (the server's), LLM calls outside it, so live
+    remember/forget never wait on the model. Progress is saved after every window."""
+
+    def __init__(self, vault, llm: LLM, lock, window_tokens: int = 5000,
+                 idle_seconds: float = 120, last_activity=lambda: 0.0,
+                 dump_dir: Path | None = None, clock=None, sleep=None):
+        import time
+
+        self.vault = vault
+        self.llm = llm
+        self.lock = lock
+        self.window_tokens = window_tokens
+        self.idle_seconds = idle_seconds
+        self.last_activity = last_activity
+        self.dump_dir = dump_dir
+        self.clock = clock or time.time
+        self.sleep = sleep or time.sleep
+
+    def run_pending(self) -> list[dict]:
+        """Consolidate every session not done yet. LLMError propagates (try again later)."""
+        with self.lock:
+            sids = self.vault.sessions_to_consolidate()
+        return [self.run_session(sid) for sid in sids]
+
+    def run_session(self, sid: str) -> dict:
+        from .transcript import load_log, render_turns, windows
+
+        started = self.clock()
+        stats = {"session": sid, "windows": 0, "routed": [], "proposals": 0, "rejected": [],
+                 "tokens": 0, "seconds": 0.0}
+        with self.lock:
+            events = load_log(self.vault.root / "logs" / f"{sid}.jsonl")
+            state = self.vault.session_state(sid)
+        wins = windows(render_turns(events), self.window_tokens)
+        stats["windows"] = len(wins)
+        first = state["done_windows"] if state["windows"] == len(wins) else 0
+        try:
+            if not wins:
+                with self.lock:
+                    self.vault.set_session_state(sid, 0, 0, True)
+            for k in range(first, len(wins)):
+                self._window(sid, k, wins[k], stats)
+                with self.lock:
+                    self.vault.set_session_state(sid, len(wins), k + 1, k + 1 == len(wins))
+        finally:
+            stats["seconds"] = round(self.clock() - started, 1)
+            self._report(stats)
+        return stats
+
+    def _report(self, s: dict) -> None:
+        rejected = f"{len(s['rejected'])} rejected"
+        if s["rejected"]:
+            rejected += f" ({'; '.join(s['rejected'])})"
+        print(f"[consolidator] {s['session']}: {s['windows']} windows, "
+              f"routed [{', '.join(s['routed'])}], {s['proposals']} proposals, {rejected}, "
+              f"{s['tokens']} tokens, {s['seconds']} s", flush=True)
+
+    def _wait_quiet(self) -> None:
+        """Let live chat have the model: wait until no turn has started for a while."""
+        while True:
+            idle = self.clock() - self.last_activity()
+            if idle >= self.idle_seconds:
+                return
+            self.sleep(min(10.0, self.idle_seconds - idle))
+
+    def _dump(self, name: str) -> Path | None:
+        return self.dump_dir / name if self.dump_dir else None
+
+    def _window(self, sid: str, k: int, window: str, stats: dict) -> None:
+        with self.lock:
+            context = self.vault.context()
+            forgotten = self.vault.forgotten_lines()
+            existing = set(self.vault.note_slugs())
+        self._wait_quiet()
+        try:
+            notes, used = route(self.llm, context["index"], context["core"], forgotten, window,
+                                existing, dump=self._dump(f"{sid}-w{k}-route.txt"))
+        except Rejected as exc:
+            stats["rejected"].append(exc.reason)
+            return
+        stats["tokens"] += used
+        for note in notes:
+            stats["routed"].append(note["slug"])
+            self._note(sid, k, window, note, forgotten, stats)
+
+    def _note(self, sid: str, k: int, window: str, note: dict, forgotten: list[str],
+              stats: dict) -> None:
+        slug = note["slug"]
+        for attempt in range(2):
+            with self.lock:
+                pending = self.vault.proposal(slug)
+                current = pending["new_text"] if pending else self.vault.note_text(slug)
+                seen = (self.vault.note_hash(slug), (pending or {}).get("updated"))
+            title = note["title"]
+            if pending:
+                title = pending.get("title") or title
+            elif current and current.startswith("# "):
+                title = current.splitlines()[0][2:].strip()
+            if slug == CORE and current is None:
+                current = ""
+            self._wait_quiet()
+            try:
+                text, summary, used = rewrite(
+                    self.llm, slug, current, title, window, forgotten, why=note["why"],
+                    dump=self._dump(f"{sid}-w{k}-rewrite-{slug}.txt"))
+            except Rejected as exc:
+                stats["rejected"].append(f"{slug}: {exc.reason}")
+                return
+            stats["tokens"] += used
+            if slug != CORE:
+                title = text.splitlines()[0][2:].strip()  # may carry a casing fix
+            with self.lock:
+                now = (self.vault.note_hash(slug), (self.vault.proposal(slug) or {}).get("updated"))
+                if now == seen:
+                    self.vault.save_proposal(slug, title, text, summary, sid, k)
+                    stats["proposals"] += 1
+                    return
+            # the note or its proposal changed while the model was writing: redo it once
+        stats["rejected"].append(f"{slug}: kept changing during the rewrite")
+
+
+class Worker:
+    """Runs the consolidator in a background thread whenever it's kicked (a new log) and,
+    after an error, again every `retry_seconds`. Never dies on an exception."""
+
+    def __init__(self, consolidator: Consolidator, retry_seconds: float = 300):
+        import threading
+
+        self.consolidator = consolidator
+        self.retry_seconds = retry_seconds
+        self._event = threading.Event()
+        self._stopping = False
+        self._thread = threading.Thread(target=self._loop, name="consolidator", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def kick(self) -> None:
+        self._event.set()
+
+    def stop(self, timeout: float = 5) -> None:
+        self._stopping = True
+        self._event.set()
+        self._thread.join(timeout)
+
+    def _loop(self) -> None:
+        import traceback
+
+        from .llm import LLMError
+
+        retry = False
+        while not self._stopping:
+            self._event.wait(self.retry_seconds if retry else None)
+            self._event.clear()
+            if self._stopping:
+                return
+            try:
+                self.consolidator.run_pending()
+                retry = False
+            except LLMError as exc:
+                print(f"[consolidator] LLM unavailable ({exc}); retrying in "
+                      f"{int(self.retry_seconds)} s", flush=True)
+                retry = True
+            except Exception:
+                print("[consolidator] crashed:\n" + traceback.format_exc(), flush=True)
+                retry = True

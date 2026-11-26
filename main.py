@@ -162,6 +162,8 @@ def main():
 
             now = datetime.now().strftime("%I:%M %p")
             log.user(text=user_input, source=source)
+            if memory:  # the Mac's consolidator yields to live chat
+                threading.Thread(target=memory.activity, daemon=True).start()
             ear.pause()  # don't let Appy hear itself
             status.begin_turn(queued=source == "text")
             try:

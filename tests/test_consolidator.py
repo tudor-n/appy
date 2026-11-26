@@ -5,14 +5,17 @@ Don't import tests/fakes.py here: it uses `str | None` at runtime, which 3.9 rej
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import threading
+from contextlib import redirect_stdout
 import tempfile
 import unittest
 from pathlib import Path
 
 import httpx
 
-from appy_memory.consolidator import Rejected, rewrite, route
+from appy_memory.consolidator import Consolidator, Rejected, Worker, rewrite, route
 from appy_memory.llm import LLM, LLMError
 from appy_memory.vault import Vault
 
@@ -239,6 +242,12 @@ class RouteRewriteTests(unittest.TestCase):
         with self.assertRaises(Rejected):
             rewrite(llm, "mark-i-suit", NOTE, "Mark I suit", "w", [])
 
+    def test_rewrite_accepts_title_case_fix(self):
+        note = "# Mark i suit\n> g\n- The suit uses BLDC motors.\n"
+        llm = FakeLLM(["# Mark I Suit\n> g\n- The suit uses BLDC motors.\n- New.\nSUMMARY: x"])
+        text, _, _ = rewrite(llm, "mark-i-suit", note, "Mark i suit", "w", [])
+        self.assertTrue(text.startswith("# Mark I Suit\n"))
+
     def test_rewrite_rejects_non_bullet_lines(self):
         llm = FakeLLM(["# Mark I suit\n> g\nThe suit has a new HUD now.\nSUMMARY: x"])
         with self.assertRaises(Rejected) as ctx:
@@ -279,6 +288,210 @@ class RouteRewriteTests(unittest.TestCase):
                 text = path.read_text()
                 self.assertIn("WINDOW", text)
                 self.assertIn("--- output", text)
+
+
+def log_bytes(*turns, crashed=False) -> bytes:
+    """A session log: each turn is (user text, assistant reply)."""
+    events = [{"v": 1, "seq": 1, "ts": "2026-11-27T00:13:10+02:00", "type": "session_start"}]
+    for user, reply in turns:
+        events.append({"ts": "2026-11-27T00:14:00+02:00", "type": "user", "text": user})
+        events.append({"ts": "2026-11-27T00:14:05+02:00", "type": "assistant", "text": reply})
+    if not crashed:
+        events.append({"ts": "2026-11-27T00:20:00+02:00", "type": "session_end", "reason": "quit"})
+    return "".join(json.dumps(e) + "\n" for e in events).encode()
+
+
+S1, S2 = "2026-11-27_001310", "2026-11-27_101500"
+HUD = "# Mark i suit\n> The suit uses BLDC motors.\n- The suit uses BLDC motors.\n- The HUD runs on a Pi Zero 2 W.\n"
+
+
+class RunTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.vault = Vault(self.root).open()
+        self.vault.remember("The suit uses BLDC motors.", "mark-i-suit", "s0")
+        self.llm = FakeLLM()
+        self.now = [1000.0]
+        self.slept = []
+        self.activity = [0.0]
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def consolidator(self, **kw) -> Consolidator:
+        def sleep(seconds):
+            self.slept.append(seconds)
+            self.now[0] += seconds
+
+        kw.setdefault("window_tokens", 5000)
+        return Consolidator(self.vault, self.llm, threading.Lock(), clock=lambda: self.now[0],
+                            sleep=sleep, last_activity=lambda: self.activity[0], **kw)
+
+    def run_quietly(self, c=None):
+        with redirect_stdout(io.StringIO()) as out:
+            stats = (c or self.consolidator()).run_pending()
+        return stats, out.getvalue()
+
+    def test_small_talk_marks_done_without_proposals(self):
+        self.vault.store_log(S1, log_bytes(("hey, how's it going?", "Fine, sir.")))
+        self.llm.responses = [routed()]
+        self.run_quietly()
+        self.assertEqual(self.vault.proposals(), [])
+        self.assertEqual(self.vault.session_state(S1), {"windows": 1, "done_windows": 1, "done": True})
+        self.assertEqual(self.vault.sessions_to_consolidate(), [])
+
+    def test_project_update_creates_one_proposal(self):
+        before = self.vault.note_text("mark-i-suit")
+        self.vault.store_log(S1, log_bytes(("the helmet HUD will run on a Pi Zero 2 W", "Nice.")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "HUD hardware")), HUD + "SUMMARY: added the HUD"]
+        stats, out = self.run_quietly()
+        [item] = self.vault.proposals()
+        self.assertEqual(item["slug"], "mark-i-suit")
+        self.assertEqual(item["new_text"], HUD)
+        self.assertEqual(item["summary"], "added the HUD")
+        self.assertEqual(item["sessions"], [S1])
+        self.assertEqual(item["sources"], [[S1, 0]])
+        self.assertEqual(item["base_hash"], self.vault.note_hash("mark-i-suit"))
+        self.assertEqual(item["title"], "Mark i suit")
+        self.assertEqual(self.vault.note_text("mark-i-suit"), before)  # memory/ untouched
+        self.assertIn("Pi Zero 2 W", self.llm.prompt(1))
+        self.assertIn(before, self.llm.prompt(1))
+        self.assertEqual(stats[0]["proposals"], 1)
+
+    def test_second_session_builds_on_pending(self):
+        self.vault.store_log(S1, log_bytes(("the helmet HUD will run on a Pi Zero 2 W", "ok")))
+        self.vault.store_log(S2, log_bytes(("the OLED is 1.3 inches", "ok")))
+        both = HUD + "- The HUD OLED is 1.3 inches.\n"
+        self.llm.responses = [routed(("mark-i-suit", False, "", "HUD")), HUD + "SUMMARY: a",
+                              routed(("mark-i-suit", False, "", "OLED size")), both + "SUMMARY: b"]
+        self.run_quietly()
+        self.assertIn(HUD, self.llm.prompt(3))  # the second rewrite starts from the pending text
+        [item] = self.vault.proposals()
+        self.assertEqual(item["new_text"], both)
+        self.assertEqual(item["sessions"], [S1, S2])
+
+    def test_new_note_proposal(self):
+        self.vault.store_log(S1, log_bytes(("my BI app Lumen uses DuckDB", "ok")))
+        self.llm.responses = [routed(("lumen", True, "Lumen BI app", "stack")),
+                              "# Lumen BI app\n> Tudor's BI app\n- Lumen uses DuckDB.\nSUMMARY: new"]
+        self.run_quietly()
+        [item] = self.vault.proposals()
+        self.assertEqual((item["slug"], item["title"], item["base_hash"]), ("lumen", "Lumen BI app", ""))
+        self.assertIn("(this is a new note)", self.llm.prompt(1))
+
+    def test_long_session_one_proposal_over_windows(self):
+        turns = [(f"suit detail number {i}: " + "x" * 300, "ok") for i in range(6)]
+        self.vault.store_log(S1, log_bytes(*turns))
+        texts = [HUD.replace("Pi Zero 2 W", f"Pi Zero rev {i}") for i in range(3)]
+        self.llm.responses = []
+        for t in texts:
+            self.llm.responses += [routed(("mark-i-suit", False, "", "detail")), t + "SUMMARY: s"]
+        stats, _ = self.run_quietly(self.consolidator(window_tokens=250))
+        self.assertEqual(stats[0]["windows"], 3)
+        [item] = self.vault.proposals()
+        self.assertEqual(item["sources"], [[S1, 0], [S1, 1], [S1, 2]])
+        self.assertEqual(item["new_text"], texts[-1])
+
+    def test_crashed_session_processed(self):
+        self.vault.store_log(S1, log_bytes(("hello", "hi"), crashed=True))
+        self.llm.responses = [routed()]
+        self.run_quietly()
+        self.assertTrue(self.vault.session_state(S1)["done"])
+
+    def test_empty_session_is_done_without_llm(self):
+        self.vault.store_log(S1, b'{"type":"session_start"}\n{"type":"session_end"}\n')
+        self.run_quietly()
+        self.assertEqual(self.llm.calls, [])
+        self.assertEqual(self.vault.session_state(S1), {"windows": 0, "done_windows": 0, "done": True})
+
+    def test_activity_pauses_before_llm_calls(self):
+        self.vault.store_log(S1, log_bytes(("hello", "hi")))
+        self.activity[0] = self.now[0] - 30  # a turn started 30 s ago
+        self.llm.responses = [routed()]
+        self.run_quietly(self.consolidator(idle_seconds=120))
+        self.assertGreaterEqual(sum(self.slept), 90)
+        self.assertTrue(all(s <= 10 for s in self.slept))
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_llm_error_resumes_at_same_window(self):
+        turns = [(f"suit detail {i}: " + "x" * 300, "ok") for i in range(4)]
+        self.vault.store_log(S1, log_bytes(*turns))
+        self.llm.responses = [routed(), LLMError("connection refused")]
+        with self.assertRaises(LLMError), redirect_stdout(io.StringIO()):
+            self.consolidator(window_tokens=250).run_pending()
+        self.assertEqual(self.vault.session_state(S1), {"windows": 2, "done_windows": 1, "done": False})
+        self.llm.responses = [routed()]
+        self.run_quietly(self.consolidator(window_tokens=250))
+        self.assertEqual(len(self.llm.calls), 3)  # window 0 isn't routed again
+        self.assertTrue(self.vault.session_state(S1)["done"])
+
+    def test_rejected_rewrite_does_not_block_session(self):
+        self.vault.store_log(S1, log_bytes(("the HUD uses a Pi Zero", "ok")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "HUD")), "not a note at all"]
+        stats, out = self.run_quietly()
+        self.assertEqual(self.vault.proposals(), [])
+        self.assertTrue(self.vault.session_state(S1)["done"])
+        self.assertIn("rejected", out)
+        self.assertEqual(len(stats[0]["rejected"]), 1)
+
+    def test_note_changed_during_call_retries_rewrite(self):
+        self.vault.store_log(S1, log_bytes(("the HUD uses a Pi Zero", "ok")))
+        vault = self.vault
+
+        class Racing(FakeLLM):
+            def chat(inner, messages, **kw):
+                if len(inner.calls) == 1:  # while the first rewrite runs, the user remembers a fact
+                    vault.remember("The suit has a 6S LiPo.", "mark-i-suit", "live")
+                return FakeLLM.chat(inner, messages, **kw)
+
+        self.llm = Racing([routed(("mark-i-suit", False, "", "HUD")), HUD + "SUMMARY: a",
+                           HUD + "- The suit has a 6S LiPo.\nSUMMARY: b"])
+        self.run_quietly()
+        self.assertIn("6S LiPo", self.llm.prompt(2))  # redone against the changed note
+        [item] = self.vault.proposals()
+        self.assertEqual(item["summary"], "b")
+        self.assertEqual(item["base_hash"], self.vault.note_hash("mark-i-suit"))
+
+    def test_stats_line_printed(self):
+        self.vault.store_log(S1, log_bytes(("the HUD uses a Pi Zero", "ok")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "HUD")), HUD + "SUMMARY: a"]
+        _, out = self.run_quietly()
+        self.assertRegex(out, r"\[consolidator\] 2026-11-27_001310: 1 windows?, routed \[mark-i-suit\], "
+                              r"1 proposals?, 0 rejected, 200 tokens, [0-9.]+ s")
+
+    def test_dumps_written_per_window(self):
+        self.vault.store_log(S1, log_bytes(("the HUD uses a Pi Zero", "ok")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "HUD")), HUD + "SUMMARY: a"]
+        self.run_quietly(self.consolidator(dump_dir=self.root / "dumps"))
+        names = sorted(p.name for p in (self.root / "dumps").iterdir())
+        self.assertEqual(names, [f"{S1}-w0-rewrite-mark-i-suit.txt", f"{S1}-w0-route.txt"])
+
+
+class WorkerTests(unittest.TestCase):
+    def test_runs_on_kick_and_survives_errors(self):
+        runs = []
+        done = threading.Event()
+
+        class Stub:
+            def run_pending(self):
+                runs.append(1)
+                if len(runs) == 1:
+                    raise LLMError("LM Studio is down")
+                if len(runs) == 2:
+                    raise RuntimeError("a bug")
+                done.set()
+                return []
+
+        worker = Worker(Stub(), retry_seconds=0.05)
+        with redirect_stdout(io.StringIO()) as out:
+            worker.start()
+            worker.kick()
+            self.assertTrue(done.wait(3))
+            worker.stop()
+        self.assertEqual(len(runs), 3)  # retried after each failure without a new kick
+        self.assertIn("LLM unavailable", out.getvalue())
+        self.assertIn("crashed", out.getvalue())
 
 
 if __name__ == "__main__":

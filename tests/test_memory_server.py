@@ -100,6 +100,26 @@ class ServerTests(unittest.TestCase):
                                capture_output=True, text=True).stdout.strip()
         self.assertEqual(count, "9")  # init + 8
 
+    def test_activity_and_proposals_endpoints(self):
+        self.assertEqual(self.app.state.last_activity, 0.0)
+        self.assertEqual(self.http.post("/activity").json(), {"ok": True})
+        self.assertGreater(self.app.state.last_activity, 0)
+        self.assertEqual(self.http.get("/proposals").json(), {"items": []})
+        self.app.state.vault.save_proposal("lab", "Lab", "# Lab\n> g\n- a\n", "added a", SID, 0)
+        [item] = self.http.get("/proposals").json()["items"]
+        self.assertEqual((item["slug"], item["summary"]), ("lab", "added a"))
+        anon = TestClient(self.app)
+        self.assertEqual(anon.post("/activity").status_code, 401)
+        self.assertEqual(anon.get("/proposals").status_code, 401)
+
+    def test_upload_kicks_worker(self):
+        kicks = []
+        self.app.state.worker = type("W", (), {"kick": lambda self: kicks.append(1)})()
+        body = b'{"type":"session_start"}\n'
+        self.http.post(f"/logs/{SID}", content=body)
+        self.http.post(f"/logs/{SID}", content=body)  # same bytes again: nothing new
+        self.assertEqual(kicks, [1])
+
     def test_main_refuses_without_token(self):
         env = {k: v for k, v in os.environ.items() if k != "MEMORY_TOKEN"}
         with mock.patch.dict(os.environ, env, clear=True), \

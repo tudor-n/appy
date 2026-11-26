@@ -71,6 +71,13 @@ class MemoryClient:
             print(f"[memory] unreachable ({type(exc).__name__}): starting without long-term memory")
             return None
 
+    def activity(self) -> None:
+        """Tell the Mac a turn just started, so the consolidator leaves the model alone."""
+        try:
+            self.http.post("/activity", timeout=2.0)
+        except Exception:
+            pass
+
     # -- tools: each returns a JSON string for the model ----------------------------
 
     def read(self, slug: str) -> str:

@@ -130,6 +130,10 @@ class Vault:
     def forgotten_lines(self) -> list[str]:
         return [str(f.get("line", "")) for f in self.forgotten()]
 
+    def note_slugs(self) -> list[str]:
+        """Every note except core, newest first (the index order)."""
+        return [line.split(" | ", 1)[0] for line in self._index_lines()]
+
     def note_text(self, slug: str) -> str | None:
         path = self._path(slug)
         return path.read_text(encoding="utf-8") if path.exists() else None

@@ -2,7 +2,10 @@
 
 Run with `python -m appy_memory.server`, with these settings in the environment or
 in ./.env: MEMORY_TOKEN (required), MEMORY_DIR (default ~/appy-data),
-MEMORY_HOST (default 0.0.0.0) and MEMORY_PORT (default 8765).
+MEMORY_HOST (default 0.0.0.0) and MEMORY_PORT (default 8765). For the consolidator:
+BASE_URL and MODEL (LM Studio), optional API_KEY, CONSOLIDATOR_EFFORT (low),
+CONSOLIDATOR_WINDOW_TOKENS (5000), CONSOLIDATOR_IDLE_SECONDS (120) and
+CONSOLIDATOR_DUMP=1 to write every prompt and output to MEMORY_DIR/dumps/.
 
 Every endpoint needs `Authorization: Bearer <MEMORY_TOKEN>`. All vault calls go through
 one lock, so there's only ever one writer.
@@ -12,6 +15,7 @@ from __future__ import annotations
 import hmac
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +27,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from .consolidator import Consolidator, Worker
+from .llm import LLM
 from .vault import Vault, VaultError
 
 
@@ -46,9 +52,15 @@ def _short(text: str, n: int = 60) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-def create_app(vault: Vault, token: str) -> FastAPI:
+def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
+    """`worker` (a consolidator Worker, also settable later as app.state.worker) is kicked
+    whenever a new session log arrives."""
     app = FastAPI(title="Appy memory")
     lock = threading.Lock()
+    app.state.vault = vault
+    app.state.lock = lock  # the consolidator takes it for its vault reads and writes
+    app.state.worker = worker
+    app.state.last_activity = 0.0  # time.time() of the laptop's last turn start
     expected = f"Bearer {token}".encode()
 
     def locked(fn, *args):
@@ -106,7 +118,18 @@ def create_app(vault: Vault, token: str) -> FastAPI:
         data = await request.body()
         stored = await run_in_threadpool(locked, vault.store_log, session_id, data)
         _say(f"log {session_id}: {len(data)} bytes, {'new' if stored else 'same'}")
+        if stored and app.state.worker is not None:
+            app.state.worker.kick()
         return {"stored": stored}
+
+    @app.post("/activity", dependencies=guarded)
+    def activity():
+        app.state.last_activity = time.time()  # the consolidator yields to live chat
+        return {"ok": True}
+
+    @app.get("/proposals", dependencies=guarded)
+    def proposals():
+        return {"items": locked(vault.proposals)}
 
     return app
 
@@ -120,8 +143,27 @@ def main() -> None:
     vault = Vault(root).open()
     host = os.getenv("MEMORY_HOST") or "0.0.0.0"
     port = int(os.getenv("MEMORY_PORT") or "8765")
+    app = create_app(vault, token)
     _say(f"vault {root}, listening on {host}:{port}")
-    uvicorn.run(create_app(vault, token), host=host, port=port, log_level="warning")
+    base_url = os.getenv("BASE_URL", "").strip()
+    if base_url:
+        model = os.getenv("MODEL") or "google/gemma-4-26b-a4b"
+        llm = LLM(base_url, model, api_key=os.getenv("API_KEY", "").strip(),
+                  effort=os.getenv("CONSOLIDATOR_EFFORT") or "low")
+        dumps = root / "dumps" if os.getenv("CONSOLIDATOR_DUMP") else None
+        consolidator = Consolidator(
+            vault, llm, app.state.lock,
+            window_tokens=int(os.getenv("CONSOLIDATOR_WINDOW_TOKENS") or "5000"),
+            idle_seconds=float(os.getenv("CONSOLIDATOR_IDLE_SECONDS") or "120"),
+            last_activity=lambda: app.state.last_activity, dump_dir=dumps)
+        app.state.worker = Worker(consolidator)
+        app.state.worker.start()
+        app.state.worker.kick()  # sessions uploaded while the service was down
+        print(f"[consolidator] on: {model} at {base_url}, effort {llm.effort}"
+              f"{f', dumps in {dumps}' if dumps else ''}", flush=True)
+    else:
+        print("[consolidator] off (BASE_URL not set)", flush=True)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

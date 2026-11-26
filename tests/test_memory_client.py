@@ -30,7 +30,7 @@ class MemoryClientTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.vault_dir = self.tmp / "vault"
-        app = create_app(Vault(self.vault_dir).open(), "t")
+        app = self.app = create_app(Vault(self.vault_dir).open(), "t")
         self.memory = MemoryClient(TestClient(app, headers={"Authorization": "Bearer t"}), SID)
         self.logs = self.tmp / "logs"
         self.logs.mkdir()
@@ -69,6 +69,11 @@ class MemoryClientTests(unittest.TestCase):
         self.assertEqual(json.loads(memory.read("core")), UNREACHABLE)
         self.assertEqual(json.loads(memory.remember("x")), UNREACHABLE)
         self.assertEqual(json.loads(memory.forget("core", "x")), UNREACHABLE)
+
+    def test_activity_never_raises(self):
+        down_client().activity()
+        self.memory.activity()
+        self.assertGreater(self.app.state.last_activity, 0)
 
     def test_service_down_upload_keeps_file(self):
         path = self.log_file(f"{SID}.jsonl")
