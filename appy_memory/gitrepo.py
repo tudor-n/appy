@@ -63,6 +63,12 @@ class GitRepo:
             return short, subject
         return None
 
+    def commit_info(self, sha: str) -> tuple[str, list[str]]:
+        """A commit's message body and the files it changed."""
+        out = self._git("show", "--name-only", "--format=%b%x1e", sha)
+        body, _, files = out.partition("\x1e")
+        return body.strip(), [f for f in files.split() if f]
+
     def revert(self, sha: str) -> str:
         try:
             self._git("revert", "--no-edit", sha)

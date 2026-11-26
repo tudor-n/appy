@@ -47,8 +47,8 @@ that connects mid-boot still shows "loading…" and the mascot's loading bar.
 | `user_text`  | `text`   | A typed message. Queued like a spoken one. |
 | `set_effort` | `effort` | One of `none`, `low`, `medium`, `high` (passed to the LLM as `reasoning_effort`). |
 | `compact`    | —        | The input pill's circle button: fold everything but the latest exchange into the session summary now. Queued like a turn, so it runs after the current answer; the UI follows the `compacting` status. |
-| `memory_decision` | `slug`, `decision` (`accept`, `deny`, `edit`), `text` (edit only: the full note) | A button on the memory card. The backend forwards it to the memory service; code applies it, never the LLM. |
-| `memory_undo` | — | A chip's Undo button: revert the newest memory change that hasn't been undone. Pressing again goes further back. |
+| `memory_decision` | `slug`, `decision` (`accept`, `deny`, `edit`), `text` and `before` (edit only: the full edited note, and the note as the card showed it when editing started) | A button on the memory card. The backend forwards it to the memory service; code applies it, never the LLM. An edit is refused if the note changed since `before` (so a fact remembered meanwhile isn't overwritten); the card keeps the typed text and shows the error. |
+| `memory_undo` | — | A chip's Undo button: revert the newest memory change that hasn't been undone. Only the newest chip's button is live, and each works once; the "Undid" chip's "Undo earlier" goes further back. Undoing an accepted or edited proposal puts it back on the card. |
 
 ## Panel pill bridge (HTTP, 127.0.0.1:8002)
 

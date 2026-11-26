@@ -222,6 +222,9 @@ pub enum ClientEvent {
         decision: Decision,
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        /// Edit only: the note as the card showed it when editing started.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
     },
     /// Undo the newest memory change.
     MemoryUndo,
@@ -396,6 +399,7 @@ mod tests {
             slug: "lab".into(),
             decision: Decision::Accept,
             text: None,
+            before: None,
         })
         .unwrap();
         assert_eq!(
@@ -406,11 +410,12 @@ mod tests {
             slug: "lab".into(),
             decision: Decision::Edit,
             text: Some("# Lab\n".into()),
+            before: Some("# Old\n".into()),
         })
         .unwrap();
         assert_eq!(
             json,
-            r##"{"type":"memory_decision","slug":"lab","decision":"edit","text":"# Lab\n"}"##
+            r##"{"type":"memory_decision","slug":"lab","decision":"edit","text":"# Lab\n","before":"# Old\n"}"##
         );
         let json = serde_json::to_string(&ClientEvent::MemoryUndo).unwrap();
         assert_eq!(json, r#"{"type":"memory_undo"}"#);

@@ -107,10 +107,13 @@ class MemoryClient:
             print(f"[memory] proposals unavailable ({type(exc).__name__})")
             return None
 
-    def decide(self, slug: str, decision: str, text: str | None = None) -> dict:
+    def decide(self, slug: str, decision: str, text: str | None = None,
+               before: str | None = None) -> dict:
         body = {"decision": decision}
         if text is not None:
             body["text"] = text
+        if before is not None:
+            body["before"] = before
         return json.loads(self._call("POST", f"/proposals/{slug}", body))
 
     def undo(self) -> dict:

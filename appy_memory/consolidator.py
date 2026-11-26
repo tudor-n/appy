@@ -17,6 +17,7 @@ from .llm import LLM, BadRequest, EmptyOutput, LLMError
 from .vault import _SLUG, CORE, CORE_CAP, NOTE_CAP, NoteFormatError, _gist, check_lines, estimate_tokens
 
 MAX_ROUTED = 3
+MAX_REFRESHES = 3  # redos in a row for a proposal whose note keeps changing
 
 ROUTE_SCHEMA = {
     "type": "object",
@@ -337,8 +338,13 @@ class Consolidator:
             if slug != CORE:
                 title = text.splitlines()[0][2:].strip()
         with self.lock:
+            now = self.vault.proposal(slug)
+            if now is None:
+                return "missing"  # denied (or forgotten) while it was being redone
+            if now.get("updated") != item.get("updated"):
+                return "changed"  # a newer version was saved meanwhile; that one stands
             if self.vault.note_hash(slug) != seen:
-                return "stale"  # it changed again meanwhile: stays stale, redone next time
+                return "stale"  # the note changed again meanwhile: the worker redoes it
             if not summaries:
                 self.vault.delete_proposal(slug)
                 print(f"[consolidator] refresh {slug}: nothing new left, proposal dropped",
@@ -348,6 +354,10 @@ class Consolidator:
                                         item.get("sessions", []), item.get("sources", []))
         print(f"[consolidator] refresh {slug}: redone against the current note", flush=True)
         return "updated"
+
+    def stale_slugs(self) -> list[str]:
+        with self.lock:
+            return [p["slug"] for p in self.vault.proposals() if p.get("stale")]
 
     def _report(self, s: dict) -> None:
         rejected = f"{len(s['rejected'])} rejected"
@@ -441,6 +451,11 @@ class Worker:
 
     def start(self) -> None:
         self._thread.start()
+        try:  # stale proposals whose redo was cut short (e.g. by a restart)
+            for slug in self.consolidator.stale_slugs():
+                self.refresh(slug)
+        except Exception as exc:
+            print(f"[consolidator] couldn't list stale proposals: {exc}", flush=True)
 
     def kick(self) -> None:
         self._event.set()
@@ -463,6 +478,7 @@ class Worker:
         from .llm import LLMError
 
         retry = False
+        tries: dict = {}
         while not self._stopping:
             self._event.wait(self.retry_seconds if retry else None)
             self._event.clear()
@@ -475,12 +491,16 @@ class Worker:
                     if slug is None:
                         break
                     try:
-                        self.consolidator.refresh(slug)
+                        result = self.consolidator.refresh(slug)
+                        tries[slug] = tries.get(slug, 0) + 1
+                        if result == "stale" and tries[slug] < MAX_REFRESHES:
+                            continue  # the note moved again while it was redone: once more
                     except LLMError:
                         raise  # keep it queued; retry when the model is back
                     except Exception:
                         print(f"[consolidator] refresh {slug} crashed:\n"
                               + traceback.format_exc(), flush=True)
+                    tries.pop(slug, None)
                     with self._refresh_lock:
                         self._refresh.remove(slug)
                 self.consolidator.run_pending()

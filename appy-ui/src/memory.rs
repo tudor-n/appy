@@ -1,18 +1,17 @@
 //! Long-term memory in the overlay: the review tray (what the consolidator learned,
 //! waiting for Accept / Deny / Edit) and the chips for memory commits.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, PolicyType, ScrolledWindow, TextView};
+use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, PolicyType, ScrolledWindow, TextView, glib};
 
 use crate::protocol::{Decision, MemoryKind, Proposal};
 
 const TRAY_MAX_HEIGHT: i32 = 260;
 const EDIT_MIN_HEIGHT: i32 = 140;
 
-type DecideFn = dyn Fn(String, Decision, Option<String>);
 
 /// One line of a note diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +95,153 @@ pub fn chip_text(kind: MemoryKind, summary: &str) -> String {
     }
 }
 
+/// A button on a proposal row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Accept,
+    Deny,
+    Edit,
+    Save,
+    Cancel,
+}
+
+impl Action {
+    fn label(self) -> &'static str {
+        match self {
+            Action::Accept => "Accept",
+            Action::Deny => "Deny",
+            Action::Edit => "Edit",
+            Action::Save => "Save",
+            Action::Cancel => "Cancel",
+        }
+    }
+}
+
+/// The edit box's state: survives list refreshes, and a failed Save.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Editing {
+    pub slug: String,
+    pub text: String,
+    /// The note as the card showed it when editing started; the Mac refuses the edit if
+    /// the note has changed since (so a fact remembered meanwhile isn't overwritten).
+    pub before: String,
+}
+
+/// A decision to send to the backend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outgoing {
+    pub slug: String,
+    pub decision: Decision,
+    pub text: Option<String>,
+    pub before: Option<String>,
+}
+
+/// Everything the tray shows, as plain data (the widget only draws it).
+#[derive(Debug, Default)]
+pub struct TrayState {
+    pub items: Vec<Proposal>,
+    pub expanded: bool,
+    pub editing: Option<Editing>,
+    /// Proposals a decision was sent for; their buttons wait for the next list.
+    pending: Vec<String>,
+}
+
+impl TrayState {
+    /// The backend's whole list. Edit mode survives as long as its proposal is still in it
+    /// (so a failed Save keeps the text, with the error shown above it).
+    pub fn set_items(&mut self, items: Vec<Proposal>) {
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|e| !items.iter().any(|i| i.slug == e.slug))
+        {
+            self.editing = None;
+        }
+        self.pending.clear();
+        self.items = items;
+    }
+
+    pub fn start_edit(&mut self, slug: &str) {
+        if let Some(item) = self.items.iter().find(|i| i.slug == slug) {
+            self.editing = Some(Editing {
+                slug: item.slug.clone(),
+                text: item.after.clone(),
+                before: item.before.clone(),
+            });
+        }
+    }
+
+    pub fn type_text(&mut self, text: &str) {
+        if let Some(e) = self.editing.as_mut() {
+            e.text = text.to_string();
+        }
+    }
+
+    pub fn is_busy(&self, slug: &str) -> bool {
+        self.pending.iter().any(|s| s == slug)
+    }
+
+    /// The buttons for a row, with whether each is enabled.
+    pub fn actions(&self, item: &Proposal) -> Vec<(Action, bool)> {
+        let ready = !self.is_busy(&item.slug);
+        if self.editing.as_ref().is_some_and(|e| e.slug == item.slug) {
+            return vec![(Action::Save, ready), (Action::Cancel, true)];
+        }
+        // A stale proposal is being redone; it can't be accepted yet, but it can be
+        // dropped or rewritten by hand (so it can never get stuck)
+        let mut actions = if item.stale { vec![] } else { vec![(Action::Accept, ready)] };
+        actions.push((Action::Deny, ready));
+        actions.push((Action::Edit, ready));
+        actions
+    }
+
+    /// A button press. Returns the decision to send, if any.
+    pub fn press(&mut self, slug: &str, action: Action) -> Option<Outgoing> {
+        if !self.items.iter().any(|i| i.slug == slug) {
+            return None;
+        }
+        let decision = match action {
+            Action::Edit => {
+                self.start_edit(slug);
+                return None;
+            }
+            Action::Cancel => {
+                self.editing = None;
+                return None;
+            }
+            Action::Accept => Decision::Accept,
+            Action::Deny => Decision::Deny,
+            Action::Save => Decision::Edit,
+        };
+        let (text, before) = match (action, &self.editing) {
+            (Action::Save, Some(e)) if e.slug == slug => (Some(e.text.clone()), Some(e.before.clone())),
+            (Action::Save, _) => return None,
+            _ => (None, None),
+        };
+        self.pending.push(slug.to_string());
+        Some(Outgoing {
+            slug: slug.to_string(),
+            decision,
+            text,
+            before,
+        })
+    }
+}
+
+/// The chip's Undo button label: every change can be undone; after an undo, the next
+/// press goes further back.
+pub fn undo_label(kind: MemoryKind) -> Option<&'static str> {
+    match kind {
+        MemoryKind::Remember | MemoryKind::Forget | MemoryKind::Approved | MemoryKind::Edited => {
+            Some("Undo")
+        }
+        MemoryKind::Undo => Some("Undo earlier"),
+        MemoryKind::Other => None,
+    }
+}
+
+type SendFn = dyn Fn(Outgoing);
+
 /// The collapsed "N memory updates" card above the input, expanding into one diff per
 /// note with Accept / Deny / Edit. Hidden while there's nothing to review.
 #[derive(Clone)]
@@ -108,13 +254,8 @@ struct Inner {
     header: Button,
     scroller: ScrolledWindow,
     list: GtkBox,
-    expanded: Cell<bool>,
-    items: RefCell<Vec<Proposal>>,
-    /// The proposal being edited and the text typed so far (kept across refreshes).
-    editing: RefCell<Option<(String, String)>>,
-    /// Proposals a button was pressed on; their buttons stay disabled until the next list.
-    pending: RefCell<Vec<String>>,
-    on_decide: RefCell<Option<Rc<DecideFn>>>,
+    state: RefCell<TrayState>,
+    on_send: RefCell<Option<Rc<SendFn>>>,
 }
 
 impl MemoryTray {
@@ -126,6 +267,7 @@ impl MemoryTray {
         let header = Button::new();
         header.add_css_class("memory-header");
         header.set_halign(Align::Fill);
+        header.set_focus_on_click(false);
         root.append(&header);
 
         let list = GtkBox::new(Orientation::Vertical, 0);
@@ -145,68 +287,66 @@ impl MemoryTray {
                 header,
                 scroller,
                 list,
-                expanded: Cell::new(false),
-                items: RefCell::new(Vec::new()),
-                editing: RefCell::new(None),
-                pending: RefCell::new(Vec::new()),
-                on_decide: RefCell::new(None),
+                state: RefCell::new(TrayState::default()),
+                on_send: RefCell::new(None),
             }),
         };
         let t = tray.clone();
         tray.inner.header.connect_clicked(move |_| {
-            t.inner.expanded.set(!t.inner.expanded.get());
+            {
+                let mut state = t.inner.state.borrow_mut();
+                state.expanded = !state.expanded;
+            }
             t.render();
         });
         tray
     }
 
-    /// Where Accept / Deny / Edit go (the App sends them to the backend).
-    pub fn set_on_decide(&self, f: impl Fn(String, Decision, Option<String>) + 'static) {
-        *self.inner.on_decide.borrow_mut() = Some(Rc::new(f));
+    /// Where decisions go (the App sends them to the backend).
+    pub fn set_on_send(&self, f: impl Fn(Outgoing) + 'static) {
+        *self.inner.on_send.borrow_mut() = Some(Rc::new(f));
     }
 
     /// Show the current list (the backend always sends all of it).
     pub fn set_items(&self, items: &[Proposal]) {
-        let mut editing = self.inner.editing.borrow_mut();
-        if editing.as_ref().is_some_and(|(slug, _)| !items.iter().any(|i| &i.slug == slug)) {
-            *editing = None;
-        }
-        drop(editing);
-        self.inner.pending.borrow_mut().clear();
-        *self.inner.items.borrow_mut() = items.to_vec();
+        self.inner.state.borrow_mut().set_items(items.to_vec());
         self.render();
     }
 
-    fn decide(&self, slug: &str, decision: Decision, text: Option<String>) {
-        self.inner.pending.borrow_mut().push(slug.to_string());
-        if decision == Decision::Edit {
-            *self.inner.editing.borrow_mut() = None;
-        }
-        let handler = self.inner.on_decide.borrow().clone();
-        if let Some(f) = handler {
-            f(slug.to_string(), decision, text);
+    fn press(&self, slug: &str, action: Action) {
+        let out = self.inner.state.borrow_mut().press(slug, action);
+        if let Some(out) = out {
+            let send = self.inner.on_send.borrow().clone();
+            if let Some(send) = send {
+                send(out);
+            }
         }
         self.render();
     }
 
     fn render(&self) {
         let inner = &self.inner;
-        let items = inner.items.borrow().clone();
+        let (items, expanded, editing) = {
+            let state = inner.state.borrow();
+            (state.items.clone(), state.expanded, state.editing.clone())
+        };
         self.root.set_visible(!items.is_empty());
-        let arrow = if inner.expanded.get() { "▾" } else { "▸" };
+        let arrow = if expanded { "▾" } else { "▸" };
         inner.header.set_label(&format!("{}  {arrow}", tray_label(items.len())));
-        inner.scroller.set_visible(inner.expanded.get() && !items.is_empty());
+        inner.scroller.set_visible(expanded && !items.is_empty());
         while let Some(child) = inner.list.first_child() {
             inner.list.remove(&child);
         }
-        if inner.expanded.get() {
-            for item in &items {
-                inner.list.append(&self.row(item));
-            }
+        if !expanded {
+            return;
+        }
+        for item in &items {
+            let edit = editing.as_ref().filter(|e| e.slug == item.slug);
+            inner.list.append(&self.row(item, edit));
         }
     }
 
-    fn row(&self, item: &Proposal) -> GtkBox {
+    fn row(&self, item: &Proposal, editing: Option<&Editing>) -> GtkBox {
         let row = GtkBox::new(Orientation::Vertical, 3);
         row.add_css_class("memory-item");
         row.append(&text_label(&item.title, "memory-title"));
@@ -214,17 +354,11 @@ impl MemoryTray {
         if let Some(err) = &item.error {
             row.append(&text_label(err, "memory-error"));
         }
-        if item.stale {
+        if item.stale && editing.is_none() {
             row.append(&text_label("updating…", "memory-summary"));
-            return row;
         }
 
-        let editing = self.inner.editing.borrow().clone();
-        let busy = self.inner.pending.borrow().contains(&item.slug);
-        let buttons = GtkBox::new(Orientation::Horizontal, 6);
-        buttons.add_css_class("memory-buttons");
-
-        if let Some((_, text)) = editing.filter(|(slug, _)| slug == &item.slug) {
+        if let Some(e) = editing {
             let view = TextView::builder()
                 .wrap_mode(gtk4::WrapMode::WordChar)
                 .monospace(true)
@@ -233,66 +367,46 @@ impl MemoryTray {
             view.add_css_class("memory-edit");
             // A TextView measures its text lazily; without a minimum it starts 0 lines tall
             view.set_size_request(-1, EDIT_MIN_HEIGHT);
-            view.buffer().set_text(&text);
+            view.buffer().set_text(&e.text);
             let t = self.clone();
-            let slug = item.slug.clone();
             view.buffer().connect_changed(move |buf| {
-                let text = buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string();
-                *t.inner.editing.borrow_mut() = Some((slug.clone(), text));
+                let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+                t.inner.state.borrow_mut().type_text(&text);
             });
             row.append(&view);
-
-            let save = button("Save", true);
-            let t = self.clone();
-            let slug = item.slug.clone();
-            save.connect_clicked(move |_| {
-                let text = t.inner.editing.borrow().as_ref().map(|(_, text)| text.clone());
-                t.decide(&slug, Decision::Edit, text);
+            let v = view.clone();
+            glib::idle_add_local_once(move || {
+                v.grab_focus();
             });
-            let cancel = button("Cancel", false);
-            let t = self.clone();
-            cancel.connect_clicked(move |_| {
-                *t.inner.editing.borrow_mut() = None;
-                t.render();
-            });
-            buttons.append(&save);
-            buttons.append(&cancel);
-            row.append(&buttons);
-            return row;
+        } else if !item.stale {
+            let diff = GtkBox::new(Orientation::Vertical, 0);
+            diff.add_css_class("memory-diff");
+            for line in diff_lines(&item.before, &item.after) {
+                // Facts are "- " bullets; the diff marker replaces the bullet
+                let fact = |t: &str| t.strip_prefix("- ").unwrap_or(t).to_string();
+                let (text, class) = match line {
+                    DiffLine::Same(t) => (format!("  {}", fact(&t)), "diff-same"),
+                    DiffLine::Del(t) => (format!("− {}", fact(&t)), "diff-del"),
+                    DiffLine::Add(t) => (format!("+ {}", fact(&t)), "diff-add"),
+                    DiffLine::Gap => ("  …".to_string(), "diff-same"),
+                };
+                diff.append(&text_label(&text, class));
+            }
+            row.append(&diff);
         }
 
-        let diff = GtkBox::new(Orientation::Vertical, 0);
-        diff.add_css_class("memory-diff");
-        for line in diff_lines(&item.before, &item.after) {
-            // Facts are "- " bullets; the diff marker replaces the bullet
-            let fact = |t: &str| t.strip_prefix("- ").unwrap_or(t).to_string();
-            let (text, class) = match line {
-                DiffLine::Same(t) => (format!("  {}", fact(&t)), "diff-same"),
-                DiffLine::Del(t) => (format!("− {}", fact(&t)), "diff-del"),
-                DiffLine::Add(t) => (format!("+ {}", fact(&t)), "diff-add"),
-                DiffLine::Gap => ("  …".to_string(), "diff-same"),
-            };
-            diff.append(&text_label(&text, class));
-        }
-        row.append(&diff);
-
-        for (name, decision, primary) in [
-            ("Accept", Decision::Accept, true),
-            ("Deny", Decision::Deny, false),
-            ("Edit", Decision::Edit, false),
-        ] {
-            let b = button(name, primary);
-            b.set_sensitive(!busy);
+        let buttons = GtkBox::new(Orientation::Horizontal, 6);
+        buttons.add_css_class("memory-buttons");
+        let actions = self.inner.state.borrow().actions(item);
+        for (action, enabled) in actions {
+            let b = button(
+                action.label(),
+                matches!(action, Action::Accept | Action::Save),
+            );
+            b.set_sensitive(enabled);
             let t = self.clone();
             let slug = item.slug.clone();
-            let after = item.after.clone();
-            b.connect_clicked(move |_| match decision {
-                Decision::Edit => {
-                    *t.inner.editing.borrow_mut() = Some((slug.clone(), after.clone()));
-                    t.render();
-                }
-                _ => t.decide(&slug, decision, None),
-            });
+            b.connect_clicked(move |_| t.press(&slug, action));
             buttons.append(&b);
         }
         row.append(&buttons);
@@ -314,6 +428,8 @@ fn text_label(text: &str, class: &str) -> Label {
 
 fn button(name: &str, primary: bool) -> Button {
     let b = Button::with_label(name);
+    // Clicking shouldn't pull focus out of the chat input (Tab still reaches it)
+    b.set_focus_on_click(false);
     b.add_css_class("memory-btn");
     if primary {
         b.add_css_class("primary");
@@ -372,6 +488,95 @@ mod tests {
         assert_eq!(diff_lines("x\n", "x\n"), vec![]);
     }
 
+    fn item(slug: &str, stale: bool) -> Proposal {
+        Proposal {
+            slug: slug.into(),
+            title: slug.into(),
+            summary: "s".into(),
+            before: "# B\n- old\n".into(),
+            after: "# B\n- new\n".into(),
+            stale,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn failed_edit_keeps_the_typed_text_and_edit_mode() {
+        let mut t = TrayState::default();
+        t.set_items(vec![item("bench", false)]);
+        t.start_edit("bench");
+        t.type_text("# B\nprose line\n");
+        let sent = t.press("bench", Action::Save).unwrap();
+        assert_eq!(sent.decision, Decision::Edit);
+        assert_eq!(sent.text.as_deref(), Some("# B\nprose line\n"));
+        assert_eq!(sent.before.as_deref(), Some("# B\n- old\n"));
+        assert!(t.is_busy("bench"));
+        // the Mac refuses it: the list comes back with the error on that item
+        let mut failed = item("bench", false);
+        failed.error = Some("edit not saved: non-bullet line".into());
+        t.set_items(vec![failed]);
+        let editing = t.editing.as_ref().unwrap();
+        assert_eq!(editing.text, "# B\nprose line\n");
+        assert!(!t.is_busy("bench"));
+        assert_eq!(
+            t.actions(&t.items[0]),
+            vec![(Action::Save, true), (Action::Cancel, true)]
+        );
+        // accepted later: the item leaves the list and edit mode ends
+        t.set_items(vec![]);
+        assert!(t.editing.is_none());
+    }
+
+    #[test]
+    fn edit_keeps_the_before_it_started_from() {
+        let mut t = TrayState::default();
+        t.set_items(vec![item("bench", false)]);
+        t.start_edit("bench");
+        let mut moved = item("bench", false);
+        moved.before = "# B\n- old\n- remembered meanwhile\n".into();
+        t.set_items(vec![moved]);
+        let sent = t.press("bench", Action::Save).unwrap();
+        assert_eq!(sent.before.as_deref(), Some("# B\n- old\n")); // the Mac will refuse it
+    }
+
+    #[test]
+    fn stale_rows_can_still_be_denied_or_edited() {
+        let mut t = TrayState::default();
+        t.set_items(vec![item("bench", true), item("lab", false)]);
+        assert_eq!(
+            t.actions(&t.items[0]),
+            vec![(Action::Deny, true), (Action::Edit, true)]
+        );
+        assert_eq!(
+            t.actions(&t.items[1]),
+            vec![(Action::Accept, true), (Action::Deny, true), (Action::Edit, true)]
+        );
+        let sent = t.press("lab", Action::Accept).unwrap();
+        assert_eq!((sent.decision, sent.text, sent.before), (Decision::Accept, None, None));
+        assert_eq!(
+            t.actions(&t.items[1]),
+            vec![(Action::Accept, false), (Action::Deny, false), (Action::Edit, false)]
+        );
+        assert!(t.press("nope", Action::Deny).is_none());
+    }
+
+    #[test]
+    fn cancel_leaves_edit_mode() {
+        let mut t = TrayState::default();
+        t.set_items(vec![item("bench", false)]);
+        t.start_edit("bench");
+        assert!(t.press("bench", Action::Cancel).is_none());
+        assert!(t.editing.is_none());
+    }
+
+    #[test]
+    fn undo_labels() {
+        assert_eq!(undo_label(MemoryKind::Remember), Some("Undo"));
+        assert_eq!(undo_label(MemoryKind::Approved), Some("Undo"));
+        assert_eq!(undo_label(MemoryKind::Undo), Some("Undo earlier"));
+        assert_eq!(undo_label(MemoryKind::Other), None);
+    }
+
     #[test]
     fn tray_label_plural() {
         assert_eq!(tray_label(1), "1 memory update");
@@ -400,4 +605,5 @@ mod tests {
         assert_eq!(chip_text(MemoryKind::Other, "x"), "Memory: x");
     }
 }
+
 

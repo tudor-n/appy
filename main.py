@@ -48,9 +48,9 @@ def main():
     # The memory review coordinator, once memory is set up (the bridge's callbacks need it)
     review_box: dict = {"review": None}
 
-    def on_memory_decision(slug: str, decision: str, text):
+    def on_memory_decision(slug: str, decision: str, text, before=None):
         if review_box["review"]:
-            review_box["review"].decide(slug, decision, text)
+            review_box["review"].decide(slug, decision, text, before)
 
     def on_memory_undo():
         if review_box["review"]:

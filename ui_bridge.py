@@ -19,7 +19,7 @@ class UiBridge:
         on_set_effort: Optional[Callable[[str], None]] = None,
         get_effort: Optional[Callable[[], str]] = None,
         on_compact: Optional[Callable[[], None]] = None,
-        on_memory_decision: Optional[Callable[[str, str, Optional[str]], None]] = None,
+        on_memory_decision: Optional[Callable[[str, str, Optional[str], Optional[str]], None]] = None,
         on_memory_undo: Optional[Callable[[], None]] = None,
     ):
         self.app = FastAPI()
@@ -73,7 +73,11 @@ class UiBridge:
                             continue
                         if decision == "edit" and not (isinstance(text, str) and text.strip()):
                             continue
-                        self.on_memory_decision(slug, decision, text if decision == "edit" else None)
+                        before = data.get("before")
+                        if decision != "edit" or not isinstance(before, str):
+                            before = None
+                        self.on_memory_decision(slug, decision,
+                                                text if decision == "edit" else None, before)
                     elif kind == "memory_undo" and self.on_memory_undo:
                         self.on_memory_undo()
                     elif kind == "set_effort" and self.on_set_effort:

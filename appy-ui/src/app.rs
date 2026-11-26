@@ -49,11 +49,12 @@ impl App {
         }));
 
         let tx = app.ws_tx.clone();
-        app.ui.memory.set_on_decide(move |slug, decision, text| {
+        app.ui.memory.set_on_send(move |out| {
             let _ = tx.send(ClientEvent::MemoryDecision {
-                slug,
-                decision,
-                text,
+                slug: out.slug,
+                decision: out.decision,
+                text: out.text,
+                before: out.before,
             });
         });
         app.connect_draw();

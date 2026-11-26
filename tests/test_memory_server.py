@@ -229,6 +229,26 @@ class DecisionTests(unittest.TestCase):
         [item] = self.http.get("/proposals").json()["items"]
         self.assertEqual((item["before"], item["new_text"], item["stale"]), (NOTE, NEW, False))
 
+    def test_edit_refused_when_note_changed_while_editing(self):
+        self.vault.remember("The DMM is a Fluke 87V.", "bench", "live")
+        r = self.http.post("/proposals/bench", json={"decision": "edit", "text": NEW, "before": NOTE})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("changed while you were editing", r.json()["error"])
+        self.assertIn("Fluke", (self.root / "memory" / "bench.md").read_text())
+        current = (self.root / "memory" / "bench.md").read_text()
+        ok = self.http.post("/proposals/bench", json={"decision": "edit", "text": NEW, "before": current})
+        self.assertEqual(ok.json()["status"], "edited")
+
+    def test_undo_of_approval_puts_the_proposal_back(self):
+        self.decide("accept")
+        self.http.post("/undo", json={})
+        item = self.vault.proposal("bench")
+        self.assertIsNotNone(item)
+        self.assertEqual((item["new_text"], item["summary"]), (NEW, "Replaced the PSU."))
+        self.assertEqual(item["sessions"], ["2026-11-27_001310"])
+        self.assertEqual(item["base_hash"], self.vault.note_hash("bench"))
+        self.assertEqual(self.decide("accept").json()["status"], "accepted")  # re-acceptable
+
     def test_undo_reverts_approved(self):
         self.decide("accept")
         r = self.http.post("/undo", json={})

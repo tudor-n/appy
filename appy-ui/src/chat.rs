@@ -1,6 +1,6 @@
 //! The scrolling message log: chat bubbles, status pills and smooth scrolling.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, PolicyType, ScrolledWindow, glib};
@@ -20,6 +20,8 @@ pub struct ChatLog {
     /// added entries come into view once GTK has laid them out (their height isn't
     /// known when they're appended). Scrolling up unpins; reaching the bottom re-pins.
     pinned: Cell<bool>,
+    /// Undo buttons on memory chips; only the newest one stays enabled.
+    undo_buttons: RefCell<Vec<Button>>,
 }
 
 impl ChatLog {
@@ -41,6 +43,7 @@ impl ChatLog {
             entries,
             scroll_target: Cell::new(None),
             pinned: Cell::new(true),
+            undo_buttons: RefCell::new(Vec::new()),
         }
     }
 
@@ -92,8 +95,13 @@ impl ChatLog {
         label
     }
 
-    /// A memory commit ("Remembered: ...") with an optional Undo button.
-    pub fn push_chip(&self, text: &str, undo: Option<Box<dyn Fn()>>) {
+    /// A memory commit ("Remembered: ...") with an optional undo button `(label, action)`.
+    /// Undo always reverts the newest change, so only the newest chip's button is live,
+    /// and each works once: an older chip can't undo something newer by surprise.
+    pub fn push_chip(&self, text: &str, undo: Option<(&str, Box<dyn Fn()>)>) {
+        for old in self.undo_buttons.take() {
+            old.set_sensitive(false);
+        }
         let chip = GtkBox::new(Orientation::Horizontal, 6);
         chip.add_css_class("status-pill");
         chip.add_css_class("memory-chip");
@@ -108,11 +116,16 @@ impl ChatLog {
             .build();
         label.add_css_class("status-pill-text");
         chip.append(&label);
-        if let Some(undo) = undo {
-            let button = Button::with_label("Undo");
+        if let Some((label, undo)) = undo {
+            let button = Button::with_label(label);
             button.add_css_class("memory-undo");
-            button.connect_clicked(move |_| undo());
+            button.set_focus_on_click(false);
+            button.connect_clicked(move |b| {
+                b.set_sensitive(false);
+                undo();
+            });
             chip.append(&button);
+            self.undo_buttons.borrow_mut().push(button);
         }
         self.push(&chip);
     }

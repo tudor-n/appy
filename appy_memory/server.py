@@ -41,6 +41,8 @@ class RememberBody(BaseModel):
 class DecisionBody(BaseModel):
     decision: str
     text: Optional[str] = None
+    # Edit only: the note as the card showed it when editing started
+    before: Optional[str] = None
 
 
 class ForgetBody(BaseModel):
@@ -152,6 +154,9 @@ def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
                 _say(f"proposal {slug}: denied")
                 return {"status": "denied"}
             if body.decision == "edit":
+                if body.before is not None and body.before != (vault.note_text(slug) or ""):
+                    raise VaultError(409, f"'{slug}' changed while you were editing; "
+                                          "your text wasn't saved")
                 try:
                     text = check_note(slug, body.text or "", vault.note_text(slug))
                 except NoteFormatError as exc:

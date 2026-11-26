@@ -13,6 +13,7 @@ class FakeClient:
     def __init__(self):
         self.items = [dict(ITEM)]
         self.decisions = []
+        self.befores = []
         self.down = False
         self.next_decision = None
         self.undone = "memory: Replaced the PSU. [approved]"
@@ -20,8 +21,9 @@ class FakeClient:
     def proposals(self):
         return None if self.down else [dict(i) for i in self.items]
 
-    def decide(self, slug, decision, text=None):
+    def decide(self, slug, decision, text=None, before=None):
         self.decisions.append((slug, decision, text))
+        self.befores.append(before)
         if self.down:
             return {"error": "long-term memory is unreachable right now"}
         if self.next_decision is not None:
@@ -97,6 +99,20 @@ class MemoryReviewTests(unittest.TestCase):
         self.wait(lambda: self.chips)
         self.assertEqual(self.chips, [("edited", "Replaced the PSU.")])
         self.assertEqual(self.client.decisions[0][2], "# Bench\n- Korad KA3005P\n")
+
+    def test_no_chip_when_nothing_was_committed(self):
+        self.review.start()
+        self.wait(lambda: self.lists)
+        self.client.next_decision = {"status": "edited", "commit": None, "summary": "same text"}
+        self.review.decide("bench", "edit", "# Bench\n")
+        self.wait(lambda: len(self.lists) >= 2)
+        self.assertEqual(self.chips, [])
+
+    def test_edit_forwards_the_before_it_was_based_on(self):
+        self.review.start()
+        self.review.decide("bench", "edit", "# Bench\n- x\n", "# Bench\n")
+        self.wait(lambda: self.client.decisions)
+        self.assertEqual(self.client.befores, ["# Bench\n"])
 
     def test_stale_accept_shows_updating(self):
         self.review.start()

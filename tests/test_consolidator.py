@@ -650,6 +650,24 @@ class RefreshTests(RunBase):
             self.assertEqual(self.consolidator().refresh("mark-i-suit"), "deleted")
         self.assertIsNone(self.vault.proposal("mark-i-suit"))
 
+    def test_refresh_does_not_bring_back_a_denied_proposal(self):
+        self.stale_proposal()
+        vault = self.vault
+
+        class DeniesDuringRewrite(FakeLLM):
+            def chat(inner, messages, **kw):
+                vault.delete_proposal("mark-i-suit")  # Tudor denies it meanwhile
+                return FakeLLM.chat(inner, messages, **kw)
+
+        self.llm = DeniesDuringRewrite([self.vault.note_text("mark-i-suit") + "- new\nSUMMARY: x"])
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self.consolidator().refresh("mark-i-suit"), "missing")
+        self.assertIsNone(self.vault.proposal("mark-i-suit"))
+
+    def test_stale_slugs_lists_stale_proposals(self):
+        self.stale_proposal()
+        self.assertEqual(self.consolidator().stale_slugs(), ["mark-i-suit"])
+
     def test_refresh_missing(self):
         self.assertEqual(self.consolidator().refresh("mark-i-suit"), "missing")
 
@@ -672,6 +690,31 @@ class RefreshTests(RunBase):
         self.assertTrue(done.wait(3))
         worker.stop()
         self.assertEqual(seen, ["bench"])
+
+    def test_still_stale_refresh_is_requeued_and_startup_queues_stale(self):
+        results = ["stale", "stale", "updated"]
+        seen = []
+        done = threading.Event()
+
+        class Stub:
+            def stale_slugs(self):
+                return ["bench"]
+
+            def refresh(self, slug):
+                seen.append(slug)
+                return results.pop(0)
+
+            def run_pending(self):
+                if not results:
+                    done.set()
+                return []
+
+        worker = Worker(Stub(), retry_seconds=0.05)
+        with redirect_stdout(io.StringIO()):
+            worker.start()  # queues the stale proposal left by an earlier run
+            self.assertTrue(done.wait(3))
+            worker.stop()
+        self.assertEqual(seen, ["bench", "bench", "bench"])
 
     def test_crashing_refresh_is_dropped(self):
         done = threading.Event()

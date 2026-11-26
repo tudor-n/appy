@@ -352,13 +352,48 @@ class Vault:
         if target is None:
             return {"undone": None, "commit": None}
         sha, subject = target
+        restore = self._reviewed_change(sha, subject)
         try:
             new = self.git.revert(sha)
         except GitError as exc:
             raise VaultError(500, f"undo failed: {exc}")
         finally:
             self._rebuild_index()
+        if restore:
+            self._restore_proposal(*restore)
         return {"undone": subject, "commit": new}
+
+    def _reviewed_change(self, sha: str, subject: str):
+        """For an accepted or edited proposal about to be undone: what to put back up for
+        review, as (slug, text, summary, sessions)."""
+        for tag in (" [approved]", " [edited]"):
+            if subject.endswith(tag):
+                break
+        else:
+            return None
+        try:
+            body, files = self.git.commit_info(sha)
+        except GitError:
+            return None
+        notes = [f for f in files if f.startswith("memory/") and f.endswith(".md")]
+        if len(notes) != 1:
+            return None
+        slug = notes[0][len("memory/"):-3]
+        text = self.note_text(slug) if _SLUG.match(slug) else None
+        if text is None:
+            return None
+        sessions = []
+        for line in body.splitlines():
+            if line.startswith("sessions="):
+                sessions = [s for s in line[len("sessions="):].split(",") if s]
+        summary = subject[len("memory: "):-len(tag)] if subject.startswith("memory: ") else subject
+        return slug, text, summary, sessions
+
+    def _restore_proposal(self, slug: str, text: str, summary: str, sessions: list) -> None:
+        if self.proposal(slug) is not None:
+            return  # a newer proposal for this note is waiting; keep that one
+        title = text.splitlines()[0][2:].strip() if text.startswith("# ") else slug
+        self.replace_proposal(slug, title, text, summary, sessions, [])
 
     def store_log(self, session_id: str, data: bytes) -> bool:
         """Keep an uploaded session log. Returns True if new; the same bytes again are a

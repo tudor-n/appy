@@ -7,8 +7,8 @@ use gtk4::prelude::*;
 
 use crate::app::App;
 use crate::chat::format_live_dots;
-use crate::memory::chip_text;
-use crate::protocol::{AppyState, BackendEvent, ClientEvent, MemoryKind, Widget};
+use crate::memory::{chip_text, undo_label};
+use crate::protocol::{AppyState, BackendEvent, ClientEvent, Widget};
 use crate::state::{ActiveStatus, Card, SharedState};
 use crate::weather::CARD_SIZE;
 
@@ -71,16 +71,13 @@ impl App {
             }
             BackendEvent::MemoryProposals { items } => self.ui.memory.set_items(&items),
             BackendEvent::MemoryCommitted { kind, summary } => {
-                // Every chip but "Undid: ..." can undo the newest change
-                let undo: Option<Box<dyn Fn()>> = match kind {
-                    MemoryKind::Undo | MemoryKind::Other => None,
-                    _ => {
-                        let tx = self.sender();
-                        Some(Box::new(move || {
-                            let _ = tx.send(ClientEvent::MemoryUndo);
-                        }))
-                    }
-                };
+                let undo = undo_label(kind).map(|label| {
+                    let tx = self.sender();
+                    let undo: Box<dyn Fn()> = Box::new(move || {
+                        let _ = tx.send(ClientEvent::MemoryUndo);
+                    });
+                    (label, undo)
+                });
                 self.ui.chat.push_chip(&chip_text(kind, &summary), undo);
             }
         }

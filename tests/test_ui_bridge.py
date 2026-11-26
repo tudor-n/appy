@@ -71,7 +71,16 @@ class UiBridgeTests(unittest.TestCase):
             ws.send_json({"type": "memory_decision", "slug": "bench", "decision": "edit", "text": "# B\n"})
             ws.send_json({"type": "memory_undo"})
             ws.send_json({"type": "user_text", "text": "  "})  # flushes
-        self.assertEqual(calls, [("bench", "accept", None), ("bench", "edit", "# B\n"), "undo"])
+        self.assertEqual(calls, [("bench", "accept", None, None), ("bench", "edit", "# B\n", None), "undo"])
+
+    def test_edit_decision_carries_before(self):
+        calls = []
+        bridge = UiBridge(on_memory_decision=lambda *a: calls.append(a))
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            ws.send_json({"type": "memory_decision", "slug": "bench", "decision": "edit",
+                          "text": "# B\n", "before": "# A\n"})
+            ws.send_json({"type": "user_text", "text": "  "})
+        self.assertEqual(calls, [("bench", "edit", "# B\n", "# A\n")])
 
     def test_bad_decisions_ignored(self):
         calls = []

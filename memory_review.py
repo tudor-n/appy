@@ -37,8 +37,10 @@ class MemoryReview:
     def refresh(self) -> None:
         self._jobs.put(("refresh",))
 
-    def decide(self, slug: str, decision: str, text: str | None = None) -> None:
-        self._jobs.put(("decide", slug, decision, text))
+    def decide(self, slug: str, decision: str, text: str | None = None,
+               before: str | None = None) -> None:
+        """`before`: for an edit, the note as the card showed it when editing started."""
+        self._jobs.put(("decide", slug, decision, text, before))
 
     def undo(self) -> None:
         self._jobs.put(("undo",))
@@ -73,8 +75,8 @@ class MemoryReview:
         if kind in ("refresh", "poll"):
             self._sync(force=kind == "refresh")
         elif kind == "decide":
-            _, slug, decision, text = job
-            self._decide(slug, decision, text)
+            _, slug, decision, text, before = job
+            self._decide(slug, decision, text, before)
         elif kind == "undo":
             result = self.client.undo()
             if result.get("undone"):
@@ -84,15 +86,17 @@ class MemoryReview:
                 print(f"[memory] undo failed: {result['error']}")
             self._sync(force=True)
 
-    def _decide(self, slug: str, decision: str, text: str | None) -> None:
-        result = self.client.decide(slug, decision, text)
+    def _decide(self, slug: str, decision: str, text: str | None, before: str | None) -> None:
+        result = self.client.decide(slug, decision, text, before)
         status = result.get("status")
         print(f"[memory] {decision} {slug}: {status or result.get('error')}")
         if status:
             self._errors.pop(slug, None)
         else:
             self._errors[slug] = str(result.get("error") or "that didn't work")
-        if status == "accepted":
+        if not result.get("commit"):
+            pass  # nothing was written (denied, stale, or an edit identical to the note)
+        elif status == "accepted":
             self.emit_committed("approved", str(result.get("summary", "")))
         elif status == "edited":
             self.emit_committed("edited", str(result.get("summary", "")))

@@ -125,7 +125,9 @@ description line and "- " bullets). If the note changed since the proposal was w
 shows "updating…" while the Mac redoes it against the current note; review it again when it
 comes back. Every change to memory (a remember, a forget, an accepted or edited proposal) adds a
 chip to the chat, like "Saved: Added the helmet HUD hardware", with **Undo**, which reverts the
-newest change; pressing it again goes further back. The card refreshes when Appy starts, after
+newest change (only the newest chip's Undo is live); the "Undid" chip that follows offers "Undo
+earlier" to go further back. Undoing an accepted proposal puts it back on the card. While a
+proposal is being redone ("updating…") it can still be denied or edited. The card refreshes when Appy starts, after
 each decision, and every minute.
 
 `dev/mock_backend.py --memory` sends two sample proposals, for working on the card without the
