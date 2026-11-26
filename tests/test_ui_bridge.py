@@ -41,6 +41,14 @@ class UiBridgeTests(unittest.TestCase):
             self.assertEqual(receive(ws), {"type": "effort", "value": "low"})
             ws.send_json({"type": "user_text", "text": "  "})  # nothing else queued
 
+    def test_compact_message_calls_on_compact(self):
+        calls = []
+        bridge = UiBridge(on_compact=lambda: calls.append("compact"))
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            ws.send_json({"type": "compact"})
+            ws.send_json({"type": "user_text", "text": "  "})  # ignored; flushes the first
+        self.assertEqual(calls, ["compact"])
+
 
 if __name__ == "__main__":
     unittest.main()

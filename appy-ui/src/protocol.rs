@@ -167,6 +167,8 @@ pub enum WeatherIcon {
 pub enum ClientEvent {
     UserText { text: String },
     SetEffort { effort: Effort },
+    /// Fold the conversation so far into a summary now (the input pill's circle button).
+    Compact,
 }
 
 /// Snapshot served to the panel pill at `GET /state`.
@@ -291,6 +293,8 @@ mod tests {
         assert_eq!(json, r#"{"type":"set_effort","effort":"medium"}"#);
         let json = serde_json::to_string(&ClientEvent::UserText { text: "yo".into() }).unwrap();
         assert_eq!(json, r#"{"type":"user_text","text":"yo"}"#);
+        let json = serde_json::to_string(&ClientEvent::Compact).unwrap();
+        assert_eq!(json, r#"{"type":"compact"}"#);
     }
 
     #[test]

@@ -171,6 +171,12 @@ impl App {
         self.ui.mascot.queue_draw();
     }
 
+    /// Ask the backend to compact the conversation now. The UI follows the backend's
+    /// "compacting" status, so there's nothing to update here.
+    pub fn compact(&self) {
+        let _ = self.ws_tx.send(ClientEvent::Compact);
+    }
+
     pub fn set_effort(&self, effort: Effort) {
         self.state.borrow_mut().effort = effort;
         self.ui.input.effort.show(effort);

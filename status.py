@@ -10,7 +10,7 @@ derived from both.
 import threading
 from typing import Callable
 
-PHASES = ("idle", "thinking", "replying")
+PHASES = ("idle", "thinking", "replying", "compacting")
 
 
 class StatusTracker:
@@ -21,12 +21,18 @@ class StatusTracker:
         self._speaking = False
         # Typed messages waiting for their turn (sent while Appy was still talking)
         self._queued = 0
+        # The mic heard the user start talking and the UI shows "listening" (sent as a
+        # "wake" event, not through here). Until their turn starts, don't knock it back
+        # to idle: a late end-of-audio or end-of-compaction would otherwise do that.
+        self._listening = False
         self._last: str | None = None
 
     @property
     def state(self) -> str:
         if self._speaking or self._phase == "replying":
             return "speaking"
+        if self._phase == "compacting":
+            return "compacting"
         if self._phase == "thinking" or self._queued:
             return "thinking"
         return "idle"
@@ -51,8 +57,20 @@ class StatusTracker:
         with self._lock:
             if queued:
                 self._queued = max(0, self._queued - 1)
+            self._listening = False
             self._phase = "thinking"
             self._publish_locked(force=False)
+
+    def heard_speech(self):
+        """The mic heard speech start (the UI was sent "wake" and shows "listening")."""
+        with self._lock:
+            self._listening = True
+
+    def speech_discarded(self):
+        """That speech turned out to be noise: re-send the real state."""
+        with self._lock:
+            self._listening = False
+            self._publish_locked(force=True)
 
     def set_speaking(self, speaking: bool):
         with self._lock:
@@ -79,6 +97,8 @@ class StatusTracker:
 
     def _publish_locked(self, force: bool):
         state = self.state
+        if self._listening and state == "idle":
+            return  # keep showing "listening" until the user's turn starts
         if force or state != self._last:
             self._last = state
             self._emit(state)
