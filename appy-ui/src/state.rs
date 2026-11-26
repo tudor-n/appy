@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use gtk4::Label;
 use gtk4::prelude::*;
 
+use crate::layout::{Placement, Point};
 use crate::protocol::{AppyState, Effort, Expression};
 
 /// How long the chat stays visible after backend activity, so you can read the reply.
@@ -15,9 +16,10 @@ const VOICE_COOLDOWN: Duration = Duration::from_secs(8);
 /// cross the gap to the messages without them collapsing.
 const HOVER_GRACE: Duration = Duration::from_millis(300);
 const BLINK_DURATION_MS: f64 = 160.0;
-/// Initial offset of the shell from the bottom-right corner of the screen.
-const HOME_MARGIN_RIGHT: f64 = 24.0;
-const HOME_MARGIN_BOTTOM: f64 = 56.0;
+/// How long the weather card stays up (unless hovered).
+const CARD_LIFETIME: Duration = Duration::from_secs(14);
+/// How long the card's exit animation runs before it's hidden.
+pub const CARD_EXIT: Duration = Duration::from_millis(320);
 
 pub struct SharedState {
     pub state: AppyState,
@@ -33,7 +35,7 @@ pub struct SharedState {
     pub voice_cooldown_until: Option<Instant>,
     pub chat_open: bool,
     pub message_count: usize,
-    pub last_input_bounds: Option<(i32, i32, i32, i32)>,
+    pub last_input_region: Option<Vec<(i32, i32, i32, i32)>>,
     pub active_status: Option<ActiveStatus>,
     /// Whether the wobble CSS provider currently holds a non-identity transform.
     pub wobble_css_active: bool,
@@ -42,6 +44,8 @@ pub struct SharedState {
     pub placement: Placement,
     pub wobble: Wobble,
     pub blink: Blink,
+    /// The weather card, while it's on screen.
+    pub card: Option<Card>,
 }
 
 impl SharedState {
@@ -57,7 +61,7 @@ impl SharedState {
             voice_cooldown_until: None,
             chat_open: false,
             message_count: 0,
-            last_input_bounds: None,
+            last_input_region: None,
             active_status: None,
             wobble_css_active: false,
             hover: Hover::default(),
@@ -65,6 +69,7 @@ impl SharedState {
             placement: Placement::default(),
             wobble: Wobble::default(),
             blink: Blink::new(now),
+            card: None,
         }
     }
 
@@ -168,17 +173,15 @@ impl Hover {
 #[derive(Debug, Default)]
 pub struct Drag {
     pub active: bool,
-    start_x: f64,
-    start_y: f64,
+    start: Point,
     last_dx: f64,
     last_dy: f64,
 }
 
 impl Drag {
-    pub fn begin(&mut self, placement: &Placement) {
+    pub fn begin(&mut self, anchor: Point) {
         self.active = true;
-        self.start_x = placement.x;
-        self.start_y = placement.y;
+        self.start = anchor;
         self.last_dx = 0.0;
         self.last_dy = 0.0;
     }
@@ -191,46 +194,56 @@ impl Drag {
         step
     }
 
-    pub fn target(&self, dx: f64, dy: f64, max_x: f64, max_y: f64) -> (f64, f64) {
-        (
-            (self.start_x + dx).clamp(0.0, max_x),
-            (self.start_y + dy).clamp(0.0, max_y),
-        )
+    /// Where the drag would put the mascot (before clamping to the screen).
+    pub fn target(&self, dx: f64, dy: f64) -> Point {
+        (self.start.0 + dx, self.start.1 + dy)
     }
 }
 
-/// Where the shell sits inside the fullscreen layer surface.
-#[derive(Debug, Default)]
-pub struct Placement {
-    pub x: f64,
-    pub y: f64,
-    initialized: bool,
-    last_root_h: f64,
+/// The weather card Appy pops out next to himself.
+#[derive(Debug)]
+pub struct Card {
+    /// Current top-left, eased toward its slot each frame.
+    pub pos: Point,
+    pub dismiss_at: Instant,
+    /// Set when the card starts flying back into Appy.
+    pub leaving_since: Option<Instant>,
+    pub hovered: bool,
 }
 
-impl Placement {
-    /// Puts the shell at the bottom-right on first layout, then keeps its bottom edge
-    /// pinned as the chat grows/shrinks. Returns true when the position changed.
-    pub fn follow_layout(&mut self, win: (f64, f64), root: (f64, f64), dragging: bool) -> bool {
-        let ((win_w, win_h), (root_w, root_h)) = (win, root);
-        if win_w <= 0.0 || win_h <= 0.0 || root_w <= 0.0 || root_h <= 0.0 {
-            return false;
+impl Card {
+    pub fn new(pos: Point, now: Instant) -> Self {
+        Self {
+            pos,
+            dismiss_at: now + CARD_LIFETIME,
+            leaving_since: None,
+            hovered: false,
         }
-        if !self.initialized {
-            self.x = (win_w - root_w - HOME_MARGIN_RIGHT).max(0.0);
-            self.y = (win_h - root_h - HOME_MARGIN_BOTTOM).max(0.0);
-            self.last_root_h = root_h;
-            self.initialized = true;
-            return true;
+    }
+
+    /// A new weather report while the card is up: stay longer (and come back if leaving).
+    pub fn refresh(&mut self, now: Instant) {
+        self.dismiss_at = now + CARD_LIFETIME;
+        self.leaving_since = None;
+    }
+
+    pub fn dismiss(&mut self, now: Instant) {
+        self.leaving_since.get_or_insert(now);
+    }
+
+    /// Start leaving once its time is up, unless the pointer is resting on it.
+    pub fn expire(&mut self, now: Instant) {
+        if self.hovered {
+            self.dismiss_at = self.dismiss_at.max(now + Duration::from_secs(2));
+        } else if now >= self.dismiss_at {
+            self.dismiss(now);
         }
-        if !dragging && (root_h - self.last_root_h).abs() > 0.5 {
-            let dh = root_h - self.last_root_h;
-            let max_y = (win_h - root_h).max(0.0);
-            self.y = (self.y - dh).clamp(0.0, max_y);
-            self.last_root_h = root_h;
-            return true;
-        }
-        false
+    }
+
+    /// True once the exit animation has finished and the card can be hidden.
+    pub fn is_gone(&self, now: Instant) -> bool {
+        self.leaving_since
+            .is_some_and(|since| now.duration_since(since) >= CARD_EXIT)
     }
 }
 
@@ -370,33 +383,32 @@ mod tests {
     }
 
     #[test]
-    fn drag_clamps_to_screen() {
-        let placement = Placement {
-            x: 100.0,
-            y: 50.0,
-            ..Default::default()
-        };
+    fn drag_tracks_steps_and_target() {
         let mut drag = Drag::default();
-        drag.begin(&placement);
+        drag.begin((100.0, 50.0));
         assert_eq!(drag.update(10.0, 5.0), (10.0, 5.0));
         assert_eq!(drag.update(15.0, 5.0), (5.0, 0.0));
-        assert_eq!(drag.target(-500.0, 20.0, 800.0, 600.0), (0.0, 70.0));
-        assert_eq!(drag.target(5000.0, 5000.0, 800.0, 600.0), (800.0, 600.0));
+        assert_eq!(drag.target(-500.0, 20.0), (-400.0, 70.0));
     }
 
     #[test]
-    fn placement_homes_then_pins_bottom_edge() {
-        let mut p = Placement::default();
-        assert!(!p.follow_layout((0.0, 0.0), (300.0, 200.0), false));
-        assert!(p.follow_layout((1920.0, 1080.0), (300.0, 200.0), false));
-        assert_eq!((p.x, p.y), (1596.0, 824.0));
-        // Unchanged layout: no move
-        assert!(!p.follow_layout((1920.0, 1080.0), (300.0, 200.0), false));
-        // Chat grew by 100px: shell moves up so the bottom stays put
-        assert!(p.follow_layout((1920.0, 1080.0), (300.0, 300.0), false));
-        assert_eq!(p.y, 724.0);
-        // Not while dragging
-        assert!(!p.follow_layout((1920.0, 1080.0), (300.0, 400.0), true));
+    fn card_lifecycle() {
+        let t0 = Instant::now();
+        let mut card = Card::new((0.0, 0.0), t0);
+        card.expire(t0 + ms(5_000));
+        assert!(card.leaving_since.is_none());
+        // Hovering holds it past its lifetime
+        card.hovered = true;
+        card.expire(t0 + ms(14_500));
+        assert!(card.leaving_since.is_none());
+        card.hovered = false;
+        card.expire(t0 + ms(17_000));
+        assert!(card.leaving_since.is_some());
+        assert!(!card.is_gone(t0 + ms(17_100)));
+        assert!(card.is_gone(t0 + ms(17_400)));
+        // A fresh weather report brings it back
+        card.refresh(t0 + ms(17_100));
+        assert!(card.leaving_since.is_none());
     }
 
     #[test]

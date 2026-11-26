@@ -60,6 +60,20 @@ window, window.background {
     opacity: 1;
     transform: translateX(0px) scale(1.0);
 }
+/* Chat on the mascot's left: slide in from the other direction */
+.chat-panel.left {
+    transform: translateX(28px) scale(0.94);
+}
+.chat-panel.left.open {
+    transform: translateX(0px) scale(1.0);
+}
+/* Swapping sides while open: snap to hidden for a moment, then replay the entrance */
+.chat-panel.open.flipping,
+.chat-panel.left.open.flipping {
+    opacity: 0;
+    transform: scale(0.94);
+    transition: none;
+}
 
 scrolledwindow, viewport {
     background: transparent;
@@ -207,4 +221,38 @@ button.effort-opt:hover {
 button.effort-chip.open:hover,
 button.effort-opt.active:hover {
     background-color: #ffffff;
+}
+
+/* Weather card: pops out of Appy with a little overshoot */
+.weather-card {
+    background-color: rgba(232, 230, 230, 0.94);
+    border-radius: 26px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+    opacity: 0;
+    transform: scale(0.35) rotate(-8deg);
+    transition:
+        transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1.0),
+        opacity 180ms ease;
+}
+.weather-card.shown {
+    opacity: 1;
+    transform: scale(1.0) rotate(0deg);
+}
+.weather-emoji {
+    font-family: "Noto Color Emoji", sans-serif;
+    font-size: 34px;
+}
+.weather-temp {
+    color: #000000;
+    font-family: "SF Pro Display", "SF Pro Text", "Inter", sans-serif;
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    margin-top: -2px;
+}
+.weather-place {
+    color: #636366;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
 }

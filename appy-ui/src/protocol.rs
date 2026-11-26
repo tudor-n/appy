@@ -116,6 +116,20 @@ pub enum BackendEvent {
     Effort {
         value: Effort,
     },
+    /// A card for Appy to pop out next to himself.
+    Widget(Widget),
+}
+
+/// Cards the backend can ask the UI to show, tagged by `widget`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "widget", rename_all = "snake_case")]
+pub enum Widget {
+    Weather {
+        city: String,
+        temp_c: f64,
+        condition: String,
+        emoji: String,
+    },
 }
 
 /// UI -> backend.
@@ -182,6 +196,31 @@ mod tests {
 
         let ev: BackendEvent = serde_json::from_str(r#"{"type":"effort","value":"none"}"#).unwrap();
         assert!(matches!(ev, BackendEvent::Effort { value: Effort::Off }));
+    }
+
+    #[test]
+    fn parses_weather_widget() {
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"weather","city":"Sibiu","temp_c":21.4,"condition":"clear sky","emoji":"☀️"}"#,
+        )
+        .unwrap();
+        let BackendEvent::Widget(Widget::Weather {
+            city,
+            temp_c,
+            emoji,
+            ..
+        }) = ev
+        else {
+            panic!("wrong variant: {ev:?}");
+        };
+        assert_eq!(
+            (city.as_str(), temp_c, emoji.as_str()),
+            ("Sibiu", 21.4, "☀️")
+        );
+        // Unknown widget kinds are rejected (and logged) rather than misread
+        assert!(
+            serde_json::from_str::<BackendEvent>(r#"{"type":"widget","widget":"stocks"}"#).is_err()
+        );
     }
 
     #[test]

@@ -103,7 +103,7 @@ impl App {
         let show = !self.ui.window.is_visible();
         self.ui.window.set_visible(show); // before borrowing: showing emits `map`
         let mut s = self.state.borrow_mut();
-        s.last_input_bounds = None;
+        s.last_input_region = None;
         self.sync_pill(&s);
     }
 

@@ -29,12 +29,21 @@ pub struct Pose {
     pub blink_scale: f64,
 }
 
-/// True when (x, y) in drawing-area coordinates lies on the mascot body rather than
-/// on the empty headroom / side padding around it.
+/// The mascot body's (x, y, w, h) inside its drawing area, excluding the empty
+/// headroom and side padding.
+pub fn body_rect(canvas_w: f64, canvas_h: f64) -> (f64, f64, f64, f64) {
+    (
+        (canvas_w - SIZE) * 0.5,
+        canvas_h - SIZE - BOTTOM_PAD,
+        SIZE,
+        SIZE,
+    )
+}
+
+/// True when (x, y) in drawing-area coordinates lies on the mascot body.
 pub fn body_contains(canvas_w: f64, canvas_h: f64, x: f64, y: f64) -> bool {
-    let left = (canvas_w - SIZE) * 0.5;
-    let top = canvas_h - SIZE - BOTTOM_PAD;
-    x >= left && x <= left + SIZE && y >= top && y <= top + SIZE
+    let (left, top, w, h) = body_rect(canvas_w, canvas_h);
+    x >= left && x <= left + w && y >= top && y <= top + h
 }
 
 pub fn draw(cr: &Context, canvas_w: f64, canvas_h: f64, pose: &Pose) {
