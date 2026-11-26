@@ -14,6 +14,7 @@ carries the session id; undo is `git revert`. The server serialises calls.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -29,7 +30,7 @@ MAX_FORGOTTEN = 20
 MAX_FACT_CHARS = 300
 GIST_CHARS = 120
 CORE = "core"
-GITIGNORE = "logs/\npending/\nstate.json\nmemory/_index.md\n"
+GITIGNORE = "logs/\npending/\nstate.json\nmemory/_index.md\ndumps/\n"
 _SLUG = re.compile(r"^[a-z0-9-]{1,64}$")
 _SESSION_ID = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}$")
 MAX_LOG_BYTES = 20 * 1024 * 1024
@@ -59,6 +60,16 @@ def _match_key(text: str) -> str:
     return _one_line(text).casefold().rstrip(".! ")
 
 
+def _gist(text: str) -> str:
+    """At most GIST_CHARS, cut at a word boundary."""
+    if len(text) <= GIST_CHARS:
+        return text
+    cut = text[: GIST_CHARS - 1]
+    if " " in cut:
+        cut = cut[: cut.rindex(" ")]
+    return cut.rstrip(" ,;:") + "…"
+
+
 def _write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
@@ -77,8 +88,14 @@ class Vault:
         for d in (self.memory, self.root / "logs", self.root / "pending"):
             d.mkdir(parents=True, exist_ok=True)
         self.git.init()
-        if not (self.root / ".gitignore").exists():
-            (self.root / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
+        ignore = self.root / ".gitignore"
+        have = ignore.read_text(encoding="utf-8").split() if ignore.exists() else []
+        missing = [entry for entry in GITIGNORE.split() if entry not in have]
+        if missing:  # an older vault gets the entries added since
+            text = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+            if text and not text.endswith("\n"):
+                text += "\n"
+            ignore.write_text(text + "".join(e + "\n" for e in missing), encoding="utf-8")
         if not (self.memory / "core.md").exists():
             (self.memory / "core.md").write_text("", encoding="utf-8")
         self.git.commit("memory: init")
@@ -110,6 +127,73 @@ class Vault:
     def forgotten(self) -> list[dict]:
         return self._state().get("forgotten", [])
 
+    def forgotten_lines(self) -> list[str]:
+        return [str(f.get("line", "")) for f in self.forgotten()]
+
+    def note_text(self, slug: str) -> str | None:
+        path = self._path(slug)
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def note_hash(self, slug: str) -> str:
+        text = self.note_text(slug)
+        return "" if text is None else hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    # -- consolidator: proposals and progress ------------------------------------------
+
+    def proposal(self, slug: str) -> dict | None:
+        path = self.root / "pending" / f"{self._path(slug).stem}.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) and data.get("slug") == slug else None
+
+    def proposals(self) -> list[dict]:
+        found = []
+        for path in (self.root / "pending").glob("*.json"):
+            if _SLUG.match(path.stem):
+                item = self.proposal(path.stem)
+                if item:
+                    found.append(item)
+        return sorted(found, key=lambda p: (str(p.get("updated", "")), p["slug"]))
+
+    def save_proposal(self, slug: str, title: str, new_text: str, summary: str, session: str,
+                      window: int) -> dict:
+        """Write (or build on) the one pending proposal for this note."""
+        self._path(slug)
+        old = self.proposal(slug) or {}
+        now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        sessions = list(old.get("sessions", []))
+        if session not in sessions:
+            sessions.append(session)
+        sources = [list(s) for s in old.get("sources", [])]
+        if [session, window] not in sources:
+            sources.append([session, window])
+        item = {
+            "slug": slug, "title": title, "base_hash": self.note_hash(slug),
+            "new_text": new_text, "summary": summary, "sessions": sessions, "sources": sources,
+            "created": old.get("created", now), "updated": now,
+        }
+        _write_atomic(self.root / "pending" / f"{slug}.json",
+                      json.dumps(item, ensure_ascii=False, indent=1))
+        return item
+
+    def session_state(self, sid: str) -> dict:
+        found = self._state().get("sessions", {}).get(sid) or {}
+        return {"windows": int(found.get("windows", 0)),
+                "done_windows": int(found.get("done_windows", 0)),
+                "done": bool(found.get("done", False))}
+
+    def set_session_state(self, sid: str, windows: int, done_windows: int, done: bool) -> None:
+        state = self._state()
+        state.setdefault("sessions", {})[sid] = {
+            "windows": windows, "done_windows": done_windows, "done": done}
+        self._save_state(state)
+
+    def sessions_to_consolidate(self) -> list[str]:
+        sids = sorted(p.stem for p in (self.root / "logs").glob("*.jsonl"))
+        return [sid for sid in sids if not self.session_state(sid)["done"]]
+
     # -- writing ---------------------------------------------------------------------
 
     def remember(self, text: str, slug: str | None, session: str) -> dict:
@@ -124,7 +208,7 @@ class Vault:
         old = path.read_text(encoding="utf-8") if path.exists() else None
         if old is not None and any(_match_key(l) == _match_key(fact) for l in self._bullets(old)):
             return {"slug": slug, "line": line, "commit": None}
-        base = old if old is not None else f"# {slug.replace('-', ' ').capitalize()}\n> {fact[:GIST_CHARS]}\n"
+        base = old if old is not None else f"# {slug.replace('-', ' ').capitalize()}\n> {_gist(fact)}\n"
         if base and not base.endswith("\n"):
             base += "\n"
         new = base + line + "\n"
@@ -169,7 +253,7 @@ class Vault:
         forgotten.append({"slug": slug, "line": line,
                           "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds")})
         state["forgotten"] = forgotten[-MAX_FORGOTTEN:]
-        _write_atomic(self.root / "state.json", json.dumps(state, ensure_ascii=False, indent=1))
+        self._save_state(state)
         return {"slug": slug, "line": line, "commit": sha}
 
     def undo(self) -> dict:
@@ -251,6 +335,9 @@ class Vault:
     def _rebuild_index(self) -> None:
         lines = self._index_lines()
         _write_atomic(self.memory / "_index.md", "".join(l + "\n" for l in lines))
+
+    def _save_state(self, state: dict) -> None:
+        _write_atomic(self.root / "state.json", json.dumps(state, ensure_ascii=False, indent=1))
 
     def _state(self) -> dict:
         try:

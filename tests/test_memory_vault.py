@@ -102,7 +102,7 @@ class VaultTests(unittest.TestCase):
         Vault(self.root).open()
         self.assertEqual((self.mem / "core.md").read_text(), "")
         self.assertEqual((self.root / ".gitignore").read_text().split(),
-                         ["logs/", "pending/", "state.json", "memory/_index.md"])
+                         ["logs/", "pending/", "state.json", "memory/_index.md", "dumps/"])
         for d in ("logs", "pending"):
             self.assertTrue((self.root / d).is_dir())
         self.assertEqual(commit_count(self.root), 1)
@@ -141,7 +141,7 @@ class VaultTests(unittest.TestCase):
         )
         self.vault.remember("x" * 200, "long-one", "s1")
         gist = (self.mem / "long-one.md").read_text().splitlines()[1]
-        self.assertEqual(gist, "> " + "x" * 120)
+        self.assertEqual(gist, "> " + "x" * 119 + "…")  # no space to cut at
 
     def test_remember_keeps_leading_symbols_that_belong_to_the_fact(self):
         self.assertEqual(self.vault.remember("-5 C is the freezer setpoint", None, "s1")["line"],
