@@ -86,7 +86,10 @@ class Agent:
         status,
         tools: list[dict] = TOOL_SCHEMAS,
         run_tool=default_run_tool,
+        on_tool_result=None,
     ):
+        """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
+        UI can show a card for it. Its errors are logged, never fatal to the turn."""
         self.client = client
         self.model = model
         self.temperature = temperature
@@ -95,6 +98,7 @@ class Agent:
         self.status = status
         self.tools = tools
         self.run_tool = run_tool
+        self.on_tool_result = on_tool_result
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
     def preheat(self):
@@ -150,6 +154,7 @@ class Agent:
                     self.messages.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result}
                     )
+                    self._notify_tool_result(name, result)
                 continue  # Loop back so Appy speaks the tool result
 
             if tool_calls:
@@ -161,6 +166,14 @@ class Agent:
                 self.ui.response(reply, expression)
                 self.messages.append({"role": "assistant", "content": reply})
             return
+
+    def _notify_tool_result(self, name: str, result: str):
+        if not self.on_tool_result:
+            return
+        try:
+            self.on_tool_result(name, result)
+        except Exception as exc:
+            print(f"[tool hook error] {type(exc).__name__}: {exc}")
 
     def _stream_round(
         self, effort: str, speak_aloud: bool, allow_tools: bool = True

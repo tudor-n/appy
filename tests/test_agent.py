@@ -167,6 +167,25 @@ class AgentTurnTests(unittest.TestCase):
         self.assertIn(("response", agent_mod.TOOL_LOOP_FALLBACK, "skeptical"), ui.events)
         self.assertEqual(agent.messages[-1]["content"], agent_mod.TOOL_LOOP_FALLBACK)
 
+    def test_tool_results_reach_the_hook(self):
+        seen = []
+        agent, _, _, _ = make_agent([
+            [tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("Sunny.")],
+        ], run_tool=lambda n, a: '{"temp_c":21}')
+        agent.on_tool_result = lambda name, result: seen.append((name, result))
+        run_quietly(agent, "weather?")
+        self.assertEqual(seen, [("get_weather", '{"temp_c":21}')])
+
+    def test_broken_hook_does_not_break_the_turn(self):
+        agent, _, _, ui = make_agent([
+            [tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("Sunny.")],
+        ])
+        agent.on_tool_result = lambda name, result: 1 / 0
+        run_quietly(agent, "weather?")
+        self.assertIn(("response", "Sunny.", "neutral"), ui.events)
+
     def test_error_messages(self):
         import httpx
         import openai

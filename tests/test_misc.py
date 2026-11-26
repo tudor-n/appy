@@ -67,6 +67,30 @@ class ActivityCounterTests(unittest.TestCase):
         self.assertFalse(c.active)
 
 
+class WeatherCardTests(unittest.TestCase):
+    def result(self, **current):
+        cur = {"temp_c": 21.4, "condition": "clear sky", "code": 0, "is_day": True, **current}
+        return json.dumps({"city": "Sibiu", "current": cur})
+
+    def test_day_card(self):
+        self.assertEqual(tools.weather_card(self.result()), {
+            "widget": "weather",
+            "city": "Sibiu",
+            "temp_c": 21.4,
+            "condition": "clear sky",
+            "emoji": "☀️",
+        })
+
+    def test_night_and_unknown_codes(self):
+        self.assertEqual(tools.weather_card(self.result(is_day=False))["emoji"], "🌙")
+        self.assertEqual(tools.weather_card(self.result(code=999))["emoji"], "🌡️")
+
+    def test_errors_and_garbage_give_no_card(self):
+        self.assertIsNone(tools.weather_card(json.dumps({"error": "timeout"})))
+        self.assertIsNone(tools.weather_card("not json"))
+        self.assertIsNone(tools.weather_card(json.dumps({"current": {"temp_c": None}})))
+
+
 class RunToolTests(unittest.TestCase):
     def setUp(self):
         self._orig = dict(tools.TOOL_MAP)

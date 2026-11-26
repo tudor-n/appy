@@ -26,6 +26,30 @@ WMO_CODES = {
     95: "thunderstorm",
 }
 
+# Emoji for the UI's weather card: (day, night). Not shown to the LLM, so it can't end
+# up in a spoken reply.
+WMO_EMOJI = {
+    0: ("☀️", "🌙"),
+    1: ("🌤️", "🌙"),
+    2: ("⛅", "☁️"),
+    3: ("☁️", "☁️"),
+    45: ("🌫️", "🌫️"),
+    48: ("🌫️", "🌫️"),
+    51: ("🌦️", "🌧️"),
+    53: ("🌦️", "🌧️"),
+    55: ("🌧️", "🌧️"),
+    61: ("🌦️", "🌧️"),
+    63: ("🌧️", "🌧️"),
+    65: ("🌧️", "🌧️"),
+    71: ("🌨️", "🌨️"),
+    73: ("🌨️", "🌨️"),
+    75: ("❄️", "❄️"),
+    80: ("🌦️", "🌧️"),
+    81: ("🌧️", "🌧️"),
+    82: ("⛈️", "⛈️"),
+    95: ("⛈️", "⛈️"),
+}
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -54,7 +78,7 @@ def _fetch_weather() -> str:
     url = (
         f"https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
-        f"&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
+        f"&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,is_day"
         f"&hourly=temperature_2m,weather_code,precipitation_probability"
         f"&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
         f"&forecast_hours=12&forecast_days=3&timezone=auto"
@@ -74,6 +98,8 @@ def _fetch_weather() -> str:
                 "feels_like_c": cur["apparent_temperature"],
                 "condition": WMO_CODES.get(cur["weather_code"], f"code {cur['weather_code']}"),
                 "wind_kmh": cur["wind_speed_10m"],
+                "is_day": bool(cur["is_day"]),
+                "code": cur["weather_code"],
             },
             "next_12_hours": [
                 {
@@ -130,6 +156,23 @@ def run_tool(name: str, arguments: str) -> str:
     except Exception as e:
         return json.dumps({"error": f"{name} failed: {type(e).__name__}: {e}"})
 
+
+def weather_card(result: str) -> dict | None:
+    """The UI card for a get_weather result, or None if it's an error or malformed."""
+    try:
+        data = json.loads(result)
+        cur = data["current"]
+        temp = float(cur["temp_c"])
+    except (ValueError, TypeError, KeyError):
+        return None
+    day, night = WMO_EMOJI.get(cur.get("code"), ("🌡️", "🌡️"))
+    return {
+        "widget": "weather",
+        "city": str(data.get("city", "")),
+        "temp_c": temp,
+        "condition": str(cur.get("condition", "")),
+        "emoji": day if cur.get("is_day", True) else night,
+    }
 
 
 def prefetch():

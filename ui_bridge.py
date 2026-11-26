@@ -95,3 +95,7 @@ class UiBridge:
 
     def effort(self, value: str):
         self.emit({"type": "effort", "value": value})
+
+    def widget(self, card: dict):
+        """Show a card next to Appy; `card` carries its own "widget" kind (see PROTOCOL.md)."""
+        self.emit({"type": "widget", **card})

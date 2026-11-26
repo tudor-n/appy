@@ -59,6 +59,11 @@ def main():
     ear = Ear(on_speech_start=ui.wake, on_speech_discarded=lambda: status.publish(force=True))
     ear.start()
 
+    def show_tool_card(name: str, result: str):
+        """Pop a card out next to Appy for tools that have one."""
+        if name == "get_weather" and (card := tools.weather_card(result)):
+            ui.widget(card)
+
     agent = Agent(
         client,
         model=os.getenv("MODEL", "google/gemma-4-26b-a4b"),
@@ -67,6 +72,7 @@ def main():
         speaker=speaker,
         ui=ui,
         status=status,
+        on_tool_result=show_tool_card,
     )
 
     def _voice_forwarder():
