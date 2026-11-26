@@ -93,6 +93,8 @@ def main():
         tail_budget=int(os.getenv("TAIL_BUDGET", "2500")),
         summary_max=int(os.getenv("SUMMARY_MAX", "700")),
         context_limit=int(os.getenv("CONTEXT_TOKENS", "16384")),
+        # APPY_DUMP_COMPACTION=1: write each compaction's prompt + summary next to the log
+        compaction_dump=log.path.with_suffix("") if os.getenv("APPY_DUMP_COMPACTION") else None,
     )
 
     def _voice_forwarder():

@@ -1,5 +1,6 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
 import json
+from pathlib import Path
 from collections import deque
 
 import openai
@@ -119,6 +120,7 @@ class Agent:
         tail_budget: int = TAIL_BUDGET,
         summary_max: int = SUMMARY_MAX,
         context_limit: int = CONTEXT_TOKENS,
+        compaction_dump: Path | None = None,
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
         UI can show a card for it. Its errors are logged, never fatal to the turn.
@@ -141,6 +143,9 @@ class Agent:
         self.tail_budget = tail_budget
         self.summary_max = summary_max
         self.context_limit = context_limit
+        # If set, compaction N writes its prompt and summary to "<this>.compaction-N.txt"
+        self.compaction_dump = compaction_dump
+        self._compactions = 0
         # Tools called in each of the last few turns, so follow-ups ("and at 5 pm?") can
         # be recognised a couple of messages later
         self._recent_turn_tools: deque[frozenset[str]] = deque(maxlen=RECENT_TURNS)
@@ -225,11 +230,16 @@ class Agent:
         if split(self.messages, self.tail_budget) is None:
             return False  # the recent turns alone are over the threshold: nothing to fold
         self.status.set_phase("compacting")
-        print("[compacting]")
+        self._compactions += 1
+        dump = None
+        if self.compaction_dump:
+            dump = Path(f"{self.compaction_dump}.compaction-{self._compactions}.txt")
+        print(f"[compacting]{f' -> {dump}' if dump else ''}")
         try:
             summary = compact(
                 self.client, self.model, self.messages, self.tail_budget, self.summary_max,
                 drop_on_failure=tokens >= self.context_limit - TURN_RESERVE,
+                dump_path=dump,
             )
             if summary:
                 self.log.compaction(summary=summary)

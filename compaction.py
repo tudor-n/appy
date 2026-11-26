@@ -8,6 +8,7 @@ compaction edits the previous summary instead of summarising a summary.
 """
 import json
 import math
+from pathlib import Path
 
 COMPACT_AT = 9500
 CONTEXT_TOKENS = 16384
@@ -107,6 +108,19 @@ def render(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _dump(path: Path, prompt: str, outcome: str, folded: int, kept: int) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"# {folded} messages folded, {kept} kept verbatim\n\n"
+            f"=== PROMPT SENT TO THE MODEL ===\n{prompt}\n\n"
+            f"=== SUMMARY RETURNED ===\n{outcome}\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[compaction dump failed] {type(exc).__name__}: {exc}")
+
+
 def compact(
     client,
     model: str,
@@ -114,6 +128,7 @@ def compact(
     tail_budget: int = TAIL_BUDGET,
     summary_max: int = SUMMARY_MAX,
     drop_on_failure: bool = False,
+    dump_path: Path | None = None,
 ) -> str | None:
     """Fold older turns into the session summary, rebuilding `messages` in place.
 
@@ -121,6 +136,9 @@ def compact(
     failure the history is left as it was so the next turn can retry, unless
     `drop_on_failure`: then the older turns are dropped anyway (keeping any previous
     summary), so the conversation still shrinks and stays valid.
+
+    `dump_path`, if given, gets the exact prompt sent and what came back, for checking
+    what the summariser actually sees.
     """
     parts = split(messages, tail_budget)
     if parts is None:
@@ -140,6 +158,11 @@ def compact(
     except Exception as exc:
         print(f"[compaction failed] {type(exc).__name__}: {exc}")
         summary = ""
+        outcome = f"(failed: {type(exc).__name__}: {exc})"
+    else:
+        outcome = summary or "(blank summary)"
+    if dump_path:
+        _dump(dump_path, prompt, outcome, len(middle), len(tail))
 
     if summary:
         messages[1:] = _summary_pair(summary) + tail

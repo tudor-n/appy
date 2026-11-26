@@ -1,6 +1,8 @@
 import contextlib
 import io
+import tempfile
 import unittest
+from pathlib import Path
 
 import agent as agent_mod
 
@@ -131,6 +133,31 @@ class CompactTests(unittest.TestCase):
         msgs = history(10)
         msgs[1] = {"role": "user", "content": "my cat is Pixel"}
         return msgs
+
+    def test_dump_shows_exact_prompt_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dump = Path(tmp) / "s.compaction-1.txt"
+            client = FakeClient([completion("FACTS: cat is Pixel")])
+            compact(client, "m", self.pixel_history(), tail_budget=1000, dump_path=dump)
+            text = dump.read_text(encoding="utf-8")
+        self.assertIn(client.calls[0]["messages"][0]["content"], text)
+        self.assertIn("User: my cat is Pixel", text)
+        self.assertIn("FACTS: cat is Pixel", text)
+
+    def test_dump_records_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dump = Path(tmp) / "s.compaction-1.txt"
+            with contextlib.redirect_stdout(io.StringIO()):
+                compact(FakeClient([ConnectionError("down")]), "m", self.pixel_history(),
+                        tail_budget=1000, dump_path=dump)
+            self.assertIn("ConnectionError: down", dump.read_text(encoding="utf-8"))
+
+    def test_unwritable_dump_never_breaks_compaction(self):
+        msgs = self.pixel_history()
+        with contextlib.redirect_stdout(io.StringIO()):
+            summary = compact(FakeClient([completion("FACTS: x")]), "m", msgs, tail_budget=1000,
+                              dump_path=Path("/nonexistent/dir/x.txt"))
+        self.assertEqual(summary, "FACTS: x")
 
     def test_compact_rebuilds_history(self):
         msgs = self.pixel_history()

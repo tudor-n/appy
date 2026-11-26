@@ -436,6 +436,21 @@ class MaybeCompactTests(unittest.TestCase):
         self.assertLess(len(agent.messages), before)
         self.assertEqual(agent.messages[1]["role"], "user")
 
+    def test_compaction_dumps_are_numbered(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "2026-11-26_153012"
+            agent, _, _, _ = make_agent(
+                [[text_chunk("Okay."), usage_chunk(9600, 10)], completion("FACTS: x")],
+                compact_at=9500, compaction_dump=prefix,
+            )
+            prefill(agent, 12)
+            run_quietly(agent, "hi")
+            with contextlib.redirect_stdout(io.StringIO()):
+                agent.maybe_compact()
+            self.assertTrue((Path(tmp) / "2026-11-26_153012.compaction-1.txt").exists())
+
     def test_nothing_to_fold_means_no_pill(self):
         agent, client, _, ui = make_agent([[text_chunk("Okay.")]], compact_at=10)
         run_quietly(agent, "hi")
