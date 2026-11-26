@@ -214,7 +214,7 @@ def main():
     ui.status("booting", "loading")
 
     client = OpenAI(
-        base_url=os.getenv("BASE_URL", "http://100.103.162.57:1234/v1"),
+        base_url=os.getenv("BASE_URL") or "http://127.0.0.1:1234/v1",
         api_key=os.getenv("API_KEY", "ollama"),
     )
     model = os.getenv("MODEL", "google/gemma-4-26b-a4b")
