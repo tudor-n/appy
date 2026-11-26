@@ -3,6 +3,14 @@ from streaming import ExpressionTagParser, SpeechChunker
 from tools import TOOL_SCHEMAS, run_tool as default_run_tool
 
 KEEP_RECENT_TOOL_OUTPUTS = 6
+# A model that keeps calling tools would otherwise loop forever. After this many tool
+# rounds the next request disables tools so the model has to answer.
+MAX_TOOL_ROUNDS = 4
+# Once the transcript (excluding the system prompt) grows past HISTORY_MAX_MESSAGES,
+# drop the oldest messages down to about HISTORY_KEEP_MESSAGES. Trimming in one big step
+# instead of a message at a time keeps the server's prompt cache warm between turns.
+HISTORY_MAX_MESSAGES = 60
+HISTORY_KEEP_MESSAGES = 30
 
 
 def prune_old_tool_outputs(messages: list[dict], keep_recent: int = KEEP_RECENT_TOOL_OUTPUTS):
@@ -12,6 +20,30 @@ def prune_old_tool_outputs(messages: list[dict], keep_recent: int = KEEP_RECENT_
     for msg in messages[:-keep_recent]:
         if msg.get("role") == "tool" and msg.get("content") != "[pruned]":
             msg["content"] = "[pruned]"
+
+
+def compact_history(
+    messages: list[dict],
+    max_messages: int = HISTORY_MAX_MESSAGES,
+    keep: int = HISTORY_KEEP_MESSAGES,
+) -> bool:
+    """Drop the oldest messages, keeping the system prompt. Returns True if it trimmed.
+
+    The kept part always starts at a user message so an assistant tool call is never
+    separated from its tool results.
+    """
+    body = messages[1:]
+    if len(body) <= max_messages:
+        return False
+
+    start = max(len(body) - keep, 0)
+    cut = next((i for i in range(start, len(body)) if body[i].get("role") == "user"), None)
+    if cut is None:
+        cut = next((i for i in range(start - 1, -1, -1) if body[i].get("role") == "user"), None)
+    if not cut:
+        return False
+    del messages[1 : 1 + cut]
+    return True
 
 
 def _accumulate_tool_calls(acc: dict[int, dict], deltas) -> None:
@@ -38,6 +70,7 @@ class Agent:
         system_prompt: str,
         speaker,
         ui,
+        status,
         tools: list[dict] = TOOL_SCHEMAS,
         run_tool=default_run_tool,
     ):
@@ -46,6 +79,7 @@ class Agent:
         self.temperature = temperature
         self.speaker = speaker
         self.ui = ui
+        self.status = status
         self.tools = tools
         self.run_tool = run_tool
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -64,15 +98,38 @@ class Agent:
             pass
 
     def run_turn(self, user_text: str, effort: str = "none", speak_aloud: bool = True):
+        """Run one user turn to completion. Never raises on LLM/network errors."""
+        if compact_history(self.messages):
+            self.ui.status("compacting")
+            print(f"[history compacted to {len(self.messages) - 1} messages]")
+
+        checkpoint = len(self.messages)
         self.messages.append({"role": "user", "content": user_text})
+        self.status.set_phase("thinking")
+        try:
+            self._run_rounds(effort, speak_aloud)
+        except Exception as exc:
+            # Roll back so a half-finished exchange (e.g. tool calls with no final
+            # answer) doesn't poison the history for the next turn.
+            del self.messages[checkpoint:]
+            print(f"\n[llm error] {type(exc).__name__}: {exc}\n")
+            self.ui.response(
+                f"Sorry, I couldn't reach my model ({type(exc).__name__}). Try again in a moment.",
+                "skeptical",
+            )
+        finally:
+            self.status.set_phase("idle")
+            prune_old_tool_outputs(self.messages)
 
-        while True:
-            reply, expression, tool_calls = self._stream_round(effort, speak_aloud)
+    def _run_rounds(self, effort: str, speak_aloud: bool):
+        for round_no in range(MAX_TOOL_ROUNDS + 1):
+            allow_tools = round_no < MAX_TOOL_ROUNDS
+            reply, expression, tool_calls = self._stream_round(effort, speak_aloud, allow_tools)
 
-            if tool_calls:
+            if tool_calls and allow_tools:
                 if reply:
                     self.ui.response(reply, expression)
-                    self.ui.status("thinking")
+                self.status.set_phase("thinking")
                 self.messages.append(
                     {"role": "assistant", "content": reply or None, "tool_calls": tool_calls}
                 )
@@ -85,18 +142,19 @@ class Agent:
                     )
                 continue  # Loop back so Appy speaks the tool result
 
+            if tool_calls:
+                print("[tool limit reached, ignoring further calls] ", end="")
             print("\n")
             if reply:
                 self.ui.response(reply, expression)
                 self.messages.append({"role": "assistant", "content": reply})
-            else:
-                self.ui.status("idle")
-            prune_old_tool_outputs(self.messages)
             return
 
-    def _stream_round(self, effort: str, speak_aloud: bool) -> tuple[str, str, list[dict]]:
+    def _stream_round(
+        self, effort: str, speak_aloud: bool, allow_tools: bool = True
+    ) -> tuple[str, str, list[dict]]:
         """Stream one completion. Returns (stripped reply, expression, tool calls)."""
-        stream = self.client.chat.completions.create(
+        request = dict(
             model=self.model,
             messages=self.messages,
             tools=self.tools,
@@ -105,6 +163,9 @@ class Agent:
             reasoning_effort=effort,
             stream=True,
         )
+        if not allow_tools:
+            request["tool_choice"] = "none"
+        stream = self.client.chat.completions.create(**request)
 
         tags = ExpressionTagParser()
         chunker = SpeechChunker()
@@ -118,6 +179,7 @@ class Agent:
                 if not text:
                     return
                 print(f"Appy [{tags.expression}]: ", end="", flush=True)
+                self.status.set_phase("replying")
             print(text, end="", flush=True)
             reply += text
             if speak_aloud:

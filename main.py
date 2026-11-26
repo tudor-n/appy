@@ -11,6 +11,7 @@ from openai import OpenAI
 import tools
 from agent import Agent
 from hearing import Ear
+from status import StatusTracker
 from voice import Speaker
 from ui_bridge import UiBridge, VALID_EFFORTS
 
@@ -42,6 +43,7 @@ def main():
     )
     ui.start()
     ui.status("booting", "loading")
+    status = StatusTracker(ui.status)
 
     client = OpenAI(
         base_url=os.getenv("BASE_URL") or "http://127.0.0.1:1234/v1",
@@ -49,10 +51,12 @@ def main():
     )
 
     speaker = Speaker(
-        on_speak_start=lambda: ui.status("speaking"),
-        on_speak_end=lambda: ui.status("idle"),
+        on_speak_start=lambda: status.set_speaking(True),
+        on_speak_end=lambda: status.set_speaking(False),
     )
-    ear = Ear(on_speech_start=ui.wake)
+    # A wake flips the UI to "listening"; if that speech is then discarded as noise,
+    # re-send the real state so the mascot doesn't stay stuck listening.
+    ear = Ear(on_speech_start=ui.wake, on_speech_discarded=lambda: status.publish(force=True))
     ear.start()
 
     agent = Agent(
@@ -62,6 +66,7 @@ def main():
         system_prompt=load_system_prompt(),
         speaker=speaker,
         ui=ui,
+        status=status,
     )
 
     def _voice_forwarder():
@@ -78,7 +83,7 @@ def main():
     threading.Thread(target=agent.preheat, daemon=True).start()
     tools.prefetch()
 
-    ui.status("idle")
+    status.publish(force=True)  # clears "booting"
     print("Appy ready (voice + UI). Say 'quit' or press Ctrl+C to exit.\n")
 
     try:
@@ -92,15 +97,16 @@ def main():
 
             if source == "voice":
                 ui.transcript(user_input, is_final=True)
-                ui.status("thinking")
             else:
                 print(f"You (UI): {user_input}")
 
             now = datetime.now().strftime("%I:%M %p")
-            ear.pause()
-            agent.run_turn(f"[{now}] {user_input}", effort=effort_state["value"])
-            speaker.wait()
-            ear.resume()
+            ear.pause()  # don't let Appy hear itself
+            try:
+                agent.run_turn(f"[{now}] {user_input}", effort=effort_state["value"])
+                speaker.wait()
+            finally:
+                ear.resume()
     except KeyboardInterrupt:
         print("\nExiting...")
     finally:

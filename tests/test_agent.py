@@ -2,7 +2,9 @@ import contextlib
 import io
 import unittest
 
-from agent import Agent, prune_old_tool_outputs
+import agent as agent_mod
+from agent import Agent, compact_history, prune_old_tool_outputs
+from status import StatusTracker
 from tests.fakes import FakeClient, FakeSpeaker, FakeUi, text_chunk, tool_chunk
 
 
@@ -17,6 +19,7 @@ def make_agent(scripts, run_tool=None):
         system_prompt="sys",
         speaker=speaker,
         ui=ui,
+        status=StatusTracker(lambda state: ui.events.append(("status", state))),
         run_tool=run_tool or (lambda name, args: '{"ok":true}'),
     )
     return agent, client, speaker, ui
@@ -79,6 +82,88 @@ class AgentTurnTests(unittest.TestCase):
         agent, _, _, ui = make_agent([[SimpleNamespace(choices=[]), text_chunk("Okay then.")]])
         run_quietly(agent, "hi")
         self.assertIn(("response", "Okay then.", "neutral"), ui.events)
+
+
+    def test_status_sequence_for_tool_turn(self):
+        agent, _, _, ui = make_agent([
+            [text_chunk("Let me check, one moment please. "), tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("Sunny and warm.")],
+        ])
+        run_quietly(agent, "weather?")
+        statuses = [e[1] for e in ui.events if e[0] == "status"]
+        # thinking -> talking -> back to thinking while the tool runs -> talking -> idle
+        self.assertEqual(statuses, ["thinking", "speaking", "thinking", "speaking", "idle"])
+
+    def test_llm_error_rolls_back_and_reports(self):
+        agent, _, _, ui = make_agent([ConnectionError("server down")])
+        run_quietly(agent, "hi")  # must not raise
+
+        self.assertEqual([m["role"] for m in agent.messages], ["system"])
+        responses = [e for e in ui.events if e[0] == "response"]
+        self.assertEqual(len(responses), 1)
+        self.assertIn("ConnectionError", responses[0][1])
+        self.assertEqual(ui.events[-1], ("status", "idle"))
+
+    def test_error_mid_tool_loop_rolls_back_whole_turn(self):
+        agent, _, _, _ = make_agent([
+            [text_chunk("[happy] Hello friend, nice to see you.")],
+            [tool_chunk(0, "c1", "get_weather", "{}")],
+            TimeoutError("slow"),
+        ])
+        run_quietly(agent, "first")
+        before = [dict(m) for m in agent.messages]
+        run_quietly(agent, "second")
+        self.assertEqual(agent.messages, before)
+
+    def test_tool_rounds_are_capped(self):
+        looping = [[tool_chunk(0, f"c{i}", "get_weather", "{}")] for i in range(agent_mod.MAX_TOOL_ROUNDS)]
+        final = [tool_chunk(0, "cx", "get_weather", "{}"), text_chunk("Fine, it's sunny.")]
+        calls = []
+        agent, client, _, ui = make_agent(
+            looping + [final], run_tool=lambda n, a: calls.append(n) or "{}"
+        )
+        run_quietly(agent, "weather?")
+
+        self.assertEqual(len(calls), agent_mod.MAX_TOOL_ROUNDS)
+        self.assertEqual(len(client.calls), agent_mod.MAX_TOOL_ROUNDS + 1)
+        self.assertNotIn("tool_choice", client.calls[0])
+        self.assertEqual(client.calls[-1]["tool_choice"], "none")
+        self.assertEqual(agent.messages[-1], {"role": "assistant", "content": "Fine, it's sunny."})
+
+    def test_compaction_happens_before_request(self):
+        agent, client, _, ui = make_agent([[text_chunk("Okay.")]])
+        for i in range(agent_mod.HISTORY_MAX_MESSAGES // 2 + 1):
+            agent.messages.append({"role": "user", "content": f"u{i}"})
+            agent.messages.append({"role": "assistant", "content": f"a{i}"})
+        run_quietly(agent, "latest")
+
+        sent = client.calls[0]["messages"]
+        self.assertEqual(sent[0]["role"], "system")
+        self.assertEqual(sent[1]["role"], "user")
+        self.assertLessEqual(len(sent) - 1, agent_mod.HISTORY_KEEP_MESSAGES + 1)
+        self.assertEqual(sent[-1]["content"], "latest")
+        self.assertEqual(ui.events[0], ("status", "compacting"))
+
+
+class CompactHistoryTests(unittest.TestCase):
+    def test_noop_under_limit(self):
+        msgs = [{"role": "system"}] + [{"role": "user"}] * 5
+        self.assertFalse(compact_history(msgs, max_messages=10, keep=4))
+        self.assertEqual(len(msgs), 6)
+
+    def test_never_starts_with_orphaned_tool_message(self):
+        msgs = [{"role": "system", "content": "sys"}]
+        for i in range(10):
+            msgs += [
+                {"role": "user", "content": f"u{i}"},
+                {"role": "assistant", "content": None, "tool_calls": []},
+                {"role": "tool", "content": "{}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ]
+        self.assertTrue(compact_history(msgs, max_messages=20, keep=6))
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertEqual(msgs[1]["role"], "user")
+        self.assertEqual(msgs[-1]["content"], "a9")
 
 
 class PruneTests(unittest.TestCase):
