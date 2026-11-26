@@ -51,7 +51,9 @@ pub struct SharedState {
 impl SharedState {
     pub fn new(now: Instant) -> Self {
         Self {
-            state: AppyState::Idle,
+            // The overlay comes up before the backend, which replays "booting" (continuing
+            // this) or "idle" (ending it) once it's connected
+            state: AppyState::Booting,
             expression: Expression::Neutral,
             effort: Effort::Off,
             phase: 0.0,
@@ -111,7 +113,9 @@ impl SharedState {
             || self.hover.is_hovered(now)
             || self.drag.active
             || input_selected
-            || self.is_busy()
+            // Busy opens the chat to show its status pill, except booting: at startup
+            // only the mascot pops out
+            || (self.is_busy() && self.state != AppyState::Booting)
             || self.voice_cooldown_until.is_some_and(|until| now < until)
     }
 
@@ -345,6 +349,23 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    #[test]
+    fn booting_does_not_open_the_chat() {
+        // At startup only the mascot pops out; the chat waits for a hover as usual
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.state = AppyState::Booting;
+        assert!(!s.should_show_chat(false, t0));
+        s.state = AppyState::Thinking;
+        assert!(s.should_show_chat(false, t0));
+    }
+
+    #[test]
+    fn starts_booting() {
+        // The overlay is up before the backend: it shows booting until told otherwise
+        assert_eq!(SharedState::new(Instant::now()).state, AppyState::Booting);
     }
 
     #[test]
