@@ -88,6 +88,7 @@ def main():
         compact_at=int(os.getenv("COMPACT_AT", "9500")),
         tail_budget=int(os.getenv("TAIL_BUDGET", "2500")),
         summary_max=int(os.getenv("SUMMARY_MAX", "700")),
+        context_limit=int(os.getenv("CONTEXT_TOKENS", "16384")),
     )
 
     def _voice_forwarder():

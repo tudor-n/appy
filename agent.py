@@ -1,7 +1,10 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
 import openai
 
-from compaction import COMPACT_AT, SUMMARY_MAX, TAIL_BUDGET, compact, estimate_tokens
+from compaction import (
+    COMPACT_AT, CONTEXT_TOKENS, SUMMARY_MAX, TAIL_BUDGET, TURN_RESERVE, compact,
+    estimate_tokens, split,
+)
 from session_log import NullLogger
 from streaming import ExpressionTagParser, SpeechChunker
 from tools import TOOL_SCHEMAS, run_tool as default_run_tool
@@ -90,6 +93,7 @@ class Agent:
         compact_at: int = COMPACT_AT,
         tail_budget: int = TAIL_BUDGET,
         summary_max: int = SUMMARY_MAX,
+        context_limit: int = CONTEXT_TOKENS,
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
         UI can show a card for it. Its errors are logged, never fatal to the turn.
@@ -111,9 +115,13 @@ class Agent:
         self.compact_at = compact_at
         self.tail_budget = tail_budget
         self.summary_max = summary_max
+        self.context_limit = context_limit
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
-        # prompt + completion tokens of the last request, as reported by the server
+        # The server's prompt_tokens for the last request, and how many messages that
+        # prompt held (completion_tokens is not used: it includes reasoning tokens that
+        # never enter the history)
         self.last_usage: int | None = None
+        self._usage_messages = 0
 
     def preheat(self):
         """Send a 1-token request so the server caches the system prompt + tool schemas."""
@@ -132,7 +140,7 @@ class Agent:
         """Size of the conversation as the model sees it: the server's own count from the
         last request when it reports one, otherwise an estimate."""
         if self.last_usage is not None:
-            return self.last_usage
+            return self.last_usage + estimate_tokens(self.messages[self._usage_messages:])
         return estimate_tokens(self.messages) + estimate_tokens(self.tools)
 
     def run_turn(self, user_text: str, effort: str = "none", speak_aloud: bool = True):
@@ -160,13 +168,17 @@ class Agent:
 
         Old tool results are already pruned at the end of every turn, so this goes
         straight to summarising."""
-        if self.context_tokens() < self.compact_at:
+        tokens = self.context_tokens()
+        if tokens < self.compact_at:
             return False
+        if split(self.messages, self.tail_budget) is None:
+            return False  # the recent turns alone are over the threshold: nothing to fold
         self.status.announce("compacting")
         print("[compacting]")
         try:
             summary = compact(
-                self.client, self.model, self.messages, self.tail_budget, self.summary_max
+                self.client, self.model, self.messages, self.tail_budget, self.summary_max,
+                drop_on_failure=tokens >= self.context_limit - TURN_RESERVE,
             )
             if summary:
                 self.log.compaction(summary=summary)
@@ -239,6 +251,7 @@ class Agent:
         if not allow_tools:
             request["tool_choice"] = "none"
         self.last_usage = None
+        self._usage_messages = len(self.messages)
         stream = self.client.chat.completions.create(**request)
 
         tags = ExpressionTagParser()
@@ -263,7 +276,7 @@ class Agent:
         for chunk in stream:
             usage = getattr(chunk, "usage", None)
             if usage:
-                self.last_usage = usage.prompt_tokens + usage.completion_tokens
+                self.last_usage = usage.prompt_tokens
             if not chunk.choices:
                 continue  # the usage chunk has no choices
             delta = chunk.choices[0].delta

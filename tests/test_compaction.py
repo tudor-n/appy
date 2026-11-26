@@ -158,7 +158,7 @@ class CompactTests(unittest.TestCase):
         msgs = self.pixel_history()
         before = len(msgs)
         with contextlib.redirect_stdout(io.StringIO()):
-            result = compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000)
+            result = compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000, drop_on_failure=True)
         self.assertIsNone(result)
         self.assertLess(len(msgs), before)
         self.assertEqual(msgs[1]["role"], "user")
@@ -167,15 +167,25 @@ class CompactTests(unittest.TestCase):
     def test_failed_summary_keeps_previous_summary(self):
         msgs = [dict(SYSTEM)] + summary_pair("FACTS: cat is Pixel") + history(10)[1:]
         with contextlib.redirect_stdout(io.StringIO()):
-            compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000)
+            compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000, drop_on_failure=True)
         self.assertEqual(msgs[1]["content"], SUMMARY_PREFIX + "FACTS: cat is Pixel")
         self.assertEqual(msgs[2]["content"], SUMMARY_ACK)
         assert_valid(self, msgs)
 
+    def test_failed_summary_keeps_history_by_default(self):
+        # A blip with headroom left: keep everything and try again next turn
+        msgs = self.pixel_history()
+        before = [dict(m) for m in msgs]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(compact(FakeClient([ConnectionError("down")]), "m", msgs, tail_budget=1000))
+        self.assertEqual(msgs, before)
+
     def test_blank_summary_counts_as_failure(self):
         msgs = self.pixel_history()
         before = len(msgs)
-        self.assertIsNone(compact(FakeClient([completion("   ")]), "m", msgs, tail_budget=1000))
+        self.assertIsNone(
+            compact(FakeClient([completion("   ")]), "m", msgs, tail_budget=1000, drop_on_failure=True)
+        )
         self.assertLess(len(msgs), before)
         self.assertFalse(any(str(m.get("content")).startswith(SUMMARY_PREFIX) for m in msgs))
         assert_valid(self, msgs)

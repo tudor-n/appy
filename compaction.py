@@ -10,6 +10,10 @@ import json
 import math
 
 COMPACT_AT = 9500
+CONTEXT_TOKENS = 16384
+# Room a single turn needs. If a failed summary leaves the session closer than this to
+# the context limit, the older turns are dropped without a summary instead of retried.
+TURN_RESERVE = 3500
 TAIL_BUDGET = 2500
 SUMMARY_MAX = 700
 TOOL_RESULT_CHARS = 200
@@ -102,12 +106,14 @@ def compact(
     messages: list[dict],
     tail_budget: int = TAIL_BUDGET,
     summary_max: int = SUMMARY_MAX,
+    drop_on_failure: bool = False,
 ) -> str | None:
     """Fold older turns into the session summary, rebuilding `messages` in place.
 
-    Returns the new summary, or None if nothing was folded or summarising failed. If it
-    failed, the older turns are dropped anyway (keeping any previous summary), so the
-    conversation still shrinks and stays valid.
+    Returns the new summary, or None if nothing was folded or summarising failed. On
+    failure the history is left as it was so the next turn can retry, unless
+    `drop_on_failure`: then the older turns are dropped anyway (keeping any previous
+    summary), so the conversation still shrinks and stays valid.
     """
     parts = split(messages, tail_budget)
     if parts is None:
@@ -131,5 +137,6 @@ def compact(
     if summary:
         messages[1:] = _summary_pair(summary) + tail
         return summary
-    messages[1:] = (_summary_pair(previous) if previous else []) + tail
+    if drop_on_failure:
+        messages[1:] = (_summary_pair(previous) if previous else []) + tail
     return None

@@ -62,8 +62,8 @@ class SessionLogger:
                 try:
                     os.fsync(self._file.fileno())
                     self._file.close()
-                except OSError as exc:
-                    self._disable(exc)
+                except Exception as exc:
+                    print(f"[log] close failed: {type(exc).__name__}: {exc}")
                 self._file = None
 
     def _write(self, kind: str, **fields) -> None:
@@ -81,6 +81,8 @@ class SessionLogger:
                 self._file.flush()
             except OSError as exc:
                 self._disable(exc)
+            except Exception as exc:  # e.g. text that can't be encoded: skip just this event
+                print(f"[log] skipped {kind} event: {type(exc).__name__}: {exc}")
 
     def _disable(self, exc: OSError) -> None:
         self._disabled = True

@@ -79,6 +79,12 @@ class SessionLoggerTests(unittest.TestCase):
             log.user(text="hi", source="voice")
             log.end(reason="quit")
 
+    def test_unencodable_text_never_raises(self):
+        log = make_logger(self.dir)
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.user(text="half an emoji \ud83d", source="text")
+            log.end(reason="quit")
+
     def test_non_ascii_is_kept_readable(self):
         log = make_logger(self.dir)
         log.user(text="Bună ziua 👋", source="voice")

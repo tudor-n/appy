@@ -241,8 +241,17 @@ class ContextSizeTests(unittest.TestCase):
     def test_usage_chunk_sets_context_tokens(self):
         agent, client, _, _ = make_agent([[text_chunk("Hi."), usage_chunk(9000, 50)]])
         run_quietly(agent, "hi")
-        self.assertEqual(agent.context_tokens(), 9050)
+        # The server's prompt count plus the reply that was appended after it
+        self.assertEqual(
+            agent.context_tokens(), 9000 + estimate_tokens([{"role": "assistant", "content": "Hi."}])
+        )
         self.assertEqual(client.calls[0]["stream_options"], {"include_usage": True})
+
+    def test_reasoning_tokens_do_not_count(self):
+        # At high effort completion_tokens includes thinking that never enters the history
+        agent, _, _, _ = make_agent([[text_chunk("Hi."), usage_chunk(6000, 3600)]], compact_at=9500)
+        run_quietly(agent, "hi")
+        self.assertLess(agent.context_tokens(), 6100)
 
     def test_context_tokens_falls_back_to_estimate(self):
         agent, _, _, _ = make_agent([[text_chunk("Hi.")]])
@@ -314,6 +323,38 @@ class MaybeCompactTests(unittest.TestCase):
         self.assertEqual(log.events[-1], ("compaction", {"summary": "FACTS: x"}))
         self.assertIsNone(agent.last_usage)
         self.assertEqual(agent.messages[1]["content"], compaction.SUMMARY_PREFIX + "FACTS: x")
+
+    def test_failed_summary_keeps_history_under_the_limit(self):
+        agent, _, _, _ = make_agent(
+            [[text_chunk("Okay."), usage_chunk(9600, 10)], ConnectionError("down")],
+            compact_at=9500, context_limit=16384,
+        )
+        prefill(agent, 12)
+        run_quietly(agent, "hi")
+        before = len(agent.messages)
+        with contextlib.redirect_stdout(io.StringIO()):
+            agent.maybe_compact()
+        self.assertEqual(len(agent.messages), before)
+
+    def test_failed_summary_drops_near_the_limit(self):
+        agent, _, _, _ = make_agent(
+            [[text_chunk("Okay."), usage_chunk(14000, 10)], ConnectionError("down")],
+            compact_at=9500, context_limit=16384,
+        )
+        prefill(agent, 12)
+        run_quietly(agent, "hi")
+        before = len(agent.messages)
+        with contextlib.redirect_stdout(io.StringIO()):
+            agent.maybe_compact()
+        self.assertLess(len(agent.messages), before)
+        self.assertEqual(agent.messages[1]["role"], "user")
+
+    def test_nothing_to_fold_means_no_pill(self):
+        agent, client, _, ui = make_agent([[text_chunk("Okay.")]], compact_at=10)
+        run_quietly(agent, "hi")
+        self.assertFalse(agent.maybe_compact())
+        self.assertEqual(len(client.calls), 1)
+        self.assertNotIn("compacting", statuses(ui))
 
     def test_long_conversation_stays_bounded(self):
         def responder(kwargs):
