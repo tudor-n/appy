@@ -1,9 +1,15 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
 import json
+from pathlib import Path
 from collections import deque
 
 import openai
 
+from compaction import (
+    COMPACT_AT, CONTEXT_TOKENS, PRUNED_TOOL_OUTPUT, SUMMARY_MAX, TAIL_BUDGET, TURN_RESERVE,
+    compact, estimate_tokens, split,
+)
+from session_log import NullLogger
 from streaming import ExpressionTagParser, SpeechChunker
 from tools import TOOL_SCHEMAS, run_tool as default_run_tool
 
@@ -23,11 +29,6 @@ ALREADY_SAID_NOTE = (
     '\n\n(You already told the user: "{said}". Continue from there with just the answer. '
     "Don't greet them or repeat that again.)"
 )
-# Once the transcript (excluding the system prompt) grows past HISTORY_MAX_MESSAGES,
-# drop the oldest messages down to about HISTORY_KEEP_MESSAGES. Trimming in one big step
-# instead of a message at a time keeps the server's prompt cache warm between turns.
-HISTORY_MAX_MESSAGES = 60
-HISTORY_KEEP_MESSAGES = 30
 
 
 def prune_old_tool_outputs(messages: list[dict], keep_recent: int = KEEP_RECENT_TOOL_OUTPUTS):
@@ -35,8 +36,8 @@ def prune_old_tool_outputs(messages: list[dict], keep_recent: int = KEEP_RECENT_
     if len(messages) <= keep_recent:
         return
     for msg in messages[:-keep_recent]:
-        if msg.get("role") == "tool" and msg.get("content") != "[pruned]":
-            msg["content"] = "[pruned]"
+        if msg.get("role") == "tool" and msg.get("content") != PRUNED_TOOL_OUTPUT:
+            msg["content"] = PRUNED_TOOL_OUTPUT
 
 
 def drop_stale_tool_exchanges(messages: list[dict], start: int, stale_tools: frozenset[str]):
@@ -73,30 +74,6 @@ def drop_stale_tool_exchanges(messages: list[dict], start: int, stale_tools: fro
     if carry:  # the turn ended without a final answer: keep what was said
         kept.append({"role": "assistant", "content": carry})
     messages[start:] = kept
-
-
-def compact_history(
-    messages: list[dict],
-    max_messages: int = HISTORY_MAX_MESSAGES,
-    keep: int = HISTORY_KEEP_MESSAGES,
-) -> bool:
-    """Drop the oldest messages, keeping the system prompt. Returns True if it trimmed.
-
-    The kept part always starts at a user message so an assistant tool call is never
-    separated from its tool results.
-    """
-    body = messages[1:]
-    if len(body) <= max_messages:
-        return False
-
-    start = max(len(body) - keep, 0)
-    cut = next((i for i in range(start, len(body)) if body[i].get("role") == "user"), None)
-    if cut is None:
-        cut = next((i for i in range(start - 1, -1, -1) if body[i].get("role") == "user"), None)
-    if not cut:
-        return False
-    del messages[1 : 1 + cut]
-    return True
 
 
 def describe_error(exc: Exception) -> str:
@@ -138,6 +115,12 @@ class Agent:
         run_tool=default_run_tool,
         on_tool_result=None,
         stale_tools: frozenset[str] = frozenset(),
+        log=None,
+        compact_at: int = COMPACT_AT,
+        tail_budget: int = TAIL_BUDGET,
+        summary_max: int = SUMMARY_MAX,
+        context_limit: int = CONTEXT_TOKENS,
+        compaction_dump: Path | None = None,
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
         UI can show a card for it. Its errors are logged, never fatal to the turn.
@@ -154,12 +137,25 @@ class Agent:
         self.tools = tools
         self.run_tool = run_tool
         self.on_tool_result = on_tool_result
+        self.log = log or NullLogger()
         self.stale_tools = stale_tools
+        self.compact_at = compact_at
+        self.tail_budget = tail_budget
+        self.summary_max = summary_max
+        self.context_limit = context_limit
+        # If set, compaction N writes its prompt and summary to "<this>.compaction-N.txt"
+        self.compaction_dump = compaction_dump
+        self._compactions = 0
         # Tools called in each of the last few turns, so follow-ups ("and at 5 pm?") can
         # be recognised a couple of messages later
         self._recent_turn_tools: deque[frozenset[str]] = deque(maxlen=RECENT_TURNS)
         self._synthetic_calls = 0
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        # The server's prompt_tokens for the last request, and how many messages that
+        # prompt held (completion_tokens is not used: it includes reasoning tokens that
+        # never enter the history)
+        self.last_usage: int | None = None
+        self._usage_messages = 0
 
     @property
     def recent_tools(self) -> frozenset[str]:
@@ -179,6 +175,13 @@ class Agent:
         except Exception:
             pass
 
+    def context_tokens(self) -> int:
+        """Size of the conversation as the model sees it: the server's own count from the
+        last request when it reports one, otherwise an estimate."""
+        if self.last_usage is not None:
+            return self.last_usage + estimate_tokens(self.messages[self._usage_messages:])
+        return estimate_tokens(self.messages) + estimate_tokens(self.tools)
+
     def run_turn(
         self,
         user_text: str,
@@ -191,9 +194,6 @@ class Agent:
         `force` (a tools.ForcedCall) makes the first round call that tool: the model
         picks the arguments, and if it skips the call anyway the agent makes it itself
         with `force.fallback_args` (see tools.forced_call for why)."""
-        if compact_history(self.messages):
-            print(f"[history compacted to {len(self.messages) - 1} messages]")
-
         checkpoint = len(self.messages)
         self.messages.append({"role": "user", "content": user_text})
         self.status.set_phase("thinking")
@@ -205,7 +205,9 @@ class Agent:
             # (e.g. Gemma's) reject, breaking every later request.
             del self.messages[checkpoint:]
             print(f"\n[llm error] {type(exc).__name__}: {exc}\n")
-            self.ui.response(describe_error(exc), "skeptical")
+            apology = describe_error(exc)
+            self.ui.response(apology, "skeptical")
+            self.log.turn_error(error=f"{type(exc).__name__}: {exc}", reply=apology)
         finally:
             self.status.set_phase("idle")
             self._recent_turn_tools.append(frozenset(
@@ -215,6 +217,40 @@ class Agent:
             ))
             drop_stale_tool_exchanges(self.messages, checkpoint, self.stale_tools)
             prune_old_tool_outputs(self.messages)
+
+    def maybe_compact(self, force: bool = False) -> bool:
+        """Between turns: if the conversation has grown past `compact_at` tokens, fold the
+        older turns into the session summary. Returns True if it compacted.
+
+        `force` (the UI's compact button) compacts regardless of size and folds
+        everything except the latest exchange.
+
+        Old tool results are already pruned at the end of every turn, so this goes
+        straight to summarising."""
+        tokens = self.context_tokens()
+        if tokens < self.compact_at and not force:
+            return False
+        tail_budget = 0 if force else self.tail_budget  # 0: keep just the last turn
+        if split(self.messages, tail_budget) is None:
+            return False  # nothing older than the kept turns to fold
+        self.status.set_phase("compacting")
+        self._compactions += 1
+        dump = None
+        if self.compaction_dump:
+            dump = Path(f"{self.compaction_dump}.compaction-{self._compactions}.txt")
+        print(f"[compacting]{f' -> {dump}' if dump else ''}")
+        try:
+            summary = compact(
+                self.client, self.model, self.messages, tail_budget, self.summary_max,
+                drop_on_failure=tokens >= self.context_limit - TURN_RESERVE,
+                dump_path=dump,
+            )
+            if summary:
+                self.log.compaction(summary=summary)
+            self.last_usage = None  # the server's count is for the old, longer history
+        finally:
+            self.status.set_phase("idle")
+        return True
 
     def _run_rounds(self, effort: str, speak_aloud: bool, force=None):
         for round_no in range(MAX_TOOL_ROUNDS + 1):
@@ -235,6 +271,7 @@ class Agent:
             if tool_calls and allow_tools:
                 if reply:
                     self.ui.response(reply, expression)
+                    self.log.assistant(text=reply, expression=expression)
                 self.status.set_phase("thinking")
                 self.messages.append(
                     {"role": "assistant", "content": reply or None, "tool_calls": tool_calls}
@@ -242,7 +279,10 @@ class Agent:
                 for call in tool_calls:
                     name = call["function"]["name"]
                     print(f"[tool: {name}] ", end="", flush=True)
-                    result = self.run_tool(name, call["function"]["arguments"])
+                    args = call["function"]["arguments"]
+                    self.log.tool_call(call_id=call["id"], name=name, args=args)
+                    result = self.run_tool(name, args)
+                    self.log.tool_result(call_id=call["id"], name=name, result=result)
                     self.messages.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result}
                     )
@@ -258,6 +298,7 @@ class Agent:
             print("\n")
             if reply:
                 self.ui.response(reply, expression)
+                self.log.assistant(text=reply, expression=expression)
                 self.messages.append({"role": "assistant", "content": reply})
             return
 
@@ -313,11 +354,14 @@ class Agent:
             presence_penalty=0.3,
             reasoning_effort=effort,
             stream=True,
+            stream_options={"include_usage": True},
         )
         if not allow_tools:
             request["tool_choice"] = "none"
         elif force_tool:
             request["tool_choice"] = "required"
+        self.last_usage = None
+        self._usage_messages = len(self.messages)
         stream = self.client.chat.completions.create(**request)
 
         tags = ExpressionTagParser()
@@ -346,8 +390,11 @@ class Agent:
                     self.speaker.speak(chunk)
 
         for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage:
+                self.last_usage = usage.prompt_tokens
             if not chunk.choices:
-                continue  # some servers send usage-only chunks
+                continue  # the usage chunk has no choices
             delta = chunk.choices[0].delta
             if delta.tool_calls:
                 _accumulate_tool_calls(tool_calls, delta.tool_calls)

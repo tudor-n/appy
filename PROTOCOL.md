@@ -27,8 +27,10 @@ Python and Rust lists of expressions, efforts or states drift apart.
 **States:** `idle`, `listening`, `booting`, `thinking`, `compacting`, `speaking`.
 On the Python side `StatusTracker` (`status.py`) is the only thing that sends
 `thinking`/`speaking`/`idle`. It combines the turn phase from the agent with whether the
-speaker still has text queued or playing. `booting` is sent with `StatusTracker.announce`. The UI also
-understands `compacting`, but the backend doesn't send it: trimming history is instant.
+speaker still has text queued or playing. `booting` is sent with `StatusTracker.announce`.
+`compacting` is a tracker phase, set while older turns are summarised between turns.
+After a `wake`, the tracker never sends `idle` until the user's turn starts (or the speech is
+discarded as noise), so a late end-of-audio or end-of-compaction can't cancel "listening".
 
 **Expressions:** `neutral`, `happy`, `excited`, `curious`, `surprised`, `focused`,
 `skeptical`. The LLM picks one by starting its reply with a tag like `[happy]`, which
@@ -40,6 +42,7 @@ understands `compacting`, but the backend doesn't send it: trimming history is i
 |--------------|----------|---------|
 | `user_text`  | `text`   | A typed message. Queued like a spoken one. |
 | `set_effort` | `effort` | One of `none`, `low`, `medium`, `high` (passed to the LLM as `reasoning_effort`). |
+| `compact`    | —        | The input pill's circle button: fold everything but the latest exchange into the session summary now. Queued like a turn, so it runs after the current answer; the UI follows the `compacting` status. |
 
 ## Panel pill bridge (HTTP, 127.0.0.1:8002)
 

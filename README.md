@@ -49,3 +49,12 @@ of `main.py`.
 .venv/bin/python -m unittest discover -s tests -t .
 cd appy-ui && cargo test
 ```
+
+## Session logs and compaction
+
+Each run writes a JSONL log of the conversation to `~/.local/share/appy/logs/<session>.jsonl`
+(override with `APPY_LOG_DIR`). When a run's context passes `COMPACT_AT` tokens (default 9500),
+older turns are folded into a summary between turns and the UI shows "compacting…".
+Set `APPY_DUMP_COMPACTION=1` to also write each compaction's exact prompt and the summary that
+came back to `<session>.compaction-N.txt` next to the log; `COMPACT_AT=2500` makes it happen
+sooner when testing.

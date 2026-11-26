@@ -193,6 +193,10 @@ fn connect_input(app: &'static App) {
     });
     app.ui.input.view.add_controller(send_key);
 
+    let compact_click = GestureClick::new();
+    compact_click.connect_released(move |_, _, _, _| app.compact());
+    app.ui.input.compact.add_controller(compact_click);
+
     for (effort, button) in &app.ui.input.effort.options {
         let effort = *effort;
         button.connect_clicked(move |_| app.set_effort(effort));

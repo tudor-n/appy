@@ -1,8 +1,15 @@
-//! The message input pill: a growing multi-line text field plus the effort picker.
+//! The message input pill: a growing multi-line text field, a small "compact now"
+//! circle and the effort picker.
 
+use std::cell::Cell;
+use std::f64::consts::TAU;
+use std::rc::Rc;
+
+use gtk4::cairo::Context;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, EventControllerFocus, Label, Orientation, Overlay, PolicyType,
+    Align, Box as GtkBox, Button, DrawingArea, EventControllerFocus, EventControllerMotion,
+    Label, Orientation, Overlay, PolicyType,
     Revealer, RevealerTransitionType, ScrolledWindow, TextBuffer, TextView, WrapMode,
 };
 
@@ -16,6 +23,7 @@ pub struct ChatInput {
     pub view: TextView,
     pub buffer: TextBuffer,
     pub focus: EventControllerFocus,
+    pub compact: DrawingArea,
     pub effort: EffortPicker,
 }
 
@@ -67,11 +75,17 @@ impl ChatInput {
         let focus = EventControllerFocus::new();
         view.add_controller(focus.clone());
 
+        // "Compact now": a bare ring next to the effort chip, since both are about the
+        // conversation rather than the message. Drawn by hand rather than as a styled
+        // Button, so the theme can't add button chrome around it. Clicks: controls.rs.
+        let compact = ring_button();
+
         let effort = EffortPicker::new();
 
         let row = GtkBox::new(Orientation::Horizontal, 8);
         row.set_hexpand(true);
         row.append(&overlay);
+        row.append(&compact);
         row.append(&effort.chip);
 
         let container = GtkBox::new(Orientation::Vertical, 0);
@@ -86,6 +100,7 @@ impl ChatInput {
             view,
             buffer,
             focus,
+            compact,
             effort,
         }
     }
@@ -181,5 +196,67 @@ pub fn set_class(widget: &impl IsA<gtk4::Widget>, class: &str, on: bool) {
         widget.add_css_class(class);
     } else {
         widget.remove_css_class(class);
+    }
+}
+
+/// Size of the "compact now" ring's box, and its line width.
+const RING_BOX: i32 = 14;
+const RING_LINE: f64 = 1.5;
+
+/// The ring's centre and radius inside a `w` x `h` box, so the stroke stays inside it.
+fn ring_geometry(w: f64, h: f64, line: f64) -> (f64, f64, f64) {
+    (w * 0.5, h * 0.5, (w.min(h) - line) * 0.5 - 0.5)
+}
+
+fn ring_button() -> DrawingArea {
+    let area = DrawingArea::builder()
+        .content_width(RING_BOX)
+        .content_height(RING_BOX)
+        .valign(Align::Center)
+        .build();
+    area.set_tooltip_text(Some("Compact the conversation into a summary"));
+    area.set_cursor_from_name(Some("pointer"));
+
+    let hovered = Rc::new(Cell::new(false));
+    area.set_draw_func({
+        let hovered = hovered.clone();
+        move |_, cr: &Context, w, h| {
+            let (cx, cy, r) = ring_geometry(w as f64, h as f64, RING_LINE);
+            let alpha = if hovered.get() { 0.75 } else { 0.32 };
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+            cr.set_line_width(RING_LINE);
+            cr.arc(cx, cy, r, 0.0, TAU);
+            let _ = cr.stroke();
+        }
+    });
+
+    let motion = EventControllerMotion::new();
+    motion.connect_enter({
+        let (hovered, area) = (hovered.clone(), area.clone());
+        move |_, _, _| {
+            hovered.set(true);
+            area.queue_draw();
+        }
+    });
+    motion.connect_leave({
+        let area = area.clone();
+        move |_| {
+            hovered.set(false);
+            area.queue_draw();
+        }
+    });
+    area.add_controller(motion);
+    area
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_button_draws_inside_its_box() {
+        let (cx, cy, r) = ring_geometry(14.0, 14.0, RING_LINE);
+        assert!(cx - r - RING_LINE / 2.0 >= 0.0 && cx + r + RING_LINE / 2.0 <= 14.0);
+        assert!(cy - r - RING_LINE / 2.0 >= 0.0 && cy + r + RING_LINE / 2.0 <= 14.0);
     }
 }

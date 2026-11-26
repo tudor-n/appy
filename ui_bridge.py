@@ -16,6 +16,7 @@ class UiBridge:
         on_user_text: Optional[Callable[[str], None]] = None,
         on_set_effort: Optional[Callable[[str], None]] = None,
         get_effort: Optional[Callable[[], str]] = None,
+        on_compact: Optional[Callable[[], None]] = None,
     ):
         self.app = FastAPI()
         self.clients: set[WebSocket] = set()
@@ -23,6 +24,7 @@ class UiBridge:
         self.on_user_text = on_user_text
         self.on_set_effort = on_set_effort
         self.get_effort = get_effort
+        self.on_compact = on_compact
 
         @self.app.websocket("/ws")
         async def ws_endpoint(ws: WebSocket):
@@ -46,6 +48,8 @@ class UiBridge:
                         text = str(data.get("text", "")).strip()
                         if text:
                             self.on_user_text(text)
+                    elif kind == "compact" and self.on_compact:
+                        self.on_compact()
                     elif kind == "set_effort" and self.on_set_effort:
                         value = data.get("effort")
                         if value in VALID_EFFORTS:

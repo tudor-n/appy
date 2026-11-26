@@ -20,18 +20,24 @@ class FakeClient:
     Each script entry is either a list of chunks or an Exception to raise.
     """
 
-    def __init__(self, scripts):
+    def __init__(self, scripts=(), responder=None):
+        """`responder(kwargs)`, if given, answers every request instead of the scripts."""
         self.scripts = list(scripts)
+        self.responder = responder
         self.calls: list[dict] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
         self.calls.append({**kwargs, "messages": [dict(m) for m in kwargs["messages"]]})
+        if self.responder:
+            return self.responder(kwargs)
         if not self.scripts:
             raise AssertionError("FakeClient ran out of scripted responses")
         script = self.scripts.pop(0)
         if isinstance(script, Exception):
             raise script
+        if not isinstance(script, list):
+            return script  # a non-streamed response, e.g. completion(...)
         return iter(script)
 
 
@@ -55,3 +61,27 @@ class FakeUi:
 
     def response(self, text: str, expression: str = "neutral"):
         self.events.append(("response", text, expression))
+
+
+class RecordingLogger:
+    """Stands in for SessionLogger; records (method, kwargs) for every call."""
+
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def __getattr__(self, name: str):
+        if name in ("start", "user", "assistant", "tool_call", "tool_result", "compaction", "turn_error",
+                    "end"):
+            return lambda **kwargs: self.events.append((name, kwargs))
+        raise AttributeError(name)
+
+
+def usage_chunk(prompt_tokens: int, completion_tokens: int):
+    """The final usage-only chunk a server sends when stream_options.include_usage is set."""
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    return SimpleNamespace(choices=[], usage=usage)
+
+
+def completion(text: str):
+    """A non-streamed chat completion response."""
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])

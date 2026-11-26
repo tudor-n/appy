@@ -103,6 +103,13 @@ async def websocket_endpoint(ws: WebSocket):
             raw_msg = await ws.receive_text()
             data = json.loads(raw_msg)
 
+            if data.get("type") == "compact":  # the input pill's circle button
+                await ws.send_json({"type": "status", "state": "compacting", "label": "compacting"})
+                await asyncio.sleep(3.0)
+                history = history[-2:]
+                await ws.send_json({"type": "status", "state": "idle", "label": "idle"})
+                continue
+
             if data.get("type") == "user_text":
                 user_text = data.get("text", "").strip()
                 if not user_text:

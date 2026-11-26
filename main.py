@@ -11,6 +11,7 @@ from openai import OpenAI
 import tools
 from agent import Agent
 from hearing import Ear
+from session_log import SessionLogger, default_logs_dir
 from status import StatusTracker
 from voice import Speaker
 from ui_bridge import UiBridge, VALID_EFFORTS
@@ -46,6 +47,7 @@ def main():
         on_user_text=on_user_text,
         on_set_effort=set_effort,
         get_effort=lambda: effort_state["value"],
+        on_compact=lambda: turn_queue.put(("compact", "")),
     )
     ui.start()
     status.announce("booting")
@@ -61,7 +63,11 @@ def main():
     )
     # A wake flips the UI to "listening"; if that speech is then discarded as noise,
     # re-send the real state so the mascot doesn't stay stuck listening.
-    ear = Ear(on_speech_start=ui.wake, on_speech_discarded=lambda: status.publish(force=True))
+    def on_speech_start():
+        status.heard_speech()
+        ui.wake()
+
+    ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=status.speech_discarded)
     ear.start()
 
     def show_tool_card(name: str, result: str):
@@ -69,9 +75,13 @@ def main():
         if name == "get_weather" and (card := tools.weather_card(result)):
             ui.widget(card)
 
+    model = os.getenv("MODEL", "google/gemma-4-26b-a4b")
+    log = SessionLogger(default_logs_dir())
+    log.start(model=model, effort=effort_state["value"])
+
     agent = Agent(
         client,
-        model=os.getenv("MODEL", "google/gemma-4-26b-a4b"),
+        model=model,
         temperature=float(os.getenv("TEMPERATURE", "0.4")),
         system_prompt=load_system_prompt(),
         speaker=speaker,
@@ -79,6 +89,13 @@ def main():
         status=status,
         on_tool_result=show_tool_card,
         stale_tools=tools.STALE_TOOLS,
+        log=log,
+        compact_at=int(os.getenv("COMPACT_AT", "9500")),
+        tail_budget=int(os.getenv("TAIL_BUDGET", "2500")),
+        summary_max=int(os.getenv("SUMMARY_MAX", "700")),
+        context_limit=int(os.getenv("CONTEXT_TOKENS", "16384")),
+        # APPY_DUMP_COMPACTION=1: write each compaction's prompt + summary next to the log
+        compaction_dump=log.path.with_suffix("") if os.getenv("APPY_DUMP_COMPACTION") else None,
     )
 
     def _voice_forwarder():
@@ -98,9 +115,13 @@ def main():
     status.publish(force=True)  # clears "booting"
     print("Appy ready (voice + UI). Say 'quit' or press Ctrl+C to exit.\n")
 
+    reason = "quit"
     try:
         while True:
             source, user_input = turn_queue.get()
+            if source == "compact":  # the UI's compact button; runs between turns
+                agent.maybe_compact(force=True)
+                continue
             if source == "quit" or user_input.lower().strip(".!?") in QUIT_WORDS:
                 print("\nExiting...")
                 break
@@ -113,6 +134,7 @@ def main():
                 print(f"You (UI): {user_input}")
 
             now = datetime.now().strftime("%I:%M %p")
+            log.user(text=user_input, source=source)
             ear.pause()  # don't let Appy hear itself
             status.begin_turn(queued=source == "text")
             try:
@@ -124,9 +146,16 @@ def main():
                 speaker.wait()
             finally:
                 ear.resume()
+            # Between turns, once Appy has finished speaking; anything said meanwhile is
+            # queued in turn_queue, not lost
+            agent.maybe_compact()
     except KeyboardInterrupt:
         print("\nExiting...")
+    except Exception:
+        reason = "error"
+        raise
     finally:
+        log.end(reason=reason)
         ear.stop()
         speaker.close()
 
