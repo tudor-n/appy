@@ -70,7 +70,8 @@ class RecordingLogger:
         self.events: list[tuple[str, dict]] = []
 
     def __getattr__(self, name: str):
-        if name in ("start", "user", "assistant", "tool_call", "tool_result", "compaction", "end"):
+        if name in ("start", "user", "assistant", "tool_call", "tool_result", "compaction", "turn_error",
+                    "end"):
             return lambda **kwargs: self.events.append((name, kwargs))
         raise AttributeError(name)
 

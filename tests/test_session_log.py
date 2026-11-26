@@ -53,6 +53,14 @@ class SessionLoggerTests(unittest.TestCase):
         self.assertEqual(lines[1]["text"], "hi")
         self.assertEqual(lines[1]["source"], "voice")
 
+    def test_turn_error_event(self):
+        log = make_logger(self.dir)
+        log.turn_error(error="ConnectionError: down", reply="Sorry, I couldn't reach my model.")
+        (line,) = read_lines(log)
+        self.assertEqual(line["type"], "turn_error")
+        self.assertEqual(line["error"], "ConnectionError: down")
+        self.assertEqual(line["reply"], "Sorry, I couldn't reach my model.")
+
     def test_file_is_valid_without_end(self):
         log = make_logger(self.dir)
         log.start(model="m", effort="none")

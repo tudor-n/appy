@@ -69,7 +69,7 @@ It owns every read and write of the vault, and only plain code mutates files. En
 Writes are serialised in-process: one lock, one writer. `MEMORY_URL` in the laptop's `.env` points at it. A shared token in `.env` is enough auth for v1.
 
 ### A. Session logs (laptop side, `appy_memory/session_log.py`)
-- Written locally to `~/.local/share/appy/logs/<session_id>.jsonl`, append-only, one JSON line per event, flushed after every write. Events: `session_start{model,effort}`, `user{text,source}` (raw text, without the `[HH:MM]` prefix that `main.py` adds), `assistant{text,expression}`, `tool_call`, `tool_result` (≤4 KB), `compaction{summary}`, `session_end{reason}`.
+- Written locally to `~/.local/share/appy/logs/<session_id>.jsonl`, append-only, one JSON line per event, flushed after every write. Events: `session_start{model,effort}`, `user{text,source}` (raw text, without the `[HH:MM]` prefix that `main.py` adds), `assistant{text,expression}`, `tool_call`, `tool_result` (≤4 KB), `compaction{summary}`, `turn_error{error, reply}` (the turn failed and was rolled back from the history; `reply` is the apology shown), `session_end{reason}`.
 - Hooks: `main()` (start, and end in `finally`) and `Agent` (user, assistant, tools).
 - When you quit, `main()` uploads the log to `POST /logs/…` in a short blocking call (a few seconds' timeout) and deletes the local copy on success. At startup it uploads any logs left behind, which covers crashes and an unreachable Mac. A log without `session_end` counts as a crashed session and is still consolidated.
 

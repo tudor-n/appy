@@ -62,7 +62,11 @@ def main():
     )
     # A wake flips the UI to "listening"; if that speech is then discarded as noise,
     # re-send the real state so the mascot doesn't stay stuck listening.
-    ear = Ear(on_speech_start=ui.wake, on_speech_discarded=lambda: status.publish(force=True))
+    def on_speech_start():
+        status.heard_speech()
+        ui.wake()
+
+    ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=status.speech_discarded)
     ear.start()
 
     def show_tool_card(name: str, result: str):

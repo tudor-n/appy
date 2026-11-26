@@ -70,6 +70,53 @@ class StatusTrackerTests(unittest.TestCase):
         self.tracker.set_phase("idle")
         self.assertEqual(self.sent, ["thinking", "idle"])
 
+    def test_late_speaking_end_does_not_hide_compacting(self):
+        # The last sentence's audio can report "done" after compaction has started
+        t = self.tracker
+        t.set_phase("replying")
+        t.set_speaking(True)
+        t.set_phase("idle")
+        t.set_phase("compacting")
+        t.set_speaking(False)
+        self.assertEqual(self.sent, ["speaking", "compacting"])
+        t.set_phase("idle")
+        self.assertEqual(self.sent, ["speaking", "compacting", "idle"])
+
+    def test_typed_message_during_compaction_keeps_the_pill(self):
+        t = self.tracker
+        t.set_phase("compacting")
+        t.queue_turn()
+        self.assertEqual(self.sent, ["compacting"])
+        t.set_phase("idle")  # compaction done: the queued message is next
+        self.assertEqual(self.sent, ["compacting", "thinking"])
+
+    def test_end_of_compaction_does_not_cancel_listening(self):
+        # The user starts talking while compaction runs: the UI shows "listening"
+        # (from the wake event) and must not be knocked back to idle
+        t = self.tracker
+        t.set_phase("compacting")
+        t.heard_speech()
+        t.set_phase("idle")
+        self.assertEqual(self.sent, ["compacting"])
+        t.begin_turn(queued=False)
+        self.assertEqual(self.sent, ["compacting", "thinking"])
+
+    def test_late_speaking_end_does_not_cancel_listening(self):
+        t = self.tracker
+        t.set_speaking(True)
+        t.heard_speech()
+        t.set_speaking(False)
+        self.assertEqual(self.sent, ["speaking"])
+
+    def test_discarded_speech_resends_the_real_state(self):
+        t = self.tracker
+        t.heard_speech()
+        t.speech_discarded()
+        self.assertEqual(self.sent, ["idle"])
+        t.set_phase("thinking")
+        t.set_phase("idle")
+        self.assertEqual(self.sent, ["idle", "thinking", "idle"])
+
     def test_announce_is_followed_by_derived_state(self):
         self.tracker.announce("booting")
         self.tracker.publish()  # still idle, but must be re-sent to clear "booting"

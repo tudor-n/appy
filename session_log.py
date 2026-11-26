@@ -55,6 +55,11 @@ class SessionLogger:
     def compaction(self, summary: str) -> None:
         self._write("compaction", summary=summary)
 
+    def turn_error(self, error: str, reply: str) -> None:
+        """The turn failed and was rolled back from the history; `reply` is the
+        apology the user saw instead of an answer."""
+        self._write("turn_error", error=error, reply=reply)
+
     def end(self, reason: str) -> None:
         self._write("session_end", reason=reason)
         with self._lock:
@@ -98,4 +103,5 @@ class NullLogger:
     def tool_call(self, call_id: str, name: str, args: str) -> None: ...
     def tool_result(self, call_id: str, name: str, result: str) -> None: ...
     def compaction(self, summary: str) -> None: ...
+    def turn_error(self, error: str, reply: str) -> None: ...
     def end(self, reason: str) -> None: ...

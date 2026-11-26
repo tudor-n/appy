@@ -358,11 +358,23 @@ class AgentLoggingTests(unittest.TestCase):
         self.assertEqual(log.events[2][1]["result"], '{"temp_c":3}')  # raw, no ALREADY_SAID_NOTE
         self.assertEqual(log.events[3][1]["text"], "It's 3 degrees.")
 
-    def test_failed_turn_logs_nothing_from_agent(self):
+    def test_failed_turn_is_logged(self):
         log = RecordingLogger()
         agent, _, _, _ = make_agent([ConnectionError("down")], log=log)
         run_quietly(agent, "hi")
-        self.assertEqual(log.events, [])
+        self.assertEqual(log.events, [("turn_error", {
+            "error": "ConnectionError: down",
+            "reply": agent_mod.describe_error(ConnectionError("down")),
+        })])
+
+    def test_turn_failing_after_a_tool_marks_the_rollback(self):
+        log = RecordingLogger()
+        agent, _, _, _ = make_agent([
+            [tool_chunk(0, "c1", "get_weather", "{}")],
+            TimeoutError("slow"),
+        ], log=log)
+        run_quietly(agent, "weather?")
+        self.assertEqual([e[0] for e in log.events], ["tool_call", "tool_result", "turn_error"])
 
 
 def statuses(ui) -> list[str]:

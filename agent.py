@@ -200,7 +200,9 @@ class Agent:
             # (e.g. Gemma's) reject, breaking every later request.
             del self.messages[checkpoint:]
             print(f"\n[llm error] {type(exc).__name__}: {exc}\n")
-            self.ui.response(describe_error(exc), "skeptical")
+            apology = describe_error(exc)
+            self.ui.response(apology, "skeptical")
+            self.log.turn_error(error=f"{type(exc).__name__}: {exc}", reply=apology)
         finally:
             self.status.set_phase("idle")
             self._recent_turn_tools.append(frozenset(
@@ -222,7 +224,7 @@ class Agent:
             return False
         if split(self.messages, self.tail_budget) is None:
             return False  # the recent turns alone are over the threshold: nothing to fold
-        self.status.announce("compacting")
+        self.status.set_phase("compacting")
         print("[compacting]")
         try:
             summary = compact(
@@ -233,7 +235,7 @@ class Agent:
                 self.log.compaction(summary=summary)
             self.last_usage = None  # the server's count is for the old, longer history
         finally:
-            self.status.publish(force=True)
+            self.status.set_phase("idle")
         return True
 
     def _run_rounds(self, effort: str, speak_aloud: bool, force=None):
