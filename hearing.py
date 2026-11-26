@@ -99,6 +99,9 @@ class Ear:
         self.asr = WhisperModel(model_size, device=device, compute_type=compute)
 
         self.queue = queue.Queue()
+        # Bumped at each speech start, so a slow transcription of an earlier utterance
+        # can tell that the user has started talking again
+        self._utterance = 0
         self.running = False
         self.paused = False
         self._proc = None
@@ -211,6 +214,7 @@ class Ear:
                             silence_chunks = 0
                             checked_pause = False
                             buffer = list(ring_buffer)
+                            self._utterance += 1
                             if self.on_speech_start:
                                 self.on_speech_start()
                     else:
@@ -249,19 +253,25 @@ class Ear:
                             buffer = []
                             threading.Thread(
                                 target=self._transcribe,
-                                args=(full_audio,),
+                                args=(full_audio, self._utterance),
                                 daemon=True,
                             ).start()
         finally:
             self._proc.terminate()
 
-    def _transcribe(self, audio_array: np.ndarray):
-        text = self._recognize(audio_array)
-        if text is None:
-            if self.on_speech_discarded:
-                self.on_speech_discarded()
+    def _transcribe(self, audio_array: np.ndarray, utterance: int):
+        try:
+            text = self._recognize(audio_array)
+        except Exception as e:
+            print(f"[hearing] transcription failed: {e}", flush=True)
+            text = None
+        if text is not None:
+            self.queue.put(text)
             return
-        self.queue.put(text)
+        # Only reset the UI if nobody has started speaking since this utterance;
+        # otherwise we'd knock a live "listening" state back to idle.
+        if utterance == self._utterance and self.on_speech_discarded:
+            self.on_speech_discarded()
 
     def _recognize(self, audio_array: np.ndarray) -> str | None:
         if np.abs(audio_array).mean() < 0.004:

@@ -2,7 +2,7 @@ import json
 import unittest
 
 import tools
-from status import StatusTracker
+from status import ActivityCounter, StatusTracker
 
 
 class StatusTrackerTests(unittest.TestCase):
@@ -46,6 +46,25 @@ class StatusTrackerTests(unittest.TestCase):
     def test_rejects_unknown_phase(self):
         with self.assertRaises(ValueError):
             self.tracker.set_phase("dancing")
+
+
+    def test_announce_is_followed_by_derived_state(self):
+        self.tracker.announce("booting")
+        self.tracker.publish()  # still idle, but must be re-sent to clear "booting"
+        self.assertEqual(self.sent, ["booting", "idle"])
+
+
+class ActivityCounterTests(unittest.TestCase):
+    def test_start_and_end_fire_once_per_burst(self):
+        events = []
+        c = ActivityCounter(lambda: events.append("start"), lambda: events.append("end"))
+        c.add(); c.add(); c.done()
+        self.assertTrue(c.active)
+        c.done()
+        c.done()  # extra done() is ignored
+        c.add(); c.done()
+        self.assertEqual(events, ["start", "end", "start", "end"])
+        self.assertFalse(c.active)
 
 
 class RunToolTests(unittest.TestCase):

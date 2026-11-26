@@ -38,9 +38,12 @@ class FakeClient:
 class FakeSpeaker:
     def __init__(self):
         self.spoken: list[str] = []
+        self.on_speak = None
 
     def speak(self, text: str):
         self.spoken.append(text)
+        if self.on_speak:
+            self.on_speak()
 
 
 class FakeUi:

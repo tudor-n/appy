@@ -42,8 +42,8 @@ def main():
         get_effort=lambda: effort_state["value"],
     )
     ui.start()
-    ui.status("booting", "loading")
     status = StatusTracker(ui.status)
+    status.announce("booting")
 
     client = OpenAI(
         base_url=os.getenv("BASE_URL") or "http://127.0.0.1:1234/v1",

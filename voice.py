@@ -6,15 +6,17 @@ import onnxruntime as ort
 import sounddevice as sd
 from kokoro_onnx import Kokoro
 
+from status import ActivityCounter
+
 
 class Speaker:
     def __init__(self, on_speak_start=None, on_speak_end=None):
+        """on_speak_start fires when text is queued with nothing else pending;
+        on_speak_end fires once everything queued has played (or failed to synthesise)."""
         ort.set_default_logger_severity(3)
         ort.preload_dlls()
 
-        self.on_speak_start = on_speak_start
-        self.on_speak_end = on_speak_end
-        self._is_playing = False
+        self._activity = ActivityCounter(on_speak_start, on_speak_end)
 
         model = os.getenv("KOKORO_MODEL", "kokoro-v1.0.onnx")
         voices = os.getenv("KOKORO_VOICES", "voices-v1.0.bin")
@@ -48,6 +50,7 @@ class Speaker:
                 self.audio_queue.put(samples.astype(np.float32))
             except Exception as e:
                 print(f"TTS synth error: {e}")
+                self._activity.done()  # nothing will play for this sentence
             finally:
                 self.speech_queue.task_done()
 
@@ -59,22 +62,16 @@ class Speaker:
                     self.audio_queue.task_done()
                     break
 
-                if not self._is_playing:
-                    self._is_playing = True
-                    if self.on_speak_start:
-                        self.on_speak_start()
-
-                stream.write(samples)
-                self.audio_queue.task_done()
-
-                if self.audio_queue.empty() and self.speech_queue.unfinished_tasks == 0:
-                    self._is_playing = False
-                    if self.on_speak_end:
-                        self.on_speak_end()
+                try:
+                    stream.write(samples)
+                finally:
+                    self.audio_queue.task_done()
+                    self._activity.done()
 
     def speak(self, text: str):
         clean = text.strip()
         if clean:
+            self._activity.add()
             self.speech_queue.put(clean)
 
     def wait(self):

@@ -1,4 +1,6 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
+import openai
+
 from streaming import ExpressionTagParser, SpeechChunker
 from tools import TOOL_SCHEMAS, run_tool as default_run_tool
 
@@ -6,6 +8,7 @@ KEEP_RECENT_TOOL_OUTPUTS = 6
 # A model that keeps calling tools would otherwise loop forever. After this many tool
 # rounds the next request disables tools so the model has to answer.
 MAX_TOOL_ROUNDS = 4
+TOOL_LOOP_FALLBACK = "I got stuck going back and forth with my tools. Could you rephrase that?"
 # Once the transcript (excluding the system prompt) grows past HISTORY_MAX_MESSAGES,
 # drop the oldest messages down to about HISTORY_KEEP_MESSAGES. Trimming in one big step
 # instead of a message at a time keeps the server's prompt cache warm between turns.
@@ -44,6 +47,16 @@ def compact_history(
         return False
     del messages[1 : 1 + cut]
     return True
+
+
+def describe_error(exc: Exception) -> str:
+    """A short, user-facing explanation for a failed turn."""
+    name = type(exc).__name__
+    if isinstance(exc, (openai.APIConnectionError, ConnectionError, TimeoutError)):
+        return f"Sorry, I couldn't reach my model ({name}). Try again in a moment."
+    if isinstance(exc, openai.APIStatusError):
+        return f"Sorry, my model returned an error ({exc.status_code}). Try again in a moment."
+    return f"Sorry, something went wrong on my end ({name})."
 
 
 def _accumulate_tool_calls(acc: dict[int, dict], deltas) -> None:
@@ -100,7 +113,6 @@ class Agent:
     def run_turn(self, user_text: str, effort: str = "none", speak_aloud: bool = True):
         """Run one user turn to completion. Never raises on LLM/network errors."""
         if compact_history(self.messages):
-            self.ui.status("compacting")
             print(f"[history compacted to {len(self.messages) - 1} messages]")
 
         checkpoint = len(self.messages)
@@ -109,14 +121,12 @@ class Agent:
         try:
             self._run_rounds(effort, speak_aloud)
         except Exception as exc:
-            # Roll back so a half-finished exchange (e.g. tool calls with no final
-            # answer) doesn't poison the history for the next turn.
+            # Roll the whole turn back. Keeping the unanswered user message would put two
+            # user messages in a row on the next turn, which strict chat templates
+            # (e.g. Gemma's) reject, breaking every later request.
             del self.messages[checkpoint:]
             print(f"\n[llm error] {type(exc).__name__}: {exc}\n")
-            self.ui.response(
-                f"Sorry, I couldn't reach my model ({type(exc).__name__}). Try again in a moment.",
-                "skeptical",
-            )
+            self.ui.response(describe_error(exc), "skeptical")
         finally:
             self.status.set_phase("idle")
             prune_old_tool_outputs(self.messages)
@@ -144,6 +154,8 @@ class Agent:
 
             if tool_calls:
                 print("[tool limit reached, ignoring further calls] ", end="")
+                if not reply:
+                    reply, expression = TOOL_LOOP_FALLBACK, "skeptical"
             print("\n")
             if reply:
                 self.ui.response(reply, expression)

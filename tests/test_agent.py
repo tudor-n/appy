@@ -4,7 +4,7 @@ import unittest
 
 import agent as agent_mod
 from agent import Agent, compact_history, prune_old_tool_outputs
-from status import StatusTracker
+from status import ActivityCounter, StatusTracker
 from tests.fakes import FakeClient, FakeSpeaker, FakeUi, text_chunk, tool_chunk
 
 
@@ -142,7 +142,41 @@ class AgentTurnTests(unittest.TestCase):
         self.assertEqual(sent[1]["role"], "user")
         self.assertLessEqual(len(sent) - 1, agent_mod.HISTORY_KEEP_MESSAGES + 1)
         self.assertEqual(sent[-1]["content"], "latest")
-        self.assertEqual(ui.events[0], ("status", "compacting"))
+        self.assertEqual(ui.events[0], ("status", "thinking"))  # no "compacted for 0s" pill
+
+
+    def test_no_idle_while_last_sentence_is_still_queued(self):
+        # Regression: the last sentence is only queued when the stream ends, so the
+        # turn finishes before its audio starts. That must not flash "idle".
+        agent, _, speaker, ui = make_agent([[text_chunk("Sure, it's 14 degrees in Sibiu.")]])
+        activity = ActivityCounter(
+            lambda: agent.status.set_speaking(True), lambda: agent.status.set_speaking(False)
+        )
+        speaker.on_speak = activity.add
+        run_quietly(agent, "temp?")
+
+        statuses = lambda: [e[1] for e in ui.events if e[0] == "status"]
+        self.assertEqual(statuses(), ["thinking", "speaking"])
+        activity.done()  # audio finished
+        self.assertEqual(statuses(), ["thinking", "speaking", "idle"])
+
+    def test_capped_round_with_only_tool_calls_still_answers(self):
+        looping = [[tool_chunk(0, f"c{i}", "get_weather", "{}")] for i in range(agent_mod.MAX_TOOL_ROUNDS + 1)]
+        agent, _, _, ui = make_agent(looping)
+        run_quietly(agent, "weather?")
+        self.assertIn(("response", agent_mod.TOOL_LOOP_FALLBACK, "skeptical"), ui.events)
+        self.assertEqual(agent.messages[-1]["content"], agent_mod.TOOL_LOOP_FALLBACK)
+
+    def test_error_messages(self):
+        import httpx
+        import openai
+
+        req = httpx.Request("POST", "http://x")
+        conn = openai.APIConnectionError(request=req)
+        status = openai.APIStatusError("bad", response=httpx.Response(500, request=req), body=None)
+        self.assertIn("couldn't reach", agent_mod.describe_error(conn))
+        self.assertIn("500", agent_mod.describe_error(status))
+        self.assertIn("ValueError", agent_mod.describe_error(ValueError("x")))
 
 
 class CompactHistoryTests(unittest.TestCase):

@@ -9,7 +9,7 @@ from ui_bridge import VALID_EFFORTS
 PROTOCOL_RS = Path(__file__).resolve().parent.parent / "appy-ui" / "src" / "protocol.rs"
 
 # Every state the Python backend can put in a "status" message
-PYTHON_STATES = {"idle", "thinking", "speaking", "booting", "compacting"}
+PYTHON_STATES = {"idle", "thinking", "speaking", "booting"}
 
 
 def snake(name: str) -> str:
