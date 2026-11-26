@@ -293,13 +293,17 @@ _TIME_FOLLOW_UP = re.compile(
 
 
 # A clear request to forget something. Gemma answers these with "I've wiped that" and no
-# tool call (live check: 0/9 runs; forced: 9/9), so they force memory_forget. Leaves out
-# "don't forget to...", "forget it", "forget about it" and a bare "forget that" (all mean
-# something else). The fallback args are a guess the service will usually not match; its
-# reply lists the note's lines, so the model can retry with the right text.
+# tool call (live check: 0/9 runs; forced: 9/9), so they force memory_forget. A forced
+# turn has to delete *something*, so this only matches a request addressed to Appy at the
+# start of the message ("forget that ...", "Appy, can you forget my ..."), never a
+# sentence that merely mentions forgetting ("I always forget my keys", "I don't remember
+# the name"), and not "forget it" / "forget about it" / a bare "forget that". The fallback
+# args are only used if the model still skips the call.
 _FORGET = re.compile(
-    r"(?<!don't )(?<!dont )(?<!do not )\b(?:forget|stop remembering|"
-    r"(?:don'?t|do not|no longer) remember)\s+(?:that\s+|about\s+)?"
+    r"^\s*(?:(?:ok(?:ay)?|so|and|also|hey|well)[,.]?\s+)*(?:appy[,.:]?\s+)?"
+    r"(?:please\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?|"
+    r"i\s+(?:want|need)\s+you\s+to\s+)?"
+    r"(?:forget|stop\s+remembering)\s+(?:that\s+|about\s+)?"
     r"(?P<what>(?!(?:about\s+)?(?:it|this|that)\b)\w.*)",
     re.IGNORECASE,
 )
@@ -347,7 +351,7 @@ def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | No
     call itself. `recent_tools` is Agent.recent_tools (the last few turns), so a
     "thanks!" in between doesn't break the follow-up.
     """
-    if _memory is not None and (forget := _FORGET.search(user_text)):
+    if _memory is not None and (forget := _FORGET.match(user_text.replace("\u2019", "'"))):
         what = _FORGET_TRAILER.sub("", forget.group("what")).strip()
         return ForcedCall("memory_forget", {"slug": "core", "text": what})
     weather = bool(_WEATHER_WORDS.search(user_text)) or (

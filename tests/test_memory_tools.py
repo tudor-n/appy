@@ -82,8 +82,10 @@ class ForcedForgetTests(unittest.TestCase):
         cases = {
             "forget that I live in Sibiu": "I live in Sibiu",
             "Please forget my PSU is a Riden.": "my PSU is a Riden",
-            "don't remember that I live in Sibiu anymore": "I live in Sibiu",
             "stop remembering my address": "my address",
+            "Appy, forget that I live in Sibiu": "I live in Sibiu",
+            "okay, can you forget my old address please": "my old address",
+            "I want you to forget my phone number": "my phone number",
             "forget about my old printer": "my old printer",
             "forget that I hate rain": "I hate rain",  # beats the weather word
         }
@@ -95,7 +97,14 @@ class ForcedForgetTests(unittest.TestCase):
     def test_other_uses_of_forget_are_left_alone(self):
         for text in ("don't forget to buy milk", "Don't forget that I'm out tomorrow",
                      "forget it", "never mind, forget about it", "forget that, tell me a joke",
-                     "forget that", "I forgot my keys", "I keep forgetting things"):
+                     "forget that", "I forgot my keys", "I keep forgetting things",
+                     # review: everyday sentences that only mention forgetting
+                     "I don't remember the name of that film", "I always forget my keys",
+                     "I tend to forget names", "Did I forget anything?",
+                     "never forget the dentist on friday", "Let's not forget the meeting",
+                     "you can't forget the milk", "I'll never forget that trip to Rome",
+                     "I no longer remember my wifi password", "Don’t forget to buy milk",
+                     "don't  forget the milk", "I do not remember that at all"):
             with self.subTest(text=text):
                 self.assertIsNone(tools.forced_call(text, frozenset()))
 
