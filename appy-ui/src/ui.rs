@@ -14,6 +14,7 @@ use gtk4::{
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::chat::ChatLog;
+use crate::memory::MemoryTray;
 use crate::input::{ChatInput, set_class};
 use crate::layout::{HSide, Rect, Shell};
 use crate::mascot;
@@ -36,6 +37,8 @@ pub struct Ui {
     pub mascot: DrawingArea,
     pub chat_panel: GtkBox,
     pub chat: ChatLog,
+    /// What the consolidator learned, waiting for review (above the input).
+    pub memory: MemoryTray,
     pub input: ChatInput,
     pub card: WeatherCard,
     shell_pos: Rc<Cell<(i32, i32)>>,
@@ -71,7 +74,9 @@ impl Ui {
         // Wobble transforms are applied to this box (see tick.rs)
         let chat_wobble_box = GtkBox::new(Orientation::Vertical, 8);
         chat_wobble_box.add_css_class("chat-wobble");
+        let memory = MemoryTray::new();
         chat_wobble_box.append(&chat.scrolled);
+        chat_wobble_box.append(&memory.root);
         chat_wobble_box.append(&input.container);
 
         let chat_panel = GtkBox::new(Orientation::Vertical, 0);
@@ -131,6 +136,7 @@ impl Ui {
             mascot,
             chat_panel,
             chat,
+            memory,
             input,
             card,
             shell_pos,

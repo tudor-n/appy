@@ -48,6 +48,14 @@ impl App {
             ws_tx,
         }));
 
+        let tx = app.ws_tx.clone();
+        app.ui.memory.set_on_decide(move |slug, decision, text| {
+            let _ = tx.send(ClientEvent::MemoryDecision {
+                slug,
+                decision,
+                text,
+            });
+        });
         app.connect_draw();
         controls::connect(app);
         tick::start(app);
@@ -169,6 +177,11 @@ impl App {
         s.state = AppyState::Thinking;
         self.sync_pill(&s);
         self.ui.mascot.queue_draw();
+    }
+
+    /// A handle for sending to the backend from widget callbacks.
+    pub fn sender(&self) -> UnboundedSender<ClientEvent> {
+        self.ws_tx.clone()
     }
 
     /// Ask the backend to compact the conversation now. The UI follows the backend's

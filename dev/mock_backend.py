@@ -2,11 +2,13 @@
 
 Serves the same WebSocket on :8001 as main.py. Replies come from APPY_LLM_URL (any
 OpenAI-compatible chat endpoint) if set, otherwise from canned keyword responses.
-Run: .venv/bin/python dev/mock_backend.py
+Run: .venv/bin/python dev/mock_backend.py [--memory]
+`--memory` also sends two sample memory proposals and answers the review card's buttons.
 """
 import asyncio
 import json
 import os
+import sys
 import urllib.request
 from typing import List, Dict
 
@@ -93,17 +95,58 @@ def fallback_reply(user_text: str) -> Dict[str, str]:
     return {"text": f"Got it: \"{user_text}\". Backend is live and listening.", "expression": "neutral"}
 
 
+MEMORY_DEMO = "--memory" in sys.argv
+SAMPLE_PROPOSALS = [
+    {"slug": "mark-i-suit", "title": "Mark I suit", "summary": "Added the helmet HUD hardware.",
+     "before": "# Mark I suit\n> Iron Man style arm exoskeleton\n- BLDC motors with 50:1 harmonic drives.\n"
+               "- An STM32 runs the joint loops at 1 kHz.\n",
+     "after": "# Mark I suit\n> Iron Man style arm exoskeleton\n- BLDC motors with 50:1 harmonic drives.\n"
+              "- An STM32 runs the joint loops at 1 kHz.\n- The helmet HUD runs on a Raspberry Pi Zero 2 W.\n"},
+    {"slug": "bench", "title": "Bench", "summary": "Replaced the Riden PSU with a Korad.",
+     "before": "# Bench\n> Lab bench gear\n- The PSU is a Riden RD6024.\n- The scope is a Rigol DS1054Z.\n",
+     "after": "# Bench\n> Lab bench gear\n- The PSU is a Korad KA3005P.\n- The scope is a Rigol DS1054Z.\n"},
+]
+
+
+async def memory_demo(ws: WebSocket, data: dict, items: list) -> None:
+    """Answer the review card like the real backend would (without a memory service)."""
+    if data.get("type") == "memory_undo":
+        await ws.send_json({"type": "memory_committed", "kind": "undo", "summary": "memory: the last change"})
+        return
+    slug, decision = data.get("slug"), data.get("decision")
+    item = next((i for i in items if i["slug"] == slug), None)
+    if not item:
+        return
+    if decision == "edit" and not str(data.get("text", "")).startswith("# "):
+        item["error"] = "edit rejected: lost the title line"
+    else:
+        items.remove(item)
+        if decision in ("accept", "edit"):
+            kind = "approved" if decision == "accept" else "edited"
+            await ws.send_json({"type": "memory_committed", "kind": kind, "summary": item["summary"]})
+    await ws.send_json({"type": "memory_proposals", "items": items})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     # The overlay starts out showing "booting"; tell it the (instant) mock is ready
     await ws.send_json({"type": "status", "state": "idle", "label": "idle"})
     history: List[Dict[str, str]] = []
+    proposals = [dict(p) for p in SAMPLE_PROPOSALS] if MEMORY_DEMO else []
+    if MEMORY_DEMO:
+        await ws.send_json({"type": "memory_proposals", "items": proposals})
+        await ws.send_json({"type": "memory_committed", "kind": "remember",
+                            "summary": "- Tudor's bench PSU is a Riden RD6024."})
 
     try:
         while True:
             raw_msg = await ws.receive_text()
             data = json.loads(raw_msg)
+
+            if MEMORY_DEMO and data.get("type") in ("memory_decision", "memory_undo"):
+                await memory_demo(ws, data, proposals)
+                continue
 
             if data.get("type") == "compact":  # the input pill's circle button
                 await ws.send_json({"type": "status", "state": "compacting", "label": "compacting"})

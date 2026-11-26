@@ -3,7 +3,7 @@
 use std::cell::Cell;
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Label, Orientation, PolicyType, ScrolledWindow, glib};
+use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, PolicyType, ScrolledWindow, glib};
 
 /// Oldest entries are dropped beyond this many, to bound memory and layout cost.
 const MAX_ENTRIES: usize = 500;
@@ -90,6 +90,31 @@ impl ChatLog {
         pill.append(&label);
         self.push(&pill);
         label
+    }
+
+    /// A memory commit ("Remembered: ...") with an optional Undo button.
+    pub fn push_chip(&self, text: &str, undo: Option<Box<dyn Fn()>>) {
+        let chip = GtkBox::new(Orientation::Horizontal, 6);
+        chip.add_css_class("status-pill");
+        chip.add_css_class("memory-chip");
+        chip.set_halign(Align::Start);
+
+        let label = Label::builder()
+            .label(text)
+            .xalign(0.0)
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(32)
+            .tooltip_text(text)
+            .build();
+        label.add_css_class("status-pill-text");
+        chip.append(&label);
+        if let Some(undo) = undo {
+            let button = Button::with_label("Undo");
+            button.add_css_class("memory-undo");
+            button.connect_clicked(move |_| undo());
+            chip.append(&button);
+        }
+        self.push(&chip);
     }
 
     fn push(&self, entry: &GtkBox) {

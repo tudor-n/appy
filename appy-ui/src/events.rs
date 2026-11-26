@@ -7,7 +7,8 @@ use gtk4::prelude::*;
 
 use crate::app::App;
 use crate::chat::format_live_dots;
-use crate::protocol::{AppyState, BackendEvent, Widget};
+use crate::memory::chip_text;
+use crate::protocol::{AppyState, BackendEvent, ClientEvent, MemoryKind, Widget};
 use crate::state::{ActiveStatus, Card, SharedState};
 use crate::weather::CARD_SIZE;
 
@@ -68,8 +69,20 @@ impl App {
                 self.ui.card.set(&report);
                 self.show_card(&mut s, now);
             }
-            // The review tray and commit chips arrive with memory.rs
-            BackendEvent::MemoryProposals { .. } | BackendEvent::MemoryCommitted { .. } => {}
+            BackendEvent::MemoryProposals { items } => self.ui.memory.set_items(&items),
+            BackendEvent::MemoryCommitted { kind, summary } => {
+                // Every chip but "Undid: ..." can undo the newest change
+                let undo: Option<Box<dyn Fn()>> = match kind {
+                    MemoryKind::Undo | MemoryKind::Other => None,
+                    _ => {
+                        let tx = self.sender();
+                        Some(Box::new(move || {
+                            let _ = tx.send(ClientEvent::MemoryUndo);
+                        }))
+                    }
+                };
+                self.ui.chat.push_chip(&chip_text(kind, &summary), undo);
+            }
         }
 
         self.sync_pill(&s);
