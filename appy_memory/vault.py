@@ -31,6 +31,8 @@ GIST_CHARS = 120
 CORE = "core"
 GITIGNORE = "logs/\npending/\nstate.json\nmemory/_index.md\n"
 _SLUG = re.compile(r"^[a-z0-9-]{1,64}$")
+_SESSION_ID = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}$")
+MAX_LOG_BYTES = 20 * 1024 * 1024
 
 
 def estimate_tokens(text: str) -> int:
@@ -170,6 +172,30 @@ class Vault:
         finally:
             self._rebuild_index()
         return {"undone": subject, "commit": new}
+
+    def store_log(self, session_id: str, data: bytes) -> bool:
+        """Keep an uploaded session log. Returns True if new; the same bytes again are a
+        no-op (an upload retried after a crash), different bytes are refused."""
+        if not isinstance(session_id, str) or not _SESSION_ID.match(session_id):
+            raise VaultError(400, f"bad session id {session_id!r}")
+        if len(data) > MAX_LOG_BYTES:
+            raise VaultError(413, f"log is too big ({len(data)} bytes)")
+        try:
+            text = data.decode("utf-8")
+            for line in text.splitlines():
+                if line.strip() and not isinstance(json.loads(line), dict):
+                    raise ValueError("not a JSON object")
+        except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError included
+            raise VaultError(400, f"not a JSONL session log: {exc}")
+        path = self.root / "logs" / f"{session_id}.jsonl"
+        if path.exists():
+            if path.read_bytes() == data:
+                return False
+            raise VaultError(409, f"a different log for session {session_id} is already stored")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+        return True
 
     # -- internals -------------------------------------------------------------------
 

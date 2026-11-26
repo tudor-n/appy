@@ -15,7 +15,7 @@ import datetime
 import json
 
 from appy_memory.gitrepo import GitRepo
-from appy_memory.vault import CORE_CAP, Vault, VaultError, estimate_tokens
+from appy_memory.vault import CORE_CAP, MAX_LOG_BYTES, Vault, VaultError, estimate_tokens
 
 
 def git_out(root: Path, *args: str) -> str:
@@ -269,6 +269,55 @@ class VaultTests(unittest.TestCase):
         self.assertTrue(self.vault.undo()["undone"].startswith("memory: remember core: a"))
         self.assertEqual(core.read_text(), "")
         self.assertEqual(self.vault.undo(), {"undone": None, "commit": None})
+
+
+SID = "2026-11-26_153012"
+LOG = ('{"v":1,"seq":1,"type":"session_start"}\n\n'
+       '{"v":1,"seq":2,"type":"user","text":"Bună ziua"}\n').encode()
+
+
+class LogStoreTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.vault = Vault(self.root).open()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def assertStatus(self, status: int, sid: str, data: bytes):
+        with self.assertRaises(VaultError) as ctx:
+            self.vault.store_log(sid, data)
+        self.assertEqual(ctx.exception.status, status)
+
+    def test_store_log_new(self):
+        self.assertTrue(self.vault.store_log(SID, LOG))
+        self.assertEqual((self.root / "logs" / f"{SID}.jsonl").read_bytes(), LOG)
+
+    def test_store_log_same_bytes_is_idempotent(self):
+        self.vault.store_log(SID, LOG)
+        self.assertFalse(self.vault.store_log(SID, LOG))
+        self.assertEqual((self.root / "logs" / f"{SID}.jsonl").read_bytes(), LOG)
+
+    def test_store_log_different_bytes_conflicts(self):
+        self.vault.store_log(SID, LOG)
+        self.assertStatus(409, SID, LOG + b'{"type":"session_end"}\n')
+        self.assertEqual((self.root / "logs" / f"{SID}.jsonl").read_bytes(), LOG)
+
+    def test_store_log_rejects_bad_input(self):
+        self.assertStatus(400, "../x", LOG)
+        self.assertStatus(400, "2026-11-26", LOG)
+        self.assertStatus(400, SID, b"\xff\xfe")
+        self.assertStatus(400, SID, b'{"ok":1}\nnot json\n')
+        self.assertStatus(400, SID, b"[1, 2]\n")
+        self.assertStatus(413, SID, b" " * (MAX_LOG_BYTES + 1))
+        self.assertEqual(list((self.root / "logs").iterdir()), [])
+
+    def test_store_log_is_not_committed(self):
+        before = commit_count(self.root)
+        self.vault.store_log(SID, LOG)
+        self.assertEqual(git_out(self.root, "status", "--porcelain"), "")
+        self.assertEqual(commit_count(self.root), before)
 
 
 if __name__ == "__main__":
