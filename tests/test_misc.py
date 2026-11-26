@@ -1,3 +1,4 @@
+import datetime
 import json
 import time
 import unittest
@@ -132,6 +133,36 @@ class WeatherToolTests(unittest.TestCase):
         self.assertIn("up to 6 days", tools.run_tool("get_weather", '{"day": -1}'))
         self.assertIn("must be a number", tools.run_tool("get_weather", '{"day": "soon"}'))
         self.assertIn('"day":1', tools.run_tool("get_weather", '{"day": "1"}'))
+
+
+class ForcedCallTests(unittest.TestCase):
+    def test_weather_words_force_the_tool(self):
+        for text in ["what's the weather", "will it rain later", "hi there. what's the weather btw",
+                     "do I need an umbrella", "how many degrees outside", "is it snowing?"]:
+            self.assertEqual(tools.forced_call(text, frozenset()).name, "get_weather", text)
+
+    def test_time_follow_ups_only_after_a_recent_weather_turn(self):
+        recent = frozenset({"get_weather"})
+        for text in ["and 3 hours from now?", "and right now again?", "wb in 2 days",
+                     "tomorrow?", "how about at 5 pm today", "and saturday?"]:
+            self.assertEqual(tools.forced_call(text, recent).name, "get_weather", text)
+            self.assertIsNone(tools.forced_call(text, frozenset()), text)
+
+    def test_ordinary_messages_are_left_alone(self):
+        recent = frozenset({"get_weather"})
+        for text in ["thanks!", "ok cool", "my coffee is cold", "tell me a joke", "yo"]:
+            self.assertIsNone(tools.forced_call(text, recent), text)
+
+    def test_fallback_day(self):
+        thursday = datetime.date(2026, 11, 26)
+        cases = {
+            "what's the weather": 0, "and 3 hours from now?": 0, "at 5 pm today": 0,
+            "tomorrow?": 1, "the day after tomorrow": 2, "wb in 2 days": 2,
+            "in three days": 3, "saturday?": 2, "on thursday": 0, "next thursday": 7,
+            "monday": 4,
+        }
+        for text, day in cases.items():
+            self.assertEqual(tools.weather_day(text, thursday), day, text)
 
 
 class WeatherCardTests(unittest.TestCase):

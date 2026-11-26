@@ -1,7 +1,9 @@
 import datetime
 import json
 import os
+import re
 import threading
+from dataclasses import dataclass
 import time
 import httpx
 
@@ -59,10 +61,12 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "get_weather",
             "description": (
-                "Get the local weather for one day: right now (day 0, the default) or a "
-                "forecast up to 6 days ahead. Each call also shows the user a weather "
-                "card, so call it every time they ask about the weather, temperature, "
-                "rain or a forecast, even if you looked something up earlier."
+                "Get the local weather for one day. Day 0 (the default) has the current "
+                "conditions plus an hour-by-hour forecast for the next 12 hours, so use it "
+                "for questions like 'in 3 hours' or 'at 6 pm'. Days 1-6 are daily "
+                "forecasts. Each call also shows the user a weather card, so call it every "
+                "time they ask about the weather, temperature, rain or a forecast, even if "
+                "you looked something up earlier."
             ),
             "parameters": {
                 "type": "object",
@@ -175,6 +179,72 @@ def get_weather(day: int = 0) -> str:
 TOOL_MAP = {
     "get_weather": get_weather,
 }
+
+# Words that make a message unmistakably about the weather. Deliberately excludes
+# ambiguous ones like "cold"/"hot"/"warm" ("my coffee's cold").
+_WEATHER_WORDS = re.compile(
+    r"\b(weather|forecast|rain\w*|snow\w*|sunny|sunshine|cloud(s|y)?|overcast|"
+    r"temperature|degrees|umbrella|storm\w*|fog\w*|humid\w*|drizzl\w*|thunder\w*|"
+    r"wind|windy|hail)\b",
+    re.IGNORECASE,
+)
+# Time phrases that, shortly after a weather answer, mean "and the weather then?"
+_TIME_FOLLOW_UP = re.compile(
+    r"\b(now|again|later|tonight|today|tomorrow|morning|afternoon|evening|night|noon|"
+    r"weekend|week|then|hourly|hours?|days?|in \d+|at \d+|\d+\s*(h|hrs?|mins?|minutes?)|"
+    r"(mon|tues|wednes|thurs|fri|satur|sun)day)\b",
+    re.IGNORECASE,
+)
+
+
+_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "a": 1}
+
+
+def weather_day(user_text: str, today: datetime.date | None = None) -> int:
+    """Best-effort `day` for get_weather from the user's words; 0 (today) if unsure."""
+    text = user_text.lower()
+    today = today or datetime.date.today()
+    if "day after tomorrow" in text:
+        return 2
+    if "tomorrow" in text:
+        return 1
+    if m := re.search(r"\bin (\d+|one|two|three|four|five|six|a) days?\b", text):
+        n = m.group(1)
+        return int(n) if n.isdigit() else _NUMBER_WORDS[n]
+    for i, name in enumerate(_WEEKDAYS):
+        if re.search(rf"\b{name}\b", text):
+            offset = (i - today.weekday()) % 7
+            return offset + 7 if offset == 0 and "next" in text else offset
+    return 0
+
+
+@dataclass(frozen=True)
+class ForcedCall:
+    """A tool the next turn must call. The model still gets to pick the arguments;
+    `fallback_args` are used only if it skips the call anyway."""
+
+    name: str
+    fallback_args: dict
+
+
+def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | None:
+    """The call the next turn must make, if the message is clearly a weather question.
+
+    Gemma often answers weather follow-ups from its earlier reply instead of calling the
+    tool (no card, and for "in 3 hours" made-up or refused answers), whatever the
+    prompt says: measured 0-1/4 calls. LM Studio's tool_choice="required" is only a
+    hint too (ignored in ~40% of forced turns), so the agent falls back to making the
+    call itself. `recent_tools` is Agent.recent_tools (the last few turns), so a
+    "thanks!" in between doesn't break the follow-up.
+    """
+    weather = bool(_WEATHER_WORDS.search(user_text)) or (
+        "get_weather" in recent_tools and bool(_TIME_FOLLOW_UP.search(user_text))
+    )
+    if not weather:
+        return None
+    return ForcedCall("get_weather", {"day": weather_day(user_text)})
+
 
 # Tools whose results go stale: the agent drops them from the history after each turn,
 # so asking again calls the tool again (and shows its card) instead of reusing old data.
