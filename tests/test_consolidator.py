@@ -357,7 +357,7 @@ S1, S2 = "2026-11-27_001310", "2026-11-27_101500"
 HUD = "# Mark i suit\n> The suit uses BLDC motors.\n- The suit uses BLDC motors.\n- The HUD runs on a Pi Zero 2 W.\n"
 
 
-class RunTests(unittest.TestCase):
+class RunBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -385,6 +385,8 @@ class RunTests(unittest.TestCase):
             stats = (c or self.consolidator()).run_pending()
         return stats, out.getvalue()
 
+
+class RunTests(RunBase):
     def test_small_talk_marks_done_without_proposals(self):
         self.vault.store_log(S1, log_bytes(("hey, how's it going?", "Fine, sir.")))
         self.llm.responses = [routed()]
@@ -614,6 +616,81 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(runs), 3)  # retried after each failure without a new kick
         self.assertIn("LLM unavailable", out.getvalue())
         self.assertIn("crashed", out.getvalue())
+
+
+class RefreshTests(RunBase):
+    """A stale proposal (its note changed before review) is redone from its sources."""
+
+    def stale_proposal(self):
+        self.vault.store_log(S1, log_bytes(("the helmet HUD will run on a Pi Zero 2 W", "ok")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "")), HUD + "SUMMARY: a"]
+        self.run_quietly()
+        self.vault.remember("The suit has a 6S LiPo.", "mark-i-suit", "live")
+        self.vault.mark_stale("mark-i-suit")
+
+    def test_refresh_rewrites_sources_against_current(self):
+        self.stale_proposal()
+        current = self.vault.note_text("mark-i-suit")
+        redone = current + "- The HUD runs on a Pi Zero 2 W.\n"
+        self.llm.responses = [redone + "SUMMARY: added the HUD again"]
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self.consolidator().refresh("mark-i-suit"), "updated")
+        self.assertIn("6S LiPo", self.llm.prompt(-1))  # rewritten against the current note
+        self.assertIn("Pi Zero 2 W", self.llm.prompt(-1))  # with the source window
+        item = self.vault.proposal("mark-i-suit")
+        self.assertEqual(item["new_text"], redone)
+        self.assertFalse(item.get("stale"))
+        self.assertEqual(item["base_hash"], self.vault.note_hash("mark-i-suit"))
+        self.assertEqual(item["sessions"], [S1])
+
+    def test_refresh_deletes_when_nothing_new(self):
+        self.stale_proposal()
+        self.llm.responses = [self.vault.note_text("mark-i-suit") + "SUMMARY: nothing"]
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self.consolidator().refresh("mark-i-suit"), "deleted")
+        self.assertIsNone(self.vault.proposal("mark-i-suit"))
+
+    def test_refresh_missing(self):
+        self.assertEqual(self.consolidator().refresh("mark-i-suit"), "missing")
+
+    def test_worker_runs_queued_refreshes(self):
+        done = threading.Event()
+        seen = []
+
+        class Stub:
+            def refresh(self, slug):
+                seen.append(slug)
+                return "updated"
+
+            def run_pending(self):
+                done.set()
+                return []
+
+        worker = Worker(Stub(), retry_seconds=0.05)
+        worker.start()
+        worker.refresh("bench")
+        self.assertTrue(done.wait(3))
+        worker.stop()
+        self.assertEqual(seen, ["bench"])
+
+    def test_crashing_refresh_is_dropped(self):
+        done = threading.Event()
+
+        class Stub:
+            def refresh(self, slug):
+                raise RuntimeError("a bug")
+
+            def run_pending(self):
+                done.set()
+                return []
+
+        worker = Worker(Stub(), retry_seconds=60)
+        with redirect_stdout(io.StringIO()) as out:
+            worker.start()
+            worker.refresh("bench")
+            self.assertTrue(done.wait(3))  # the queue moves on
+            worker.stop()
+        self.assertIn("refresh bench crashed", out.getvalue())
 
 
 if __name__ == "__main__":

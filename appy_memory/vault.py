@@ -60,6 +60,49 @@ def _match_key(text: str) -> str:
     return _one_line(text).casefold().rstrip(".! ")
 
 
+class NoteFormatError(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def check_lines(slug: str, lines: list[str], current: str | None) -> list[str]:
+    """`lines` as a well-formed note (normalised), or NoteFormatError: "# title" (the
+    current one, ignoring case) and "> gist" for a note, then only "- " bullets."""
+    body = lines
+    if slug == CORE:
+        header: list[str] = []
+    else:
+        if len(lines) < 2 or not lines[0].startswith("# ") or not lines[0][2:].strip():
+            raise NoteFormatError("lost the title line")
+        if current is not None:
+            old_title = (current.splitlines() or [""])[0].strip()
+            # a casing fix ("Mark i suit" -> "Mark I suit") is fine; a new name is not
+            if old_title.startswith("# ") and lines[0].strip().casefold() != old_title.casefold():
+                raise NoteFormatError(f"renamed the title to {lines[0].strip()!r}")
+        if not lines[1].startswith("> ") or not lines[1][2:].strip():
+            raise NoteFormatError("lost the gist line")
+        header = [lines[0].strip(), "> " + _gist(lines[1][2:].strip())]
+        body = lines[2:]
+    facts = [l.strip() for l in body if l.strip()]
+    if not facts:
+        raise NoteFormatError("no facts left")
+    stray = [l for l in facts if not l.startswith("- ")]
+    if stray:
+        raise NoteFormatError(f"non-bullet line {stray[0][:60]!r}")
+    return header + facts
+
+
+def check_note(slug: str, text: str, current: str | None) -> str:
+    """A whole note (e.g. Tudor's edit) checked like a rewrite, including the size cap."""
+    lines = [l.rstrip() for l in str(text).strip().splitlines()]
+    out = "\n".join(check_lines(slug, lines, current)) + "\n"
+    cap = CORE_CAP if slug == CORE else NOTE_CAP
+    if estimate_tokens(out) > cap:
+        raise NoteFormatError(f"too long: over the {cap}-token cap")
+    return out
+
+
 def _gist(text: str) -> str:
     """At most GIST_CHARS, cut at a word boundary."""
     if len(text) <= GIST_CHARS:
@@ -158,7 +201,9 @@ class Vault:
             if _SLUG.match(path.stem):
                 item = self.proposal(path.stem)
                 if item:
-                    found.append(item)
+                    # for review: the note as it stands now, and whether it moved on since
+                    found.append({**item, "before": self.note_text(item["slug"]) or "",
+                                  "stale": bool(item.get("stale"))})
         return sorted(found, key=lambda p: (str(p.get("updated", "")), p["slug"]))
 
     def save_proposal(self, slug: str, title: str, new_text: str, summary: str, session: str,
@@ -180,6 +225,43 @@ class Vault:
             "slug": slug, "title": title, "base_hash": base,
             "new_text": new_text, "summary": summary, "sessions": sessions, "sources": sources,
             "created": old.get("created", now), "updated": now,
+        }
+        _write_atomic(self.root / "pending" / f"{slug}.json",
+                      json.dumps(item, ensure_ascii=False, indent=1))
+        return item
+
+    def apply_note(self, slug: str, text: str, subject: str, body: str) -> str | None:
+        """Write a reviewed note (accepted or edited), commit it, drop its proposal."""
+        path = self._path(slug)
+        old = path.read_text(encoding="utf-8") if path.exists() else None
+        sha = self._commit(path, old, text, subject, body) if text != old else None
+        self.delete_proposal(slug)
+        return sha
+
+    def delete_proposal(self, slug: str) -> bool:
+        path = self.root / "pending" / f"{self._path(slug).stem}.json"
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def mark_stale(self, slug: str) -> None:
+        item = self.proposal(slug)
+        if item is not None:
+            item["stale"] = True
+            _write_atomic(self.root / "pending" / f"{slug}.json",
+                          json.dumps(item, ensure_ascii=False, indent=1))
+
+    def replace_proposal(self, slug: str, title: str, new_text: str, summary: str,
+                         sessions: list, sources: list) -> dict:
+        """A proposal redone against the note as it is now (not stale any more)."""
+        old = self.proposal(slug) or {}
+        now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        item = {
+            "slug": slug, "title": title, "base_hash": self.note_hash(slug),
+            "new_text": new_text, "summary": summary, "sessions": list(sessions),
+            "sources": [list(s) for s in sources], "created": old.get("created", now),
+            "updated": now,
         }
         _write_atomic(self.root / "pending" / f"{slug}.json",
                       json.dumps(item, ensure_ascii=False, indent=1))
@@ -223,7 +305,8 @@ class Vault:
         if estimate_tokens(new) > cap:
             where = "core memory" if slug == CORE else f"the note '{slug}'"
             raise VaultError(409, f"{where} is full ({cap} tokens); nothing was saved")
-        sha = self._commit(path, old, new, f"memory: remember {slug}: {fact[:60]}", session)
+        sha = self._commit(path, old, new, f"memory: remember {slug}: {fact[:60]}",
+                           f"session={session}")
         return {"slug": slug, "line": line, "commit": sha}
 
     def forget(self, slug: str, text: str, session: str) -> dict:
@@ -253,7 +336,8 @@ class Vault:
             if gist and (gist in _match_key(line) or needle in gist):
                 lines[1] = f"> {rest[0][2:][:GIST_CHARS]}\n"
                 new = "".join(lines)
-        sha = self._commit(path, old, new, f"memory: forget {slug}: {line[2:62]}", session)
+        sha = self._commit(path, old, new, f"memory: forget {slug}: {line[2:62]}",
+                           f"session={session}")
         (self.root / "pending" / f"{slug}.json").unlink(missing_ok=True)
         state = self._state()
         forgotten = state.get("forgotten", [])
@@ -307,14 +391,14 @@ class Vault:
         return [l for l in text.splitlines() if l.startswith("- ")]
 
     def _commit(self, path: Path, old: str | None, new: str | None, subject: str,
-                session: str) -> str:
+                body: str) -> str:
         """Write `new` to `path` (None deletes it) and commit; on failure put `old` back."""
         if new is None:
             path.unlink()
         else:
             _write_atomic(path, new)
         try:
-            sha = self.git.commit(subject, f"session={session}", paths=("memory",))
+            sha = self.git.commit(subject, body, paths=("memory",))
         except GitError as exc:
             if old is None:
                 path.unlink(missing_ok=True)

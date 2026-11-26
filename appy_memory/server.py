@@ -29,13 +29,18 @@ from starlette.concurrency import run_in_threadpool
 
 from .consolidator import Consolidator, Worker
 from .llm import LLM
-from .vault import Vault, VaultError
+from .vault import NoteFormatError, Vault, VaultError, check_note
 
 
 class RememberBody(BaseModel):
     text: str
     slug: Optional[str] = None
     session: str = ""
+
+
+class DecisionBody(BaseModel):
+    decision: str
+    text: Optional[str] = None
 
 
 class ForgetBody(BaseModel):
@@ -130,6 +135,43 @@ def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
     @app.get("/proposals", dependencies=guarded)
     def proposals():
         return {"items": locked(vault.proposals)}
+
+    @app.post("/proposals/{slug}", dependencies=guarded)
+    def decide(slug: str, body: DecisionBody):
+        """Tudor's Accept / Deny / Edit from the overlay. Only this code writes the note."""
+        if body.decision not in ("accept", "deny", "edit"):
+            raise VaultError(422, f"unknown decision {body.decision!r}")
+        with lock:
+            item = vault.proposal(slug)
+            if item is None:
+                raise VaultError(404, f"there's no pending update for '{slug}'")
+            sessions = f"sessions={','.join(item.get('sessions', []))}"
+            summary = item.get("summary", "")
+            if body.decision == "deny":
+                vault.delete_proposal(slug)
+                _say(f"proposal {slug}: denied")
+                return {"status": "denied"}
+            if body.decision == "edit":
+                try:
+                    text = check_note(slug, body.text or "", vault.note_text(slug))
+                except NoteFormatError as exc:
+                    raise VaultError(400, f"edit not saved: {exc.reason}")
+                sha = vault.apply_note(slug, text, f"memory: {summary[:60]} [edited]", sessions)
+                _say(f"proposal {slug}: edited -> {sha}")
+                return {"status": "edited", "commit": sha, "summary": summary}
+            if vault.note_hash(slug) != item.get("base_hash"):
+                # The note changed since this was written: redo it against the new note
+                if app.state.worker is None:
+                    raise VaultError(409, f"'{slug}' changed since this update was written, "
+                                          "and the consolidator is off: deny or edit it")
+                vault.mark_stale(slug)
+                app.state.worker.refresh(slug)
+                _say(f"proposal {slug}: stale, redoing it")
+                return {"status": "stale"}
+            sha = vault.apply_note(slug, item["new_text"], f"memory: {summary[:60]} [approved]",
+                                   sessions)
+            _say(f"proposal {slug}: accepted -> {sha}")
+            return {"status": "accepted", "commit": sha, "summary": summary}
 
     return app
 

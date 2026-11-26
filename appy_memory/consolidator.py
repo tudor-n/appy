@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from .llm import LLM, BadRequest, EmptyOutput, LLMError
-from .vault import _SLUG, CORE, CORE_CAP, NOTE_CAP, _gist, estimate_tokens
+from .vault import _SLUG, CORE, CORE_CAP, NOTE_CAP, NoteFormatError, _gist, check_lines, estimate_tokens
 
 MAX_ROUTED = 3
 
@@ -196,32 +196,6 @@ def _split_output(out: str) -> tuple[list[str], str]:
     return lines, summary
 
 
-def _check(slug: str, lines: list[str], current: str | None) -> list[str]:
-    """Raises Rejected unless `lines` is a well-formed note; returns it normalised."""
-    body = lines
-    if slug == CORE:
-        header: list[str] = []
-    else:
-        if len(lines) < 2 or not lines[0].startswith("# ") or not lines[0][2:].strip():
-            raise Rejected("lost the title line")
-        if current is not None:
-            old_title = (current.splitlines() or [""])[0].strip()
-            # a casing fix ("Mark i suit" -> "Mark I suit") is fine; a new name is not
-            if old_title.startswith("# ") and lines[0].strip().casefold() != old_title.casefold():
-                raise Rejected(f"renamed the title to {lines[0].strip()!r}")
-        if not lines[1].startswith("> ") or not lines[1][2:].strip():
-            raise Rejected("lost the gist line")
-        header = [lines[0].strip(), "> " + _gist(lines[1][2:].strip())]
-        body = lines[2:]
-    facts = [l.strip() for l in body if l.strip()]
-    if not facts:
-        raise Rejected("no facts left")
-    stray = [l for l in facts if not l.startswith("- ")]
-    if stray:
-        raise Rejected(f"non-bullet line {stray[0][:60]!r}")
-    return header + facts
-
-
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
@@ -250,7 +224,10 @@ def rewrite(llm: LLM, slug: str, current: str | None, title: str, window: str,
             outputs.append(out)
             tokens += used
             lines, summary = _split_output(out)
-            text = "\n".join(_check(slug, lines, current)) + "\n"
+            try:
+                text = "\n".join(check_lines(slug, lines, current)) + "\n"
+            except NoteFormatError as exc:
+                raise Rejected(exc.reason)
             if estimate_tokens(text) <= cap:
                 break
             if attempt == 1:
@@ -326,6 +303,51 @@ class Consolidator:
             stats["seconds"] = round(self.clock() - started, 1)
             self._report(stats)
         return stats
+
+    def refresh(self, slug: str) -> str:
+        """Redo a stale proposal (its note changed before it was reviewed): fold its source
+        windows into the note as it is now. Returns "updated", "deleted" (nothing new left)
+        or "missing"."""
+        from .transcript import load_log, render_turns, windows
+
+        with self.lock:
+            item = self.vault.proposal(slug)
+            if item is None:
+                return "missing"
+            current = self.vault.note_text(slug)
+            seen = self.vault.note_hash(slug)
+            forgotten = self.vault.forgotten_lines()
+            logs = {sid: load_log(self.vault.root / "logs" / f"{sid}.jsonl")
+                    for sid in {s for s, _ in item.get("sources", [])}}
+        if slug == CORE and current is None:
+            current = ""
+        title = item.get("title") or slug
+        text, summaries = current, []
+        for sid, k in item.get("sources", []):
+            wins = windows(render_turns(logs[sid]), self.window_tokens)
+            if k >= len(wins):
+                continue
+            self._wait_quiet()
+            try:
+                text, summary, _ = rewrite(self.llm, slug, text, title, wins[k], forgotten)
+            except Rejected as exc:
+                print(f"[consolidator] refresh {slug} ({sid} w{k}): {exc.reason}", flush=True)
+                continue
+            summaries.append(summary)
+            if slug != CORE:
+                title = text.splitlines()[0][2:].strip()
+        with self.lock:
+            if self.vault.note_hash(slug) != seen:
+                return "stale"  # it changed again meanwhile: stays stale, redone next time
+            if not summaries:
+                self.vault.delete_proposal(slug)
+                print(f"[consolidator] refresh {slug}: nothing new left, proposal dropped",
+                      flush=True)
+                return "deleted"
+            self.vault.replace_proposal(slug, title, text, "; ".join(summaries),
+                                        item.get("sessions", []), item.get("sources", []))
+        print(f"[consolidator] refresh {slug}: redone against the current note", flush=True)
+        return "updated"
 
     def _report(self, s: dict) -> None:
         rejected = f"{len(s['rejected'])} rejected"
@@ -413,12 +435,21 @@ class Worker:
         self.retry_seconds = retry_seconds
         self._event = threading.Event()
         self._stopping = False
+        self._refresh: list[str] = []
+        self._refresh_lock = threading.Lock()
         self._thread = threading.Thread(target=self._loop, name="consolidator", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
 
     def kick(self) -> None:
+        self._event.set()
+
+    def refresh(self, slug: str) -> None:
+        """Redo a stale proposal soon (before consolidating more sessions)."""
+        with self._refresh_lock:
+            if slug not in self._refresh:
+                self._refresh.append(slug)
         self._event.set()
 
     def stop(self, timeout: float = 5) -> None:
@@ -438,6 +469,20 @@ class Worker:
             if self._stopping:
                 return
             try:
+                while True:
+                    with self._refresh_lock:
+                        slug = self._refresh[0] if self._refresh else None
+                    if slug is None:
+                        break
+                    try:
+                        self.consolidator.refresh(slug)
+                    except LLMError:
+                        raise  # keep it queued; retry when the model is back
+                    except Exception:
+                        print(f"[consolidator] refresh {slug} crashed:\n"
+                              + traceback.format_exc(), flush=True)
+                    with self._refresh_lock:
+                        self._refresh.remove(slug)
                 self.consolidator.run_pending()
                 retry = False
             except LLMError as exc:
