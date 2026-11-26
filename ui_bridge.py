@@ -23,6 +23,10 @@ class UiBridge:
         self.on_user_text = on_user_text
         self.on_set_effort = on_set_effort
         self.get_effort = get_effort
+        # The last status sent, replayed to clients that connect later. The overlay is
+        # usually still reconnecting when "booting" goes out, and would otherwise sit
+        # looking idle through the whole model load.
+        self.last_status: Optional[dict] = None
 
         @self.app.websocket("/ws")
         async def ws_endpoint(ws: WebSocket):
@@ -32,6 +36,8 @@ class UiBridge:
                 # Sync the UI's effort picker with the backend's current value
                 if self.get_effort:
                     await ws.send_json({"type": "effort", "value": self.get_effort()})
+                if self.last_status:
+                    await ws.send_json(self.last_status)
                 while True:
                     raw = await ws.receive_text()
                     try:
@@ -88,7 +94,8 @@ class UiBridge:
         self.emit({"type": "transcript", "text": text, "is_final": is_final})
 
     def status(self, state: str, label: str = ""):
-        self.emit({"type": "status", "state": state, "label": label or state})
+        self.last_status = {"type": "status", "state": state, "label": label or state}
+        self.emit(self.last_status)
 
     def response(self, text: str, expression: str = "neutral"):
         self.emit({"type": "response", "text": text, "expression": expression})

@@ -27,7 +27,9 @@ Python and Rust lists of expressions, efforts or states drift apart.
 **States:** `idle`, `listening`, `booting`, `thinking`, `compacting`, `speaking`.
 On the Python side `StatusTracker` (`status.py`) is the only thing that sends
 `thinking`/`speaking`/`idle`. It combines the turn phase from the agent with whether the
-speaker still has text queued or playing. `booting` is sent with `StatusTracker.announce`. The UI also
+speaker still has text queued or playing. `booting` is sent with `StatusTracker.announce`. The
+bridge replays the last `status` (after `effort`) to every UI that connects, so an overlay that
+connects mid-boot still shows "loading…" and the mascot's loading bar. The UI also
 understands `compacting`, but the backend doesn't send it: trimming history is instant.
 
 **Expressions:** `neutral`, `happy`, `excited`, `curious`, `surprised`, `focused`,

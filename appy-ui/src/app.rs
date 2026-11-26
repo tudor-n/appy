@@ -71,6 +71,11 @@ impl App {
                 expression: s.expression,
                 phase: s.phase,
                 talk_phase: s.talk_phase,
+                busy_secs: s
+                    .active_status
+                    .as_ref()
+                    .filter(|a| a.state == s.state)
+                    .map_or(0.0, |a| a.started.elapsed().as_secs_f64()),
                 wobble_x: s.wobble.x * wobble_mul,
                 wobble_y: s.wobble.y * wobble_mul,
                 blink_scale: s.blink.scale,
