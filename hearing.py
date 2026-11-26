@@ -63,9 +63,29 @@ class SmartTurnDetector:
         return prob > 0.5, prob
 
 
+def filter_transcript(text: str) -> str | None:
+    """Return the cleaned transcript, or None if it looks like a Whisper hallucination."""
+    text = text.strip()
+    if len(text) < 2:
+        return None
+
+    # Filter repetitive hallucinations
+    words = text.lower().replace(".", "").replace(",", "").split()
+    if len(words) > 5 and (len(set(words)) / len(words)) < 0.4:
+        return None
+
+    # Filter classic Whisper silence hallucinations
+    if text.lower() in JUNK_PHRASES:
+        return None
+    return text
+
+
 class Ear:
-    def __init__(self, on_speech_start=None):
+    def __init__(self, on_speech_start=None, on_speech_discarded=None):
+        """on_speech_start fires when speech begins; on_speech_discarded fires if that
+        speech is then thrown away (too quiet, or filtered as a hallucination)."""
         self.on_speech_start = on_speech_start
+        self.on_speech_discarded = on_speech_discarded
         print("[hearing] Loading Silero VAD (ONNX)...", flush=True)
         self.vad = load_silero_vad(onnx=True)
 
@@ -79,6 +99,9 @@ class Ear:
         self.asr = WhisperModel(model_size, device=device, compute_type=compute)
 
         self.queue = queue.Queue()
+        # Bumped at each speech start, so a slow transcription of an earlier utterance
+        # can tell that the user has started talking again
+        self._utterance = 0
         self.running = False
         self.paused = False
         self._proc = None
@@ -191,6 +214,7 @@ class Ear:
                             silence_chunks = 0
                             checked_pause = False
                             buffer = list(ring_buffer)
+                            self._utterance += 1
                             if self.on_speech_start:
                                 self.on_speech_start()
                     else:
@@ -229,15 +253,29 @@ class Ear:
                             buffer = []
                             threading.Thread(
                                 target=self._transcribe,
-                                args=(full_audio,),
+                                args=(full_audio, self._utterance),
                                 daemon=True,
                             ).start()
         finally:
             self._proc.terminate()
 
-    def _transcribe(self, audio_array: np.ndarray):
-        if np.abs(audio_array).mean() < 0.004:
+    def _transcribe(self, audio_array: np.ndarray, utterance: int):
+        try:
+            text = self._recognize(audio_array)
+        except Exception as e:
+            print(f"[hearing] transcription failed: {e}", flush=True)
+            text = None
+        if text is not None:
+            self.queue.put(text)
             return
+        # Only reset the UI if nobody has started speaking since this utterance;
+        # otherwise we'd knock a live "listening" state back to idle.
+        if utterance == self._utterance and self.on_speech_discarded:
+            self.on_speech_discarded()
+
+    def _recognize(self, audio_array: np.ndarray) -> str | None:
+        if np.abs(audio_array).mean() < 0.004:
+            return None
 
         t0 = time.monotonic()
         segments, _ = self.asr.transcribe(
@@ -249,23 +287,11 @@ class Ear:
             log_prob_threshold=-1.0,
             initial_prompt="Hey Appy, this is Tudor talking about Dummy, Fifi, Sibiu, Atlas, and Jarvis.",
         )
-        text = " ".join(s.text.strip() for s in segments).strip()
+        text = filter_transcript(" ".join(s.text.strip() for s in segments))
         dt_ms = (time.monotonic() - t0) * 1000
-
-        if len(text) < 2:
-            return
-
-        # Filter repetitive hallucinations
-        words = text.lower().replace(".", "").replace(",", "").split()
-        if len(words) > 5 and (len(set(words)) / len(words)) < 0.4:
-            return
-
-        # Filter classic Whisper silence hallucinations
-        if text.lower() in JUNK_PHRASES:
-            return
-
-        print(f"[stt: {dt_ms:.0f}ms]")
-        self.queue.put(text)
+        if text is not None:
+            print(f"[stt: {dt_ms:.0f}ms]")
+        return text
 
     def listen(self) -> str | None:
         try:

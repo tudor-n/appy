@@ -33,10 +33,17 @@ class UiBridge:
                 if self.get_effort:
                     await ws.send_json({"type": "effort", "value": self.get_effort()})
                 while True:
-                    data = json.loads(await ws.receive_text())
+                    raw = await ws.receive_text()
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        print(f"[ui] ignoring malformed message: {raw[:80]!r}")
+                        continue
+                    if not isinstance(data, dict):
+                        continue
                     kind = data.get("type")
                     if kind == "user_text" and self.on_user_text:
-                        text = data.get("text", "").strip()
+                        text = str(data.get("text", "")).strip()
                         if text:
                             self.on_user_text(text)
                     elif kind == "set_effort" and self.on_set_effort:
@@ -44,6 +51,8 @@ class UiBridge:
                         if value in VALID_EFFORTS:
                             self.on_set_effort(value)
             except WebSocketDisconnect:
+                pass
+            finally:
                 self.clients.discard(ws)
 
     def start(self, host: str = "127.0.0.1", port: int = 8001):

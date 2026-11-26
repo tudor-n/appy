@@ -1,2 +1,19 @@
+# LLM + UI bridge
 openai
-kokoro_onnx
+python-dotenv
+fastapi
+uvicorn
+httpx
+
+# Speech out (TTS)
+kokoro-onnx
+onnxruntime-gpu
+sounddevice
+numpy
+
+# Speech in (VAD, turn detection, STT)
+torch
+silero-vad
+faster-whisper
+transformers
+huggingface_hub

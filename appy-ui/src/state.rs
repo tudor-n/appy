@@ -1,0 +1,448 @@
+//! Mutable UI state, grouped by concern. Everything except `ActiveStatus` is plain data
+//! with time passed in explicitly, so the logic is unit-testable without GTK.
+
+use std::f64::consts::PI;
+use std::time::{Duration, Instant};
+
+use gtk4::Label;
+use gtk4::prelude::*;
+
+use crate::protocol::{AppyState, Effort, Expression};
+
+/// How long the chat stays visible after backend activity, so you can read the reply.
+const VOICE_COOLDOWN: Duration = Duration::from_secs(8);
+/// How long the chat stays open after the pointer leaves the mascot, so you can
+/// cross the gap to the messages without them collapsing.
+const HOVER_GRACE: Duration = Duration::from_millis(300);
+const BLINK_DURATION_MS: f64 = 160.0;
+/// Initial offset of the shell from the bottom-right corner of the screen.
+const HOME_MARGIN_RIGHT: f64 = 24.0;
+const HOME_MARGIN_BOTTOM: f64 = 56.0;
+
+pub struct SharedState {
+    pub state: AppyState,
+    pub expression: Expression,
+    pub effort: Effort,
+    /// Phase of the busy dots animation.
+    pub phase: f64,
+    /// Phase of the talking bounce.
+    pub talk_phase: f64,
+    pub speaking_until: Option<Instant>,
+    /// Glass mode: chat pinned open with a dark backdrop (double right-click).
+    pub locked: bool,
+    pub voice_cooldown_until: Option<Instant>,
+    pub chat_open: bool,
+    pub message_count: usize,
+    pub last_input_bounds: Option<(i32, i32, i32, i32)>,
+    pub active_status: Option<ActiveStatus>,
+    /// Whether the wobble CSS provider currently holds a non-identity transform.
+    pub wobble_css_active: bool,
+    pub hover: Hover,
+    pub drag: Drag,
+    pub placement: Placement,
+    pub wobble: Wobble,
+    pub blink: Blink,
+}
+
+impl SharedState {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            state: AppyState::Idle,
+            expression: Expression::Neutral,
+            effort: Effort::Off,
+            phase: 0.0,
+            talk_phase: 0.0,
+            speaking_until: None,
+            locked: false,
+            voice_cooldown_until: None,
+            chat_open: false,
+            message_count: 0,
+            last_input_bounds: None,
+            active_status: None,
+            wobble_css_active: false,
+            hover: Hover::default(),
+            drag: Drag::default(),
+            placement: Placement::default(),
+            wobble: Wobble::default(),
+            blink: Blink::new(now),
+        }
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.state.is_busy()
+    }
+
+    pub fn trigger_voice_cooldown(&mut self, now: Instant) {
+        self.voice_cooldown_until = Some(now + VOICE_COOLDOWN);
+    }
+
+    pub fn set_mascot_hover(&mut self, hovered: bool, now: Instant) {
+        if self.hover.mascot != hovered {
+            self.hover.mascot = hovered;
+            self.after_hover_change(now);
+        }
+    }
+
+    pub fn set_panel_hover(&mut self, hovered: bool, now: Instant) {
+        if self.hover.panel != hovered {
+            self.hover.panel = hovered;
+            self.after_hover_change(now);
+        }
+    }
+
+    fn after_hover_change(&mut self, now: Instant) {
+        if self.hover.mascot || self.hover.panel {
+            self.hover.grace_until = None;
+        } else {
+            // Pointer left everything: start the grace period, and let an explicit
+            // mouse-out close the chat even if the voice cooldown was running.
+            self.hover.grace_until = Some(now + HOVER_GRACE);
+            self.voice_cooldown_until = None;
+        }
+    }
+
+    pub fn should_show_chat(&self, input_selected: bool, now: Instant) -> bool {
+        self.locked
+            || self.hover.is_hovered(now)
+            || self.drag.active
+            || input_selected
+            || self.is_busy()
+            || self.voice_cooldown_until.is_some_and(|until| now < until)
+    }
+
+    /// Turn the live status pill (e.g. "thinking...") into its finished form
+    /// ("thought for 3s").
+    pub fn finish_active_status(&mut self) {
+        if let Some(active) = self.active_status.take() {
+            active.finish();
+        }
+    }
+}
+
+/// The status pill currently animating in the chat log.
+pub struct ActiveStatus {
+    pub state: AppyState,
+    pub label: Label,
+    pub started: Instant,
+}
+
+impl ActiveStatus {
+    fn finish(self) {
+        let elapsed = format_duration(self.started.elapsed());
+        self.label.set_text(&format!(
+            "{} for {}",
+            self.state.done_status_text(),
+            elapsed
+        ));
+        if let Some(pill) = self.label.parent() {
+            pill.remove_css_class("live");
+        }
+    }
+}
+
+pub fn format_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    if mins > 0 {
+        format!("{mins}m{secs}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Hover {
+    pub mascot: bool,
+    pub panel: bool,
+    pub grace_until: Option<Instant>,
+}
+
+impl Hover {
+    pub fn is_hovered(&self, now: Instant) -> bool {
+        self.mascot || self.panel || self.grace_until.is_some_and(|until| now < until)
+    }
+}
+
+/// An in-progress drag of the mascot (offsets relative to where the drag began).
+#[derive(Debug, Default)]
+pub struct Drag {
+    pub active: bool,
+    start_x: f64,
+    start_y: f64,
+    last_dx: f64,
+    last_dy: f64,
+}
+
+impl Drag {
+    pub fn begin(&mut self, placement: &Placement) {
+        self.active = true;
+        self.start_x = placement.x;
+        self.start_y = placement.y;
+        self.last_dx = 0.0;
+        self.last_dy = 0.0;
+    }
+
+    /// Returns the movement since the previous update, for the wobble physics.
+    pub fn update(&mut self, dx: f64, dy: f64) -> (f64, f64) {
+        let step = (dx - self.last_dx, dy - self.last_dy);
+        self.last_dx = dx;
+        self.last_dy = dy;
+        step
+    }
+
+    pub fn target(&self, dx: f64, dy: f64, max_x: f64, max_y: f64) -> (f64, f64) {
+        (
+            (self.start_x + dx).clamp(0.0, max_x),
+            (self.start_y + dy).clamp(0.0, max_y),
+        )
+    }
+}
+
+/// Where the shell sits inside the fullscreen layer surface.
+#[derive(Debug, Default)]
+pub struct Placement {
+    pub x: f64,
+    pub y: f64,
+    initialized: bool,
+    last_root_h: f64,
+}
+
+impl Placement {
+    /// Puts the shell at the bottom-right on first layout, then keeps its bottom edge
+    /// pinned as the chat grows/shrinks. Returns true when the position changed.
+    pub fn follow_layout(&mut self, win: (f64, f64), root: (f64, f64), dragging: bool) -> bool {
+        let ((win_w, win_h), (root_w, root_h)) = (win, root);
+        if win_w <= 0.0 || win_h <= 0.0 || root_w <= 0.0 || root_h <= 0.0 {
+            return false;
+        }
+        if !self.initialized {
+            self.x = (win_w - root_w - HOME_MARGIN_RIGHT).max(0.0);
+            self.y = (win_h - root_h - HOME_MARGIN_BOTTOM).max(0.0);
+            self.last_root_h = root_h;
+            self.initialized = true;
+            return true;
+        }
+        if !dragging && (root_h - self.last_root_h).abs() > 0.5 {
+            let dh = root_h - self.last_root_h;
+            let max_y = (win_h - root_h).max(0.0);
+            self.y = (self.y - dh).clamp(0.0, max_y);
+            self.last_root_h = root_h;
+            return true;
+        }
+        false
+    }
+}
+
+/// Damped spring that makes the shell jiggle after being dragged.
+#[derive(Debug, Default)]
+pub struct Wobble {
+    pub x: f64,
+    pub y: f64,
+    vx: f64,
+    vy: f64,
+}
+
+impl Wobble {
+    pub fn kick(&mut self, step_dx: f64, step_dy: f64) {
+        self.vx = (self.vx - step_dx * 0.55).clamp(-35.0, 35.0);
+        self.vy = (self.vy + step_dy * 0.55).clamp(-35.0, 35.0);
+    }
+
+    /// Advance one frame. Returns true while still moving; snaps to rest otherwise.
+    pub fn step(&mut self) -> bool {
+        self.vx = (self.vx - self.x * 0.22) * 0.78;
+        self.vy = (self.vy - self.y * 0.22) * 0.78;
+        self.x += self.vx;
+        self.y += self.vy;
+
+        let moving = [self.x, self.y, self.vx, self.vy]
+            .iter()
+            .any(|v| v.abs() > 0.05);
+        if !moving {
+            *self = Self::default();
+        }
+        moving
+    }
+}
+
+#[derive(Debug)]
+pub struct Blink {
+    /// 1.0 = eyes open, 0.0 = closed.
+    pub scale: f64,
+    start: Option<Instant>,
+    next: Instant,
+    seed: u64,
+}
+
+impl Blink {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            scale: 1.0,
+            start: None,
+            next: now + Duration::from_millis(3200),
+            seed: 0x517cc1b727220a95,
+        }
+    }
+
+    /// Advance the blink animation. `enabled` is false while the face has no blinkable
+    /// eyes (busy dots, listening arcs). Returns true when the mascot needs a redraw.
+    pub fn step(&mut self, now: Instant, enabled: bool) -> bool {
+        if !enabled {
+            let was_blinking = self.start.is_some() || (self.scale - 1.0).abs() > f64::EPSILON;
+            self.start = None;
+            self.scale = 1.0;
+            return was_blinking;
+        }
+
+        match self.start {
+            Some(start) => {
+                let elapsed = now.duration_since(start).as_secs_f64() * 1000.0;
+                if elapsed >= BLINK_DURATION_MS {
+                    self.scale = 1.0;
+                    self.start = None;
+                    self.next = now + self.next_delay();
+                } else {
+                    self.scale = 1.0 - (elapsed / BLINK_DURATION_MS * PI).sin();
+                }
+                true
+            }
+            None => {
+                if now >= self.next {
+                    self.start = Some(now);
+                }
+                false
+            }
+        }
+    }
+
+    /// Pseudo-random 2.8-5.4s gap between blinks (LCG, no rand dependency).
+    fn next_delay(&mut self) -> Duration {
+        self.seed = self
+            .seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        Duration::from_millis(2800 + ((self.seed >> 33) % 2600))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn hover_grace_keeps_chat_open_briefly() {
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.set_mascot_hover(true, t0);
+        assert!(s.should_show_chat(false, t0));
+        s.set_mascot_hover(false, t0);
+        assert!(s.should_show_chat(false, t0 + ms(100)));
+        assert!(!s.should_show_chat(false, t0 + ms(400)));
+    }
+
+    #[test]
+    fn mouse_out_cancels_voice_cooldown() {
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.trigger_voice_cooldown(t0);
+        assert!(s.should_show_chat(false, t0 + ms(5000)));
+        s.set_panel_hover(true, t0);
+        s.set_panel_hover(false, t0);
+        assert!(!s.should_show_chat(false, t0 + ms(1000)));
+    }
+
+    #[test]
+    fn busy_locked_or_typing_shows_chat() {
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        assert!(!s.should_show_chat(false, t0));
+        assert!(s.should_show_chat(true, t0));
+        s.state = AppyState::Thinking;
+        assert!(s.should_show_chat(false, t0));
+        s.state = AppyState::Idle;
+        s.locked = true;
+        assert!(s.should_show_chat(false, t0));
+    }
+
+    #[test]
+    fn drag_clamps_to_screen() {
+        let placement = Placement {
+            x: 100.0,
+            y: 50.0,
+            ..Default::default()
+        };
+        let mut drag = Drag::default();
+        drag.begin(&placement);
+        assert_eq!(drag.update(10.0, 5.0), (10.0, 5.0));
+        assert_eq!(drag.update(15.0, 5.0), (5.0, 0.0));
+        assert_eq!(drag.target(-500.0, 20.0, 800.0, 600.0), (0.0, 70.0));
+        assert_eq!(drag.target(5000.0, 5000.0, 800.0, 600.0), (800.0, 600.0));
+    }
+
+    #[test]
+    fn placement_homes_then_pins_bottom_edge() {
+        let mut p = Placement::default();
+        assert!(!p.follow_layout((0.0, 0.0), (300.0, 200.0), false));
+        assert!(p.follow_layout((1920.0, 1080.0), (300.0, 200.0), false));
+        assert_eq!((p.x, p.y), (1596.0, 824.0));
+        // Unchanged layout: no move
+        assert!(!p.follow_layout((1920.0, 1080.0), (300.0, 200.0), false));
+        // Chat grew by 100px: shell moves up so the bottom stays put
+        assert!(p.follow_layout((1920.0, 1080.0), (300.0, 300.0), false));
+        assert_eq!(p.y, 724.0);
+        // Not while dragging
+        assert!(!p.follow_layout((1920.0, 1080.0), (300.0, 400.0), true));
+    }
+
+    #[test]
+    fn wobble_settles() {
+        let mut w = Wobble::default();
+        assert!(!w.step());
+        w.kick(-20.0, 10.0);
+        assert!(w.step());
+        let frames = (0..200).take_while(|_| w.step()).count();
+        assert!(frames < 200, "wobble never settled");
+        assert_eq!((w.x, w.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn blink_cycle() {
+        let t0 = Instant::now();
+        let mut b = Blink::new(t0);
+        assert!(!b.step(t0, true));
+        // Starts at the scheduled time, then closes and reopens over 160ms
+        assert!(!b.step(t0 + ms(3200), true));
+        assert!(b.step(t0 + ms(3280), true));
+        assert!(
+            b.scale < 0.05,
+            "eyes should be ~closed mid-blink, got {}",
+            b.scale
+        );
+        assert!(b.step(t0 + ms(3400), true));
+        assert_eq!(b.scale, 1.0);
+        // Next blink is 2.8-5.4s later
+        assert!(b.next >= t0 + ms(3400 + 2800) && b.next <= t0 + ms(3400 + 5400));
+    }
+
+    #[test]
+    fn blink_resets_when_disabled() {
+        let t0 = Instant::now();
+        let mut b = Blink::new(t0);
+        b.step(t0 + ms(3200), true);
+        b.step(t0 + ms(3250), true);
+        assert!(b.step(t0 + ms(3260), false));
+        assert_eq!(b.scale, 1.0);
+        assert!(!b.step(t0 + ms(3270), false));
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(format_duration(ms(4_900)), "4s");
+        assert_eq!(format_duration(ms(125_000)), "2m5s");
+    }
+}

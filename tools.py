@@ -115,12 +115,23 @@ TOOL_MAP = {
 
 
 def run_tool(name: str, arguments: str) -> str:
+    """Run a tool by name. Errors come back as JSON for the model, never as exceptions."""
     fn = TOOL_MAP.get(name)
     if not fn:
         return json.dumps({"error": f"Unknown tool: {name}"})
-    args = json.loads(arguments) if arguments else {}
-    return fn(**args)
+    try:
+        args = json.loads(arguments) if arguments and arguments.strip() else {}
+    except json.JSONDecodeError as e:
+        return json.dumps({"error": f"Invalid JSON arguments for {name}: {e}"})
+    if not isinstance(args, dict):
+        return json.dumps({"error": f"Arguments for {name} must be a JSON object"})
+    try:
+        return fn(**args)
+    except Exception as e:
+        return json.dumps({"error": f"{name} failed: {type(e).__name__}: {e}"})
 
 
-# Prefetch weather in the background on startup
-threading.Thread(target=_fetch_weather, daemon=True).start()
+
+def prefetch():
+    """Warm the weather cache in the background so the first ask is instant."""
+    threading.Thread(target=_fetch_weather, daemon=True).start()
