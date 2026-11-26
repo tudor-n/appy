@@ -1,0 +1,216 @@
+"""The memory vault on the Mac: plain markdown notes in a local git repo.
+
+Layout under MEMORY_DIR:
+  memory/core.md       bullets about the user; always in the system prompt (≤400 tokens)
+  memory/<slug>.md     "# Title", "> gist", then "- fact" bullets (≤800 tokens)
+  memory/_index.md     generated: "slug | title | gist | updated", newest first
+  logs/                uploaded session logs
+  pending/             consolidator proposals (phase 4)
+  state.json           forgotten lines (and, later, consolidation progress)
+
+Only code writes here, never the model. Every change to memory/ is a commit whose body
+carries the session id; undo is `git revert`. The server serialises calls.
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import math
+import os
+import re
+from pathlib import Path
+
+from .gitrepo import GitError, GitRepo
+
+CORE_CAP = 400
+NOTE_CAP = 800
+INDEX_CAP = 600
+MAX_FORGOTTEN = 20
+MAX_FACT_CHARS = 300
+GIST_CHARS = 120
+CORE = "core"
+GITIGNORE = "logs/\npending/\nstate.json\nmemory/_index.md\n"
+_SLUG = re.compile(r"^[a-z0-9-]{1,64}$")
+
+
+def estimate_tokens(text: str) -> int:
+    return math.ceil(len(text) / 3.2)
+
+
+class VaultError(Exception):
+    """A request the vault refuses; `message` is meant for the model to read."""
+
+    def __init__(self, status: int, message: str, **extra):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.extra = extra
+
+
+def _one_line(text: str) -> str:
+    """Collapse whitespace (so a fact can't add a heading) and drop a leading bullet."""
+    return re.sub(r"\s+", " ", str(text)).strip().lstrip("-*• ").strip()
+
+
+def _match_key(text: str) -> str:
+    return _one_line(text).casefold().rstrip(".! ")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+class Vault:
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.memory = self.root / "memory"
+        self.git = GitRepo(self.root)
+
+    # -- setup -----------------------------------------------------------------------
+
+    def open(self) -> Vault:
+        for d in (self.memory, self.root / "logs", self.root / "pending"):
+            d.mkdir(parents=True, exist_ok=True)
+        self.git.init()
+        if not (self.root / ".gitignore").exists():
+            (self.root / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
+        if not (self.memory / "core.md").exists():
+            (self.memory / "core.md").write_text("", encoding="utf-8")
+        self.git.commit("memory: init")
+        self._rebuild_index()
+        return self
+
+    # -- reading ---------------------------------------------------------------------
+
+    def _path(self, slug: str) -> Path:
+        if not isinstance(slug, str) or not _SLUG.match(slug):
+            raise VaultError(400, f"bad note slug {slug!r}: use lowercase letters, digits and dashes")
+        return self.memory / f"{slug}.md"
+
+    def read(self, slug: str) -> str:
+        path = self._path(slug)
+        if not path.exists():
+            raise VaultError(404, f"there is no memory note called '{slug}'")
+        return path.read_text(encoding="utf-8")
+
+    def context(self) -> dict:
+        """core.md plus the index, capped at INDEX_CAP tokens (newest notes first)."""
+        kept: list[str] = []
+        for line in self._index_lines():
+            if estimate_tokens("\n".join(kept + [line])) > INDEX_CAP:
+                break
+            kept.append(line)
+        return {"core": self.read(CORE).strip(), "index": "\n".join(kept)}
+
+    def forgotten(self) -> list[dict]:
+        return self._state().get("forgotten", [])
+
+    # -- writing ---------------------------------------------------------------------
+
+    def remember(self, text: str, slug: str | None, session: str) -> dict:
+        slug = slug or CORE
+        path = self._path(slug)
+        fact = _one_line(text)
+        if not fact:
+            raise VaultError(400, "there's nothing to remember: the text is empty")
+        if len(fact) > MAX_FACT_CHARS:
+            raise VaultError(400, f"that's too long for one fact (max {MAX_FACT_CHARS} characters)")
+        line = f"- {fact}"
+        old = path.read_text(encoding="utf-8") if path.exists() else None
+        if old is not None and any(_match_key(l) == _match_key(fact) for l in self._bullets(old)):
+            return {"slug": slug, "line": line, "commit": None}
+        base = old if old is not None else f"# {slug.replace('-', ' ').capitalize()}\n> {fact[:GIST_CHARS]}\n"
+        if base and not base.endswith("\n"):
+            base += "\n"
+        new = base + line + "\n"
+        cap = CORE_CAP if slug == CORE else NOTE_CAP
+        if estimate_tokens(new) > cap:
+            where = "core memory" if slug == CORE else f"the note '{slug}'"
+            raise VaultError(409, f"{where} is full ({cap} tokens); nothing was saved")
+        sha = self._commit(path, old, new, f"memory: remember {slug}: {fact[:60]}", session)
+        return {"slug": slug, "line": line, "commit": sha}
+
+    def forget(self, slug: str, text: str, session: str) -> dict:
+        path = self._path(slug)
+        old = self.read(slug)
+        needle = _match_key(text)
+        if not needle:
+            raise VaultError(400, "say which fact to forget: the text is empty")
+        bullets = self._bullets(old)
+        matches = [b for b in bullets if needle in _match_key(b)]
+        if not matches:
+            raise VaultError(404, f"no line in '{slug}' matches that", lines=bullets)
+        if len(matches) > 1:
+            raise VaultError(409, f"more than one line in '{slug}' matches; be more specific",
+                             lines=matches)
+        line = matches[0]
+        lines = old.splitlines(keepends=True)
+        lines.remove(next(l for l in lines if l.rstrip("\n") == line))
+        sha = self._commit(path, old, "".join(lines), f"memory: forget {slug}: {line[2:62]}", session)
+        (self.root / "pending" / f"{slug}.json").unlink(missing_ok=True)
+        state = self._state()
+        forgotten = state.get("forgotten", [])
+        forgotten.append({"slug": slug, "line": line,
+                          "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds")})
+        state["forgotten"] = forgotten[-MAX_FORGOTTEN:]
+        _write_atomic(self.root / "state.json", json.dumps(state, ensure_ascii=False, indent=1))
+        return {"slug": slug, "line": line, "commit": sha}
+
+    def undo(self) -> dict:
+        target = self.git.undo_target()
+        if target is None:
+            return {"undone": None, "commit": None}
+        sha, subject = target
+        try:
+            new = self.git.revert(sha)
+        except GitError as exc:
+            raise VaultError(500, f"undo failed: {exc}")
+        finally:
+            self._rebuild_index()
+        return {"undone": subject, "commit": new}
+
+    # -- internals -------------------------------------------------------------------
+
+    @staticmethod
+    def _bullets(text: str) -> list[str]:
+        return [l for l in text.splitlines() if l.startswith("- ")]
+
+    def _commit(self, path: Path, old: str | None, new: str, subject: str, session: str) -> str:
+        _write_atomic(path, new)
+        try:
+            sha = self.git.commit(subject, f"session={session}", paths=("memory",))
+        except GitError as exc:
+            if old is None:
+                path.unlink(missing_ok=True)
+            else:
+                _write_atomic(path, old)
+            raise VaultError(500, f"saving to memory failed: {exc}")
+        finally:
+            self._rebuild_index()
+        return sha
+
+    def _index_lines(self) -> list[str]:
+        notes = []
+        for path in self.memory.glob("*.md"):
+            slug = path.stem
+            if slug == CORE or not _SLUG.match(slug):
+                continue
+            head = path.read_text(encoding="utf-8").splitlines()[:2] + ["", ""]
+            title = head[0][2:].strip() if head[0].startswith("# ") else slug
+            gist = head[1][2:].strip() if head[1].startswith("> ") else ""
+            mtime = path.stat().st_mtime
+            day = datetime.date.fromtimestamp(mtime).isoformat()
+            notes.append((-mtime, slug, f"{slug} | {title} | {gist} | {day}"))
+        return [line for _, _, line in sorted(notes)]
+
+    def _rebuild_index(self) -> None:
+        lines = self._index_lines()
+        _write_atomic(self.memory / "_index.md", "".join(l + "\n" for l in lines))
+
+    def _state(self) -> dict:
+        try:
+            return json.loads((self.root / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
