@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-from appy_memory.consolidator import Consolidator, Rejected, Worker, rewrite, route
+from appy_memory.consolidator import ROUTE_SCHEMA, Consolidator, Rejected, Worker, rewrite, route
 from appy_memory.llm import LLM, LLMError
 from appy_memory.vault import Vault
 
@@ -23,7 +23,7 @@ from appy_memory.vault import Vault
 class LLMTests(unittest.TestCase):
     def make(self, handler) -> LLM:
         http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://lm/v1")
-        return LLM("http://lm/v1", "gemma", api_key="k", effort="low", http=http)
+        return LLM("http://lm/v1", "gemma", api_key="k", effort="low", http=http)  # reasons
 
     def test_llm_sends_json_schema_and_effort(self):
         seen = {}
@@ -43,7 +43,7 @@ class LLMTests(unittest.TestCase):
         body = seen["body"]
         self.assertEqual(body["model"], "gemma")
         self.assertEqual(body["reasoning_effort"], "low")
-        self.assertEqual((body["temperature"], body["max_tokens"]), (0.1, 400))
+        self.assertEqual((body["temperature"], body["max_tokens"]), (0.1, 3400))
         self.assertEqual(body["response_format"]["type"], "json_schema")
         self.assertEqual(body["response_format"]["json_schema"]["schema"], {"type": "object"})
 
@@ -56,6 +56,23 @@ class LLMTests(unittest.TestCase):
 
         self.assertEqual(self.make(handler).chat([], temperature=0.1, max_tokens=5), ("hi", 0))
         self.assertNotIn("response_format", seen["body"])
+
+    def test_reasoning_gets_headroom_and_empty_output_fails(self):
+        seen = []
+
+        def handler(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""},
+                                                          "finish_reason": "length"}]})
+
+        llm = self.make(handler)
+        with self.assertRaises(LLMError):
+            llm.chat([], temperature=0.1, max_tokens=400)
+        self.assertEqual(seen[0]["max_tokens"], 400 + 3000)  # effort "low" reasons first
+        llm.effort = "none"
+        with self.assertRaises(LLMError):
+            llm.chat([], temperature=0.1, max_tokens=400)
+        self.assertEqual(seen[1]["max_tokens"], 400)
 
     def test_llm_errors(self):
         def boom(request):
@@ -187,6 +204,20 @@ class RouteRewriteTests(unittest.TestCase):
             {"slug": "mark-i-suit", "new": False, "title": "Mark I", "why": "hud"},
             {"slug": "lumen", "new": True, "title": "Lumen", "why": "kpi"},
         ])
+
+    def test_route_schema_has_no_free_text(self):
+        # a free-text field let constrained decoding loop ("wayte-1234567890: ...")
+        props = ROUTE_SCHEMA["properties"]["notes"]["items"]["properties"]
+        self.assertEqual(sorted(props), ["new", "slug", "title"])
+        # LM Studio doesn't enforce "strict": without this Gemma adds fields of its own
+        self.assertIs(ROUTE_SCHEMA["additionalProperties"], False)
+        self.assertIs(ROUTE_SCHEMA["properties"]["notes"]["items"]["additionalProperties"], False)
+
+    def test_route_prompt_counts_hypothetical_project_ideas(self):
+        llm = FakeLLM([routed()])
+        route(llm, "", "", [], "w", existing=set())
+        self.assertIn("hypothetical", llm.prompt())
+        self.assertIn("list the note anyway", llm.prompt())
 
     def test_route_empty_and_bad_json(self):
         self.assertEqual(route(FakeLLM([routed()]), "", "", [], "w", existing=set())[0], [])

@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from .llm import LLM
+from .llm import LLM, EmptyOutput
 from .vault import _SLUG, CORE, CORE_CAP, NOTE_CAP, _gist, estimate_tokens
 
 MAX_ROUTED = 3
@@ -29,13 +29,15 @@ ROUTE_SCHEMA = {
                     "slug": {"type": "string"},
                     "new": {"type": "boolean"},
                     "title": {"type": "string"},
-                    "why": {"type": "string"},
                 },
-                "required": ["slug", "new", "title", "why"],
+                # no free-text field: under the JSON grammar Gemma can loop inside one
+                "required": ["slug", "new", "title"],
+                "additionalProperties": False,  # LM Studio doesn't enforce "strict"
             },
         },
     },
     "required": ["notes"],
+    "additionalProperties": False,
 }
 
 ROUTE_PROMPT = """\
@@ -48,7 +50,11 @@ Read the conversation below (U is Tudor, A is Appy) and decide which notes it sh
 Only durable facts count:
 - who Tudor is, his life, and the people and things around him
 - his standing preferences and routines
-- his projects: their design, parts, numbers, names, decisions and status
+- his projects: their design, parts, numbers, names, ideas, plans, decisions and status. \
+This includes projects that are hypothetical, planned or not built yet.
+A fact counts if Tudor said it, even in passing ("one more idea: ..."). When the \
+conversation shows a memory_remember call, only the text inside that call was saved: other \
+facts Tudor mentioned, even in the same message, still count.
 Ignore small talk, jokes, questions, Appy's own opinions and suggestions, one-off requests, \
 live data (weather, time), and anything the memory already says. Never route a fact that is \
 on the forgotten list.
@@ -57,8 +63,10 @@ Most conversations change nothing, so the usual answer is {{"notes": []}}. Only 
 when the conversation states something new and durable for it.
 Use "core" for facts about Tudor himself. Use an existing note's slug when the fact belongs \
 to its topic. Only for a new project or topic, make a new note: a short slug (lowercase \
-letters, digits and dashes) and a title. Set "new" to true only for a new note. "why" names \
-the new facts in a few words.
+letters, digits and dashes) and a title. Set "new" to true only for a new note.
+You only see each note's one-line gist, not its full text. When Tudor states a fact about a \
+note's topic and you can't tell whether the note already has it, list the note anyway: the \
+next step reads the full note and drops anything already there.
 
 NOTE INDEX (slug | title | gist | updated):
 {index}
@@ -141,8 +149,12 @@ def route(llm: LLM, index: str, core: str, forgotten: list[str], window: str,
     """The notes this window should update, as [{slug, new, title, why}], and tokens used."""
     prompt = ROUTE_PROMPT.format(index=index or "(no notes yet)", core=core or "(empty)",
                                  forgotten=_listed(forgotten), window=window)
-    out, tokens = llm.chat([{"role": "user", "content": prompt}], temperature=0.1,
-                           max_tokens=400, schema=ROUTE_SCHEMA)
+    try:
+        out, tokens = llm.chat([{"role": "user", "content": prompt}], temperature=0.1,
+                               max_tokens=400, schema=ROUTE_SCHEMA)
+    except EmptyOutput as exc:
+        _dump(dump, prompt, [""])
+        raise Rejected(f"route: {exc}")
     _dump(dump, prompt, [out])
     try:
         items = json.loads(out)["notes"]
@@ -231,7 +243,10 @@ def rewrite(llm: LLM, slug: str, current: str | None, title: str, window: str,
     tokens = 0
     try:
         for attempt in range(2):
-            out, used = llm.chat(messages, temperature=0.1, max_tokens=1200)
+            try:
+                out, used = llm.chat(messages, temperature=0.1, max_tokens=1200)
+            except EmptyOutput as exc:
+                raise Rejected(str(exc))
             outputs.append(out)
             tokens += used
             lines, summary = _split_output(out)

@@ -149,7 +149,7 @@ def main() -> None:
     if base_url:
         model = os.getenv("MODEL") or "google/gemma-4-26b-a4b"
         llm = LLM(base_url, model, api_key=os.getenv("API_KEY", "").strip(),
-                  effort=os.getenv("CONSOLIDATOR_EFFORT") or "low")
+                  effort=os.getenv("CONSOLIDATOR_EFFORT") or "none")
         dumps = root / "dumps" if os.getenv("CONSOLIDATOR_DUMP") else None
         consolidator = Consolidator(
             vault, llm, app.state.lock,

@@ -5,12 +5,19 @@ from __future__ import annotations
 import httpx
 
 
+REASONING_HEADROOM = 3000  # with reasoning on, Gemma thinks first, out of the same budget
+
+
 class LLMError(Exception):
     pass
 
 
+class EmptyOutput(LLMError):
+    """The model answered with nothing (e.g. it ran out of tokens while reasoning)."""
+
+
 class LLM:
-    def __init__(self, base_url: str, model: str, api_key: str = "", effort: str = "low",
+    def __init__(self, base_url: str, model: str, api_key: str = "", effort: str = "none",
                  timeout: float = 300, http: httpx.Client | None = None):
         self.model = model
         self.effort = effort
@@ -25,7 +32,7 @@ class LLM:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens + (0 if self.effort == "none" else REASONING_HEADROOM),
             "reasoning_effort": self.effort,
         }
         if schema is not None:
@@ -37,8 +44,11 @@ class LLM:
             r = self.http.post("/chat/completions", json=body, headers=self.headers)
             r.raise_for_status()
             data = r.json()
-            content = data["choices"][0]["message"]["content"] or ""
+            choice = data["choices"][0]
+            content = choice["message"]["content"] or ""
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"{type(exc).__name__}: {exc}") from exc
+        if not content.strip():
+            raise EmptyOutput(f"empty output (finish_reason {choice.get('finish_reason')})")
         usage = data.get("usage") or {}
         return content, int(usage.get("total_tokens") or 0)
