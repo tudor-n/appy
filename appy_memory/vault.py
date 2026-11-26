@@ -173,8 +173,11 @@ class Vault:
         sources = [list(s) for s in old.get("sources", [])]
         if [session, window] not in sources:
             sources.append([session, window])
+        # base_hash is the note the proposal was first built on: building on the pending
+        # text later keeps it, so a note that changed in between still reads as stale
+        base = old["base_hash"] if "base_hash" in old else self.note_hash(slug)
         item = {
-            "slug": slug, "title": title, "base_hash": self.note_hash(slug),
+            "slug": slug, "title": title, "base_hash": base,
             "new_text": new_text, "summary": summary, "sessions": sessions, "sources": sources,
             "created": old.get("created", now), "updated": now,
         }

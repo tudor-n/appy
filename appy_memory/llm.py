@@ -12,6 +12,11 @@ class LLMError(Exception):
     pass
 
 
+class BadRequest(LLMError):
+    """The server refused this request (4xx, e.g. too long for the context): retrying the
+    same request won't help."""
+
+
 class EmptyOutput(LLMError):
     """The model answered with nothing (e.g. it ran out of tokens while reasoning)."""
 
@@ -42,10 +47,12 @@ class LLM:
             }
         try:
             r = self.http.post("/chat/completions", json=body, headers=self.headers)
+            if 400 <= r.status_code < 500 and r.status_code not in (408, 429):
+                raise BadRequest(f"HTTP {r.status_code}: {r.text[:200]}")
             r.raise_for_status()
             data = r.json()
             choice = data["choices"][0]
-            content = choice["message"]["content"] or ""
+            content = str(choice["message"]["content"] or "")
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"{type(exc).__name__}: {exc}") from exc
         if not content.strip():

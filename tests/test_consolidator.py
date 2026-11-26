@@ -74,6 +74,24 @@ class LLMTests(unittest.TestCase):
             llm.chat([], temperature=0.1, max_tokens=400)
         self.assertEqual(seen[1]["max_tokens"], 400)
 
+    def test_client_errors_are_bad_requests(self):
+        from appy_memory.llm import BadRequest
+        for status in (400, 404, 422):
+            with self.subTest(status=status), self.assertRaises(BadRequest):
+                self.make(lambda r, s=status: httpx.Response(s, text="context too long")).chat(
+                    [], temperature=0.1, max_tokens=5)
+        for status in (408, 429, 500, 503):  # worth retrying later: plain LLMError
+            with self.subTest(status=status), self.assertRaises(LLMError) as ctx:
+                self.make(lambda r, s=status: httpx.Response(s)).chat([], temperature=0.1, max_tokens=5)
+            self.assertNotIsInstance(ctx.exception, BadRequest)
+
+    def test_route_and_rewrite_skip_bad_requests(self):
+        from appy_memory.llm import BadRequest
+        with self.assertRaises(Rejected):
+            route(FakeLLM([BadRequest("400 context too long")]), "", "", [], "w", existing=set())
+        with self.assertRaises(Rejected):
+            rewrite(FakeLLM([BadRequest("400")]), "core", "", "Core", "w", [])
+
     def test_llm_errors(self):
         def boom(request):
             raise httpx.ConnectError("down")
@@ -114,10 +132,13 @@ class VaultProposalTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "pending" / "lab.json").read_text()), second)
         self.assertEqual([p["slug"] for p in self.vault.proposals()], ["lab"])
 
-    def test_base_hash_tracks_current_note(self):
+    def test_base_hash_is_the_note_the_proposal_was_first_built_on(self):
         self.assertEqual(self.vault.save_proposal("lab", "Lab", "x", "s", "s1", 0)["base_hash"], "")
         self.vault.remember("The printer is a Prusa.", "lab", "s1")
-        self.assertEqual(self.vault.save_proposal("lab", "Lab", "y", "s", "s1", 1)["base_hash"],
+        # building on it later keeps the old base, so the change since reads as stale
+        self.assertEqual(self.vault.save_proposal("lab", "Lab", "y", "s", "s1", 1)["base_hash"], "")
+        (self.root / "pending" / "lab.json").unlink()
+        self.assertEqual(self.vault.save_proposal("lab", "Lab", "z", "s", "s1", 2)["base_hash"],
                          self.vault.note_hash("lab"))
 
     def test_broken_proposal_file_is_ignored(self):
@@ -483,6 +504,76 @@ class RunTests(unittest.TestCase):
         [item] = self.vault.proposals()
         self.assertEqual(item["summary"], "b")
         self.assertEqual(item["base_hash"], self.vault.note_hash("mark-i-suit"))
+
+    def test_building_on_pending_keeps_its_base_hash(self):
+        # review #1: a remember between two sessions must leave the proposal stale
+        self.vault.store_log(S1, log_bytes(("the helmet HUD will run on a Pi Zero 2 W", "ok")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "")), HUD + "SUMMARY: a"]
+        self.run_quietly()
+        first_base = self.vault.proposal("mark-i-suit")["base_hash"]
+        self.vault.remember("The DMM is a Fluke 87V.", "mark-i-suit", "live")
+        self.vault.store_log(S2, log_bytes(("the OLED is 1.3 inches", "ok")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "")),
+                              HUD + "- The HUD OLED is 1.3 inches.\nSUMMARY: b"]
+        self.run_quietly()
+        item = self.vault.proposal("mark-i-suit")
+        self.assertEqual(item["base_hash"], first_base)
+        self.assertNotEqual(item["base_hash"], self.vault.note_hash("mark-i-suit"))
+
+    def test_forget_during_run_reaches_the_rewrite(self):
+        # review #2: forgotten lines are re-read right before each rewrite
+        self.vault.remember("The PSU is a Riden.", "mark-i-suit", "s0")
+        self.vault.store_log(S1, log_bytes(("the HUD uses a Pi Zero", "ok")))
+        vault = self.vault
+
+        class ForgetsDuringRoute(FakeLLM):
+            def chat(inner, messages, **kw):
+                out = FakeLLM.chat(inner, messages, **kw)
+                if len(inner.calls) == 1:
+                    vault.forget("mark-i-suit", "riden", "live")
+                return out
+
+        self.llm = ForgetsDuringRoute([routed(("mark-i-suit", False, "", "")), HUD + "SUMMARY: a"])
+        self.run_quietly()
+        self.assertIn("- The PSU is a Riden.", self.llm.prompt(1).split("CURRENT NOTE")[0])
+
+    def test_note_deleted_during_run_is_not_recreated(self):
+        self.vault.store_log(S1, log_bytes(("the HUD uses a Pi Zero", "ok")))
+        vault = self.vault
+
+        class DeletesDuringRoute(FakeLLM):
+            def chat(inner, messages, **kw):
+                out = FakeLLM.chat(inner, messages, **kw)
+                if len(inner.calls) == 1:  # forgetting the only fact deletes the note
+                    vault.forget("mark-i-suit", "bldc", "live")
+                return out
+
+        self.llm = DeletesDuringRoute([routed(("mark-i-suit", False, "", ""))])
+        stats, _ = self.run_quietly()
+        self.assertEqual(self.vault.proposals(), [])
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertIn("deleted", stats[0]["rejected"][0])
+
+    def test_window_that_keeps_crashing_is_skipped(self):
+        # review #3: a bug (not an LLM outage) in one window must not block every session
+        self.vault.store_log(S1, log_bytes(("hello", "hi")))
+        self.vault.store_log(S2, log_bytes(("hello again", "hi")))
+        c = self.consolidator()
+        real = c._window
+        calls = []
+
+        def broken(sid, k, window, stats):
+            calls.append(sid)
+            if sid == S1:
+                raise RuntimeError("a bug")
+            return real(sid, k, window, stats)
+
+        c._window = broken
+        self.llm.responses = [routed()]
+        stats, out = self.run_quietly(c)
+        self.assertTrue(self.vault.session_state(S1)["done"])
+        self.assertTrue(self.vault.session_state(S2)["done"])
+        self.assertIn("RuntimeError", out)
 
     def test_stats_line_printed(self):
         self.vault.store_log(S1, log_bytes(("the HUD uses a Pi Zero", "ok")))

@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from .llm import LLM, EmptyOutput
+from .llm import LLM, BadRequest, EmptyOutput, LLMError
 from .vault import _SLUG, CORE, CORE_CAP, NOTE_CAP, _gist, estimate_tokens
 
 MAX_ROUTED = 3
@@ -152,7 +152,7 @@ def route(llm: LLM, index: str, core: str, forgotten: list[str], window: str,
     try:
         out, tokens = llm.chat([{"role": "user", "content": prompt}], temperature=0.1,
                                max_tokens=400, schema=ROUTE_SCHEMA)
-    except EmptyOutput as exc:
+    except (EmptyOutput, BadRequest) as exc:  # retrying the same request won't help
         _dump(dump, prompt, [""])
         raise Rejected(f"route: {exc}")
     _dump(dump, prompt, [out])
@@ -245,7 +245,7 @@ def rewrite(llm: LLM, slug: str, current: str | None, title: str, window: str,
         for attempt in range(2):
             try:
                 out, used = llm.chat(messages, temperature=0.1, max_tokens=1200)
-            except EmptyOutput as exc:
+            except (EmptyOutput, BadRequest) as exc:
                 raise Rejected(str(exc))
             outputs.append(out)
             tokens += used
@@ -308,7 +308,18 @@ class Consolidator:
                 with self.lock:
                     self.vault.set_session_state(sid, 0, 0, True)
             for k in range(first, len(wins)):
-                self._window(sid, k, wins[k], stats)
+                try:
+                    self._window(sid, k, wins[k], stats)
+                except LLMError:
+                    raise  # the model is unreachable: stop here, retry later
+                except Exception as exc:
+                    # A bug in this window: skip it rather than retry it (and block every
+                    # later session) forever
+                    import traceback
+
+                    print(f"[consolidator] {sid} window {k} crashed:\n{traceback.format_exc()}",
+                          flush=True)
+                    stats["rejected"].append(f"window {k} crashed: {type(exc).__name__}: {exc}")
                 with self.lock:
                     self.vault.set_session_state(sid, len(wins), k + 1, k + 1 == len(wins))
         finally:
@@ -350,16 +361,19 @@ class Consolidator:
         stats["tokens"] += used
         for note in notes:
             stats["routed"].append(note["slug"])
-            self._note(sid, k, window, note, forgotten, stats)
+            self._note(sid, k, window, note, stats)
 
-    def _note(self, sid: str, k: int, window: str, note: dict, forgotten: list[str],
-              stats: dict) -> None:
+    def _note(self, sid: str, k: int, window: str, note: dict, stats: dict) -> None:
         slug = note["slug"]
         for attempt in range(2):
             with self.lock:
                 pending = self.vault.proposal(slug)
                 current = pending["new_text"] if pending else self.vault.note_text(slug)
                 seen = (self.vault.note_hash(slug), (pending or {}).get("updated"))
+                forgotten = self.vault.forgotten_lines()  # a forget may have just happened
+            if not note["new"] and slug != CORE and current is None:
+                stats["rejected"].append(f"{slug}: note was deleted during the run")
+                return
             title = note["title"]
             if pending:
                 title = pending.get("title") or title
