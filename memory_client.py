@@ -40,8 +40,12 @@ class MemoryClient:
         if not url:
             return None
         token = os.getenv("MEMORY_TOKEN", "").strip()
-        http = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"},
-                            timeout=TIMEOUT)
+        try:
+            http = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"},
+                                timeout=TIMEOUT)
+        except Exception as exc:  # a typo in .env must not stop Appy from booting
+            print(f"[memory] off: bad MEMORY_URL or MEMORY_TOKEN ({type(exc).__name__}: {exc})")
+            return None
         return cls(http, session_id)
 
     def context(self) -> dict | None:
@@ -50,7 +54,7 @@ class MemoryClient:
             r.raise_for_status()
             data = r.json()
             return {"core": str(data.get("core", "")), "index": str(data.get("index", ""))}
-        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+        except Exception as exc:  # never raise into startup
             print(f"[memory] unreachable ({type(exc).__name__}): starting without long-term memory")
             return None
 
@@ -70,8 +74,8 @@ class MemoryClient:
         try:
             r = self.http.request(method, path, json=body)
             data = r.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            print(f"[memory] {method} {path} failed: {type(exc).__name__}: {exc}")
+        except Exception as exc:  # e.g. httpx.InvalidURL for a slug with control characters
+            print(f"[memory] {method} {path!r} failed: {type(exc).__name__}: {exc}")
             return UNREACHABLE
         if r.status_code >= 500 and "error" not in data:
             return UNREACHABLE
@@ -88,7 +92,7 @@ class MemoryClient:
             return False
         try:
             r = self.http.post(f"/logs/{path.stem}", content=data, timeout=UPLOAD_TIMEOUT)
-        except httpx.HTTPError as exc:
+        except Exception as exc:
             print(f"[memory] log {path.name} not uploaded ({type(exc).__name__})")
             return False
         if not r.is_success:

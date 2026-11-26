@@ -132,5 +132,16 @@ class MemoryClientTests(unittest.TestCase):
         self.assertEqual(str(memory.http.base_url).rstrip("/"), "http://h:1")
 
 
+    def test_bad_config_means_memory_off(self):
+        # a typo in .env must not stop Appy from booting
+        for env in ({"MEMORY_URL": "http://h:notaport", "MEMORY_TOKEN": "k"},
+                    {"MEMORY_URL": "http://h:1", "MEMORY_TOKEN": "t\u00f6k"}):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertIsNone(MemoryClient.from_env(SID))
+
+    def test_odd_slug_never_raises(self):
+        self.assertIn("error", json.loads(down_client().read("a\nb")))
+        self.assertIn("error", json.loads(self.memory.read("a\x00b")))
+
 if __name__ == "__main__":
     unittest.main()

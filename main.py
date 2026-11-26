@@ -90,7 +90,7 @@ def main():
     if context is not None:
         notes = len(context["index"].splitlines())
         print(f"[memory] core ~{math.ceil(len(context['core']) / 3.2)} tokens, {notes} notes")
-    elif memory is None:
+    elif not os.getenv("MEMORY_URL", "").strip():
         print("[memory] off (MEMORY_URL not set)")
     prompt = system_prompt(load_system_prompt(), context)
     if os.getenv("APPY_DUMP_PROMPT"):  # exactly what the model gets as its system prompt
