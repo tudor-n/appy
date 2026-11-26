@@ -68,6 +68,8 @@ impl App {
                 self.ui.card.set(&report);
                 self.show_card(&mut s, now);
             }
+            // The review tray and commit chips arrive with memory.rs
+            BackendEvent::MemoryProposals { .. } | BackendEvent::MemoryCommitted { .. } => {}
         }
 
         self.sync_pill(&s);

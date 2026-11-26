@@ -23,6 +23,8 @@ Python and Rust lists of expressions, efforts or states drift apart.
 | `response`   | `text`, `expression` (optional)          | A reply bubble. `expression` sets the mascot's face. |
 | `effort`     | `value`                                  | Current reasoning effort; sent on connect and after every change so all UIs agree. |
 | `widget`     | `widget` (kind) + that kind's fields     | A card Appy pops out next to himself. Kinds: `weather` with `city`, `temp_c` (the high, for a forecast day), optional `low_c` and `when` (short weekday, forecast days only), `condition`, `icon` (`clear`, `clear_night`, `partly_cloudy`, `partly_cloudy_night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`, `thunder`; unknown names draw as a cloud). Sent when `get_weather` runs; the card flies back into Appy after ~14s or when clicked. |
+| `memory_proposals` | `items`: list of `{slug, title, summary, before, after, stale, error}` | Everything the consolidator learned that waits for review (the whole list each time; empty means none). `before`/`after` are the full note; `stale` means the note changed and the proposal is being redone; `error` is why the last decision on it failed. Sent on connect (replayed like `status`), after every decision, and when the 60s poll sees a change. The overlay shows a collapsed "N memory updates" card above the input. |
+| `memory_committed` | `kind` (`remember`, `forget`, `approved`, `edited`, `undo`), `summary` | Something was just written to long-term memory, or undone. The overlay adds a chip to the chat ("Remembered: …", "Saved: …", "Undid: …"); all but `undo` have an Undo button. |
 
 **States:** `idle`, `listening`, `booting`, `thinking`, `compacting`, `speaking`.
 On the Python side `StatusTracker` (`status.py`) is the only thing that sends
@@ -45,6 +47,8 @@ that connects mid-boot still shows "loading…" and the mascot's loading bar.
 | `user_text`  | `text`   | A typed message. Queued like a spoken one. |
 | `set_effort` | `effort` | One of `none`, `low`, `medium`, `high` (passed to the LLM as `reasoning_effort`). |
 | `compact`    | —        | The input pill's circle button: fold everything but the latest exchange into the session summary now. Queued like a turn, so it runs after the current answer; the UI follows the `compacting` status. |
+| `memory_decision` | `slug`, `decision` (`accept`, `deny`, `edit`), `text` (edit only: the full note) | A button on the memory card. The backend forwards it to the memory service; code applies it, never the LLM. |
+| `memory_undo` | — | A chip's Undo button: revert the newest memory change that hasn't been undone. Pressing again goes further back. |
 
 ## Panel pill bridge (HTTP, 127.0.0.1:8002)
 

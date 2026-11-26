@@ -118,6 +118,53 @@ pub enum BackendEvent {
     },
     /// A card for Appy to pop out next to himself.
     Widget(Widget),
+    /// What the consolidator learned and is waiting for review (all of it; empty = none).
+    MemoryProposals {
+        items: Vec<Proposal>,
+    },
+    /// Something was just written to long-term memory (or undone): a chat chip.
+    MemoryCommitted {
+        kind: MemoryKind,
+        summary: String,
+    },
+}
+
+/// One note's pending update: the whole note before and after.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Proposal {
+    pub slug: String,
+    pub title: String,
+    pub summary: String,
+    pub before: String,
+    pub after: String,
+    /// The note changed since this was written; it's being redone against the new one.
+    #[serde(default)]
+    pub stale: bool,
+    /// Why the last decision on it failed (e.g. an edit that broke the note's format).
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    Remember,
+    Forget,
+    Approved,
+    Edited,
+    Undo,
+    /// A kind newer than this UI: still shown, without an Undo button.
+    #[serde(other)]
+    Other,
+}
+
+/// What Tudor decided about a proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    Accept,
+    Deny,
+    Edit,
 }
 
 /// Cards the backend can ask the UI to show, tagged by `widget`.
@@ -169,6 +216,15 @@ pub enum ClientEvent {
     SetEffort { effort: Effort },
     /// Fold the conversation so far into a summary now (the input pill's circle button).
     Compact,
+    /// Accept, deny or edit (with the full edited note in `text`) one proposal.
+    MemoryDecision {
+        slug: String,
+        decision: Decision,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// Undo the newest memory change.
+    MemoryUndo,
 }
 
 /// Snapshot served to the panel pill at `GET /state`.
@@ -295,6 +351,69 @@ mod tests {
         assert_eq!(json, r#"{"type":"user_text","text":"yo"}"#);
         let json = serde_json::to_string(&ClientEvent::Compact).unwrap();
         assert_eq!(json, r#"{"type":"compact"}"#);
+    }
+
+    #[test]
+    fn parses_memory_events() {
+        let ev: BackendEvent = serde_json::from_str(
+            r##"{"type":"memory_proposals","items":[{"slug":"lab","title":"Lab","summary":"added PSU","before":"# Lab\n","after":"# Lab\n- PSU\n","stale":true,"error":"nope"},{"slug":"core","title":"Core","summary":"s","before":"","after":"- a\n"}]}"##,
+        )
+        .unwrap();
+        let BackendEvent::MemoryProposals { items } = ev else {
+            panic!("wrong variant: {ev:?}");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!((items[0].slug.as_str(), items[0].stale), ("lab", true));
+        assert_eq!(items[0].error.as_deref(), Some("nope"));
+        assert_eq!((items[1].stale, items[1].error.is_none()), (false, true));
+
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"memory_committed","kind":"approved","summary":"added the HUD"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            ev,
+            BackendEvent::MemoryCommitted {
+                kind: MemoryKind::Approved,
+                ..
+            }
+        ));
+        let ev: BackendEvent =
+            serde_json::from_str(r#"{"type":"memory_committed","kind":"teleported","summary":"x"}"#)
+                .unwrap();
+        assert!(matches!(
+            ev,
+            BackendEvent::MemoryCommitted {
+                kind: MemoryKind::Other,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn serializes_memory_client_events() {
+        let json = serde_json::to_string(&ClientEvent::MemoryDecision {
+            slug: "lab".into(),
+            decision: Decision::Accept,
+            text: None,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"memory_decision","slug":"lab","decision":"accept"}"#
+        );
+        let json = serde_json::to_string(&ClientEvent::MemoryDecision {
+            slug: "lab".into(),
+            decision: Decision::Edit,
+            text: Some("# Lab\n".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r##"{"type":"memory_decision","slug":"lab","decision":"edit","text":"# Lab\n"}"##
+        );
+        let json = serde_json::to_string(&ClientEvent::MemoryUndo).unwrap();
+        assert_eq!(json, r#"{"type":"memory_undo"}"#);
     }
 
     #[test]
