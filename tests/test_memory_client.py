@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from appy_memory.server import create_app
 from appy_memory.vault import Vault
 from memory_client import MEMORY_RULES, MemoryClient, system_prompt
+from session_log import SessionLogger
 
 SID = "2026-11-26_153012"
 UNREACHABLE = {"error": "long-term memory is unreachable right now"}
@@ -105,6 +106,15 @@ class MemoryClientTests(unittest.TestCase):
         self.log_file("2026-11-25_090000.jsonl")
         self.assertEqual(self.memory.upload_leftovers(self.logs, skip=self.logs / "x"), 1)
         self.assertEqual([p.name for p in self.logs.iterdir()], [refused.name])
+
+    def test_live_log_of_another_instance_is_skipped(self):
+        # a second Appy must not upload (and delete) the log a running one is writing
+        other = SessionLogger(self.logs)
+        other.start(model="m", effort="none")
+        self.assertEqual(self.memory.upload_leftovers(self.logs, skip=self.logs / "mine.jsonl"), 0)
+        self.assertTrue(other.path.exists())
+        other.end(reason="quit")  # closing the log releases it
+        self.assertEqual(self.memory.upload_leftovers(self.logs, skip=self.logs / "mine.jsonl"), 1)
 
     def test_upload_leftovers_with_service_down(self):
         self.log_file("2026-11-24_090000.jsonl")

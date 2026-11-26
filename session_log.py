@@ -4,6 +4,7 @@ One JSON object per line, flushed after every write, so a crash (even kill -9) l
 a valid file with everything up to the last event. Logging must never break a turn:
 the first write error disables the logger and later calls do nothing.
 """
+import fcntl
 import json
 import os
 import threading
@@ -82,6 +83,12 @@ class SessionLogger:
                 if self._file is None:
                     self.path.parent.mkdir(parents=True, exist_ok=True)
                     self._file = open(self.path, "a", encoding="utf-8")
+                    # Held until the log is closed (or the process dies), so another
+                    # Appy's leftover upload can tell this log is still being written
+                    try:
+                        fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        pass
                 self._file.write(json.dumps(event, ensure_ascii=False) + "\n")
                 self._file.flush()
             except OSError as exc:

@@ -4,6 +4,7 @@ Nothing here may break startup or a turn. When the service can't be reached,
 `context()` returns None (Appy starts with prompt.txt alone), the tools return an error
 the model can relay, and logs stay on disk to be uploaded at the next start.
 """
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,18 @@ def system_prompt(base: str, context: dict | None) -> str:
     index = (context.get("index") or "").strip() or "(none yet)"
     return (f"{base}\n\n[Long-term memory]\n{core}\n\n[Notes you can read]\n{index}"
             f"\n\n{MEMORY_RULES}")
+
+
+def _in_use(path: Path) -> bool:
+    """True if a running Appy still has this log open (SessionLogger holds a flock)."""
+    try:
+        with open(path, "rb") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        pass
+    return False
 
 
 class MemoryClient:
@@ -112,7 +125,7 @@ class MemoryClient:
         except OSError:
             return 0
         for path in paths:
-            if path == Path(skip):
+            if path == Path(skip) or _in_use(path):
                 continue
             if self.upload_log(path):  # a failed one stays on disk for the next start
                 uploaded += 1
