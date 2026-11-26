@@ -35,11 +35,10 @@ def rust_enum(name: str) -> dict[str, str]:
     return variants
 
 
-def rust_struct_variant_fields(enum: str, variant: str) -> set[str]:
+def rust_struct_fields(name: str) -> set[str]:
     src = PROTOCOL_RS.read_text()
-    block = re.search(rf"pub enum {enum} \{{(.*?)\n\}}", src, re.DOTALL).group(1)
-    fields = re.search(rf"{variant} \{{(.*?)\}}", block, re.DOTALL).group(1)
-    return set(re.findall(r"(\w+):", fields))
+    block = re.search(rf"pub struct {name} \{{(.*?)\n\}}", src, re.DOTALL).group(1)
+    return set(re.findall(r"pub (\w+):", block))
 
 
 class ProtocolDriftTests(unittest.TestCase):
@@ -48,11 +47,15 @@ class ProtocolDriftTests(unittest.TestCase):
 
         import tools
 
-        card = tools.weather_card(json.dumps({
+        fields = rust_struct_fields("WeatherReport")
+        now = tools.weather_card(json.dumps({
             "city": "X", "current": {"temp_c": 1, "condition": "c", "code": 0, "is_day": True},
         }))
-        self.assertEqual(card.pop("widget"), "weather")
-        self.assertEqual(set(card), rust_struct_variant_fields("Widget", "Weather"))
+        forecast = tools.weather_card(json.dumps({"city": "X", "forecast": {
+            "weekday": "Saturday", "high_c": 5, "low_c": 0, "condition": "c", "code": 61}}))
+        for card in (now, forecast):
+            self.assertEqual(card.pop("widget"), "weather")
+            self.assertEqual(set(card), fields)
 
     def test_weather_icons_are_known_to_ui(self):
         import tools

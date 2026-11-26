@@ -64,13 +64,8 @@ impl App {
                 s.effort = value;
                 self.ui.input.effort.show(value);
             }
-            BackendEvent::Widget(Widget::Weather {
-                city,
-                temp_c,
-                condition,
-                icon,
-            }) => {
-                self.ui.card.set(icon, temp_c, &city, &condition);
+            BackendEvent::Widget(Widget::Weather(report)) => {
+                self.ui.card.set(&report);
                 self.show_card(&mut s, now);
             }
         }

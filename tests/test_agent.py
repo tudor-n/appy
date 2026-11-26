@@ -192,6 +192,23 @@ class AgentTurnTests(unittest.TestCase):
         run_quietly(agent, "weather?")
         self.assertEqual(client.calls[1]["messages"][-1]["content"], '{"temp_c":3}')
 
+    def test_stale_tool_results_are_forgotten_after_the_turn(self):
+        # Regression: a second weather question was answered from the first call's data
+        # in the history, so no tool call and no weather card.
+        agent, client, _, _ = make_agent([
+            [tool_chunk(0, "c1", "get_weather", "{}"), tool_chunk(1, "c2", "other_tool", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ], run_tool=lambda n, a: f'{{"from":"{n}"}}')
+        agent.stale_tools = frozenset({"get_weather"})
+        run_quietly(agent, "weather?")
+
+        # The follow-up round within the same turn still saw the real result...
+        self.assertIn('{"from":"get_weather"}', client.calls[1]["messages"][-2]["content"])
+        # ...but afterwards it's replaced, while other tools' results are kept
+        tool_msgs = {m["tool_call_id"]: m["content"] for m in agent.messages if m["role"] == "tool"}
+        self.assertIn("call get_weather again", tool_msgs["c1"])
+        self.assertTrue(tool_msgs["c2"].startswith('{"from":"other_tool"}'))
+
     def test_tool_results_reach_the_hook(self):
         seen = []
         agent, _, _, _ = make_agent([

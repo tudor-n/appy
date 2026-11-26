@@ -78,6 +78,7 @@ def main():
         ui=ui,
         status=status,
         on_tool_result=show_tool_card,
+        stale_tools=tools.STALE_TOOLS,
     )
 
     def _voice_forwarder():

@@ -33,6 +33,23 @@ def prune_old_tool_outputs(messages: list[dict], keep_recent: int = KEEP_RECENT_
             msg["content"] = "[pruned]"
 
 
+def forget_stale_results(messages: list[dict], stale_tools: frozenset[str]):
+    """Replace results of tools whose data goes stale (e.g. weather) with a note to call
+    them again. Measured against Gemma: with the old data still in the history, a
+    repeat question was answered from it 0/4 times via the tool; with it removed, 4/4."""
+    if not stale_tools:
+        return
+    names = {
+        call["id"]: call["function"]["name"]
+        for msg in messages
+        for call in msg.get("tool_calls") or ()
+    }
+    for msg in messages:
+        name = names.get(msg.get("tool_call_id"))
+        if msg.get("role") == "tool" and name in stale_tools:
+            msg["content"] = f"[old {name} result removed: call {name} again for fresh data]"
+
+
 def compact_history(
     messages: list[dict],
     max_messages: int = HISTORY_MAX_MESSAGES,
@@ -95,9 +112,14 @@ class Agent:
         tools: list[dict] = TOOL_SCHEMAS,
         run_tool=default_run_tool,
         on_tool_result=None,
+        stale_tools: frozenset[str] = frozenset(),
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
-        UI can show a card for it. Its errors are logged, never fatal to the turn."""
+        UI can show a card for it. Its errors are logged, never fatal to the turn.
+
+        Results of `stale_tools` are removed from the history once the turn is over, so
+        the model calls them again next time instead of reusing old data (which also
+        means their UI card shows up again)."""
         self.client = client
         self.model = model
         self.temperature = temperature
@@ -107,6 +129,7 @@ class Agent:
         self.tools = tools
         self.run_tool = run_tool
         self.on_tool_result = on_tool_result
+        self.stale_tools = stale_tools
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
     def preheat(self):
@@ -141,6 +164,7 @@ class Agent:
             self.ui.response(describe_error(exc), "skeptical")
         finally:
             self.status.set_phase("idle")
+            forget_stale_results(self.messages[checkpoint:], self.stale_tools)
             prune_old_tool_outputs(self.messages)
 
     def _run_rounds(self, effort: str, speak_aloud: bool):

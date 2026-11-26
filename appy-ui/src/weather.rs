@@ -12,7 +12,7 @@ use gtk4::cairo::{Context, LineCap, Operator};
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, DrawingArea, Label, Orientation};
 
-use crate::protocol::WeatherIcon;
+use crate::protocol::{WeatherIcon, WeatherReport};
 
 /// Card edge length in px (it's square).
 pub const CARD_SIZE: f64 = 104.0;
@@ -48,7 +48,7 @@ impl WeatherCard {
         temp.add_css_class("weather-temp");
         let place = Label::builder()
             .ellipsize(gtk4::pango::EllipsizeMode::End)
-            .max_width_chars(12)
+            .max_width_chars(14)
             .build();
         place.add_css_class("weather-place");
 
@@ -75,15 +75,22 @@ impl WeatherCard {
         }
     }
 
-    pub fn set(&self, icon: WeatherIcon, temp_c: f64, city: &str, condition: &str) {
-        self.current_icon.set(icon);
+    pub fn set(&self, report: &WeatherReport) {
+        self.current_icon.set(report.icon);
         self.icon.queue_draw();
-        self.temp.set_text(&format_temp(temp_c));
-        self.place.set_text(city);
-        self.root.set_tooltip_text(Some(&format!(
-            "{city}: {condition}, {}",
-            format_temp(temp_c)
-        )));
+        self.temp
+            .set_markup(&temp_markup(report.temp_c, report.low_c));
+        let place = match &report.when {
+            Some(day) => format!("{day} · {}", report.city),
+            None => report.city.clone(),
+        };
+        self.place.set_text(&place);
+        let temps = match report.low_c {
+            Some(low) => format!("{} / {}", format_temp(report.temp_c), format_temp(low)),
+            None => format_temp(report.temp_c),
+        };
+        self.root
+            .set_tooltip_text(Some(&format!("{place}: {}, {temps}", report.condition)));
     }
 
     /// Make the card present but still scaled down; adding the "shown" class a frame
@@ -105,6 +112,18 @@ impl WeatherCard {
     /// On screen and not on its way out: it should catch the pointer.
     pub fn is_present(&self) -> bool {
         self.root.is_visible() && self.root.has_css_class("shown")
+    }
+}
+
+/// "21°" for now; "8° 2°" (low in gray, smaller) for a forecast day.
+fn temp_markup(temp_c: f64, low_c: Option<f64>) -> String {
+    match low_c {
+        Some(low) => format!(
+            "{}<span size=\"62%\" foreground=\"#8e8e93\"> {}</span>",
+            format_temp(temp_c),
+            format_temp(low)
+        ),
+        None => format_temp(temp_c),
     }
 }
 
@@ -271,5 +290,8 @@ mod tests {
         assert_eq!(format_temp(21.4), "21°");
         assert_eq!(format_temp(-2.6), "-3°");
         assert_eq!(format_temp(-0.3), "0°");
+        assert_eq!(temp_markup(21.4, None), "21°");
+        assert!(temp_markup(5.0, Some(-0.4)).starts_with("5°<span"));
+        assert!(temp_markup(5.0, Some(-0.4)).contains("> 0°</span>"));
     }
 }

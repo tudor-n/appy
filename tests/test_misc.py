@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 
 import tools
@@ -87,19 +88,75 @@ class ActivityCounterTests(unittest.TestCase):
         self.assertFalse(c.active)
 
 
+# Shaped like Open-Meteo's response (what tools._fetch_weather caches)
+FAKE_OPEN_METEO = {
+    "current": {"temperature_2m": 3.7, "apparent_temperature": 1.0, "weather_code": 61,
+                "wind_speed_10m": 9.0, "is_day": 1},
+    "hourly": {"time": ["2026-11-26T13:00"], "temperature_2m": [4.0], "weather_code": [61],
+               "precipitation_probability": [40]},
+    "daily": {
+        "time": [f"2026-11-{d}" for d in range(26, 33)],
+        "weather_code": [61, 3, 61, 0, 2, 71, 95],
+        "temperature_2m_max": [4.8, 6.0, 5.0, 7.5, 8.0, 1.0, 9.0],
+        "temperature_2m_min": [1.0, 2.0, -0.4, 0.5, 1.5, -3.0, 4.0],
+        "precipitation_probability_max": [80, 20, 45, 0, 10, 60, 70],
+    },
+}
+
+
+class WeatherToolTests(unittest.TestCase):
+    def setUp(self):
+        self._cache = dict(tools._weather_cache)
+        tools._weather_cache.update(data=FAKE_OPEN_METEO, ts=time.monotonic())
+
+    def tearDown(self):
+        tools._weather_cache.clear()
+        tools._weather_cache.update(self._cache)
+
+    def test_today_has_current_conditions_but_no_other_days(self):
+        data = json.loads(tools.get_weather())
+        self.assertEqual(data["current"]["temp_c"], 3.7)
+        self.assertEqual(data["today"]["weekday"], "Thursday")
+        # Other days are left out, so asking about them means calling again (and
+        # that call is what shows the weather card)
+        self.assertNotIn("forecast", data)
+        self.assertNotIn("6.0", json.dumps(data["today"]))
+
+    def test_forecast_day(self):
+        data = json.loads(tools.run_tool("get_weather", '{"day": 2}'))
+        self.assertEqual(data["forecast"]["weekday"], "Saturday")
+        self.assertEqual((data["forecast"]["high_c"], data["forecast"]["low_c"]), (5.0, -0.4))
+
+    def test_bad_days(self):
+        self.assertIn("up to 6 days", tools.run_tool("get_weather", '{"day": 7}'))
+        self.assertIn("up to 6 days", tools.run_tool("get_weather", '{"day": -1}'))
+        self.assertIn("must be a number", tools.run_tool("get_weather", '{"day": "soon"}'))
+        self.assertIn('"day":1', tools.run_tool("get_weather", '{"day": "1"}'))
+
+
 class WeatherCardTests(unittest.TestCase):
     def result(self, **current):
         cur = {"temp_c": 21.4, "condition": "clear sky", "code": 0, "is_day": True, **current}
         return json.dumps({"city": "Sibiu", "current": cur})
 
-    def test_day_card(self):
+    def test_card_for_right_now(self):
         self.assertEqual(tools.weather_card(self.result()), {
             "widget": "weather",
             "city": "Sibiu",
             "temp_c": 21.4,
+            "low_c": None,
+            "when": None,
             "condition": "clear sky",
             "icon": "clear",
         })
+
+    def test_card_for_a_forecast_day(self):
+        result = json.dumps({"city": "Sibiu", "day": 2, "forecast": {
+            "weekday": "Saturday", "high_c": 5.0, "low_c": -0.4,
+            "condition": "light rain", "code": 61}})
+        card = tools.weather_card(result)
+        self.assertEqual((card["temp_c"], card["low_c"], card["when"]), (5.0, -0.4, "Sat"))
+        self.assertEqual(card["icon"], "rain")  # forecasts use the daytime icon
 
     def test_night_and_unknown_codes(self):
         self.assertEqual(tools.weather_card(self.result(is_day=False))["icon"], "clear_night")
