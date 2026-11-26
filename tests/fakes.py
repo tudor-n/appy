@@ -32,6 +32,8 @@ class FakeClient:
         script = self.scripts.pop(0)
         if isinstance(script, Exception):
             raise script
+        if not isinstance(script, list):
+            return script  # a non-streamed response, e.g. completion(...)
         return iter(script)
 
 
@@ -73,3 +75,8 @@ def usage_chunk(prompt_tokens: int, completion_tokens: int):
     """The final usage-only chunk a server sends when stream_options.include_usage is set."""
     usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
     return SimpleNamespace(choices=[], usage=usage)
+
+
+def completion(text: str):
+    """A non-streamed chat completion response."""
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
