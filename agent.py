@@ -218,17 +218,21 @@ class Agent:
             drop_stale_tool_exchanges(self.messages, checkpoint, self.stale_tools)
             prune_old_tool_outputs(self.messages)
 
-    def maybe_compact(self) -> bool:
+    def maybe_compact(self, force: bool = False) -> bool:
         """Between turns: if the conversation has grown past `compact_at` tokens, fold the
         older turns into the session summary. Returns True if it compacted.
+
+        `force` (the UI's compact button) compacts regardless of size and folds
+        everything except the latest exchange.
 
         Old tool results are already pruned at the end of every turn, so this goes
         straight to summarising."""
         tokens = self.context_tokens()
-        if tokens < self.compact_at:
+        if tokens < self.compact_at and not force:
             return False
-        if split(self.messages, self.tail_budget) is None:
-            return False  # the recent turns alone are over the threshold: nothing to fold
+        tail_budget = 0 if force else self.tail_budget  # 0: keep just the last turn
+        if split(self.messages, tail_budget) is None:
+            return False  # nothing older than the kept turns to fold
         self.status.set_phase("compacting")
         self._compactions += 1
         dump = None
@@ -237,7 +241,7 @@ class Agent:
         print(f"[compacting]{f' -> {dump}' if dump else ''}")
         try:
             summary = compact(
-                self.client, self.model, self.messages, self.tail_budget, self.summary_max,
+                self.client, self.model, self.messages, tail_budget, self.summary_max,
                 drop_on_failure=tokens >= self.context_limit - TURN_RESERVE,
                 dump_path=dump,
             )

@@ -451,6 +451,27 @@ class MaybeCompactTests(unittest.TestCase):
                 agent.maybe_compact()
             self.assertTrue((Path(tmp) / "2026-11-26_153012.compaction-1.txt").exists())
 
+    def test_manual_compaction_ignores_the_threshold(self):
+        agent, client, _, ui = make_agent(
+            [[text_chunk("Okay.")], completion("FACTS: x")], compact_at=9500,
+        )
+        prefill(agent, 3, size=100)
+        run_quietly(agent, "latest")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(agent.maybe_compact(force=True))
+        # Everything but the latest exchange is folded into the summary
+        self.assertEqual([m["role"] for m in agent.messages],
+                         ["system", "user", "assistant", "user", "assistant"])
+        self.assertEqual(agent.messages[3]["content"], "latest")
+        self.assertEqual(statuses(ui)[-2:], ["compacting", "idle"])
+
+    def test_manual_compaction_with_a_single_turn_does_nothing(self):
+        agent, client, _, ui = make_agent([[text_chunk("Okay.")]])
+        run_quietly(agent, "hi")
+        self.assertFalse(agent.maybe_compact(force=True))
+        self.assertEqual(len(client.calls), 1)
+        self.assertNotIn("compacting", statuses(ui))
+
     def test_nothing_to_fold_means_no_pill(self):
         agent, client, _, ui = make_agent([[text_chunk("Okay.")]], compact_at=10)
         run_quietly(agent, "hi")

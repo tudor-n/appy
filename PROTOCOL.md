@@ -42,6 +42,7 @@ discarded as noise), so a late end-of-audio or end-of-compaction can't cancel "l
 |--------------|----------|---------|
 | `user_text`  | `text`   | A typed message. Queued like a spoken one. |
 | `set_effort` | `effort` | One of `none`, `low`, `medium`, `high` (passed to the LLM as `reasoning_effort`). |
+| `compact`    | —        | The input pill's circle button: fold everything but the latest exchange into the session summary now. Queued like a turn, so it runs after the current answer; the UI follows the `compacting` status. |
 
 ## Panel pill bridge (HTTP, 127.0.0.1:8002)
 

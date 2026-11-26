@@ -1,4 +1,5 @@
-//! The message input pill: a growing multi-line text field plus the effort picker.
+//! The message input pill: a growing multi-line text field, a small "compact now"
+//! circle and the effort picker.
 
 use gtk4::prelude::*;
 use gtk4::{
@@ -16,6 +17,7 @@ pub struct ChatInput {
     pub view: TextView,
     pub buffer: TextBuffer,
     pub focus: EventControllerFocus,
+    pub compact: Button,
     pub effort: EffortPicker,
 }
 
@@ -67,11 +69,21 @@ impl ChatInput {
         let focus = EventControllerFocus::new();
         view.add_controller(focus.clone());
 
+        // A plain ring, styled in style.css; it sits next to the effort chip since both
+        // are about the conversation rather than the message
+        let compact = Button::builder()
+            .valign(Align::Center)
+            .focus_on_click(false)
+            .build();
+        compact.add_css_class("compact-btn");
+        compact.set_tooltip_text(Some("Compact the conversation into a summary"));
+
         let effort = EffortPicker::new();
 
         let row = GtkBox::new(Orientation::Horizontal, 8);
         row.set_hexpand(true);
         row.append(&overlay);
+        row.append(&compact);
         row.append(&effort.chip);
 
         let container = GtkBox::new(Orientation::Vertical, 0);
@@ -86,6 +98,7 @@ impl ChatInput {
             view,
             buffer,
             focus,
+            compact,
             effort,
         }
     }

@@ -47,6 +47,7 @@ def main():
         on_user_text=on_user_text,
         on_set_effort=set_effort,
         get_effort=lambda: effort_state["value"],
+        on_compact=lambda: turn_queue.put(("compact", "")),
     )
     ui.start()
     status.announce("booting")
@@ -118,6 +119,9 @@ def main():
     try:
         while True:
             source, user_input = turn_queue.get()
+            if source == "compact":  # the UI's compact button; runs between turns
+                agent.maybe_compact(force=True)
+                continue
             if source == "quit" or user_input.lower().strip(".!?") in QUIT_WORDS:
                 print("\nExiting...")
                 break

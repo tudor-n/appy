@@ -223,6 +223,27 @@ button.effort-opt.active:hover {
     background-color: #ffffff;
 }
 
+/* "Compact now": a small faint ring left of the effort chip */
+button.compact-btn {
+    background-image: none;
+    background-color: transparent;
+    border: 1.5px solid rgba(255, 255, 255, 0.28);
+    box-shadow: none;
+    outline: none;
+    border-radius: 999px;
+    min-width: 11px;
+    min-height: 11px;
+    padding: 0;
+    transition: border-color 150ms ease, background-color 150ms ease;
+}
+button.compact-btn:hover {
+    border-color: rgba(255, 255, 255, 0.70);
+    background-color: rgba(255, 255, 255, 0.08);
+}
+button.compact-btn:active {
+    background-color: rgba(255, 255, 255, 0.22);
+}
+
 /* Weather card: Appy's reply-bubble colors; pops out with a little overshoot */
 .weather-card {
     background-color: rgba(232, 230, 230, 0.91);
