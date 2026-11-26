@@ -1,0 +1,210 @@
+/* Appy overlay styles. Loaded at startup via include_str! in ui.rs. */
+window, window.background {
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+    font-family: "SF Pro Text", "Inter", sans-serif;
+}
+
+.appy-shell {
+    background-color: transparent;
+    border: none;
+    border-radius: 28px;
+    padding: 16px 18px 14px 16px;
+    box-shadow: none;
+    transition: background-color 240ms cubic-bezier(0.22, 1.0, 0.36, 1.0);
+}
+
+.appy-shell.glass-locked {
+    background-color: rgba(24, 24, 22, 0.84);
+    border: none;
+    box-shadow: none;
+}
+
+.brand-header {
+    opacity: 0;
+    transform: translateY(-6px);
+    margin-left: 6px;
+    margin-top: 2px;
+    transition:
+        opacity 220ms ease,
+        transform 260ms cubic-bezier(0.22, 1.1, 0.36, 1.0);
+}
+.appy-shell.glass-locked .brand-header {
+    opacity: 1;
+    transform: translateY(0px);
+}
+.brand-title {
+    font-family: "SF Pro Display", "SF Pro Text", "Inter", sans-serif;
+    font-size: 20px;
+    font-weight: 600;
+    color: #f5f5f7;
+    letter-spacing: -0.03em;
+}
+.brand-subtitle {
+    font-family: "SF Pro Text", "Inter", sans-serif;
+    font-size: 11px;
+    font-weight: 500;
+    color: rgba(245, 245, 247, 0.52);
+    letter-spacing: -0.01em;
+}
+
+.chat-panel {
+    opacity: 0;
+    transform: translateX(-28px) scale(0.94);
+    transition:
+        transform 260ms cubic-bezier(0.22, 1.15, 0.36, 1.0),
+        opacity 170ms ease;
+}
+.chat-panel.open {
+    opacity: 1;
+    transform: translateX(0px) scale(1.0);
+}
+
+scrolledwindow, viewport {
+    background: transparent;
+    border: none;
+}
+scrollbar {
+    opacity: 0;
+    min-width: 0;
+    min-height: 0;
+}
+
+.bubble {
+    background-color: #000000;
+    border: none;
+    padding: 8px 12px 6px 12px;
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+    transition:
+        transform 220ms cubic-bezier(0.22, 1.15, 0.36, 1.0),
+        opacity 160ms ease;
+}
+.bubble.visible {
+    opacity: 1;
+    transform: translateY(0px) scale(1.0);
+}
+.bubble-appy {
+    background-color: rgba(232, 230, 230, 0.91);
+    border-radius: 16px 16px 16px 2px;
+}
+.bubble-user {
+    border-radius: 16px 16px 2px 16px;
+}
+
+.bubble-text {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+}
+.bubble-appy .bubble-text {
+    color: #000000;
+}
+
+.bubble-time {
+    color: #8e8e93;
+    font-size: 10px;
+    font-weight: 500;
+    margin-top: 2px;
+}
+.bubble-appy .bubble-time {
+    color: #636366;
+}
+
+.status-pill {
+    background-color: #626262;
+    border: none;
+    border-radius: 999px;
+    padding: 4px 11px;
+    opacity: 0;
+    transform: translateY(8px) scale(0.94);
+    transition:
+        transform 200ms cubic-bezier(0.22, 1.15, 0.36, 1.0),
+        opacity 150ms ease;
+}
+.status-pill.visible {
+    opacity: 0.88;
+    transform: translateY(0px) scale(1.0);
+}
+.status-pill.visible.live {
+    opacity: 1.0;
+}
+.status-pill-text {
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+.input-bubble {
+    background-color: #242626;
+    border: none;
+    border-radius: 22px;
+    padding: 6px 8px 6px 14px;
+}
+textview.chat-input,
+textview.chat-input text {
+    background: transparent;
+    background-color: transparent;
+    color: #ffffff;
+    border: none;
+    box-shadow: none;
+    outline: none;
+    font-size: 13px;
+    letter-spacing: -0.01em;
+    caret-color: #ffffff;
+}
+textview.chat-input text selection {
+    background-color: rgba(255, 255, 255, 0.28);
+    color: #ffffff;
+}
+.chat-placeholder {
+    color: #8e8e93;
+    font-size: 13px;
+    letter-spacing: -0.01em;
+}
+
+.effort-row {
+    margin: 2px 0 8px 0;
+}
+.effort-caption {
+    color: #8e8e93;
+    font-size: 11px;
+    font-weight: 600;
+    margin-right: 4px;
+}
+button.effort-chip,
+button.effort-opt {
+    background-image: none;
+    background-color: rgba(255, 255, 255, 0.08);
+    color: #d1d1d6;
+    border: none;
+    box-shadow: none;
+    outline: none;
+    border-radius: 999px;
+    min-height: 0;
+    min-width: 0;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    transition: background-color 160ms ease, color 160ms ease;
+}
+button.effort-chip.off {
+    color: #8e8e93;
+}
+button.effort-chip.open,
+button.effort-opt.active {
+    background-color: #f5f5f7;
+    color: #000000;
+}
+button.effort-chip:hover,
+button.effort-opt:hover {
+    background-color: rgba(255, 255, 255, 0.16);
+}
+button.effort-chip.open:hover,
+button.effort-opt.active:hover {
+    background-color: #ffffff;
+}
