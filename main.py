@@ -35,14 +35,19 @@ def main():
         print(f"[effort -> {value}]")
         ui.effort(value)  # echo so every connected UI converges on the same value
 
+    def on_user_text(text: str):
+        turn_queue.put(("text", text))
+        status.queue_turn()
+
+    # Created before the bridge so a message arriving right away finds it
+    status = StatusTracker(lambda state: ui.status(state))
     # Start WebSocket bridge immediately so the UI shows "loading..." during boot
     ui = UiBridge(
-        on_user_text=lambda txt: turn_queue.put(("text", txt)),
+        on_user_text=on_user_text,
         on_set_effort=set_effort,
         get_effort=lambda: effort_state["value"],
     )
     ui.start()
-    status = StatusTracker(ui.status)
     status.announce("booting")
 
     client = OpenAI(
@@ -59,6 +64,11 @@ def main():
     ear = Ear(on_speech_start=ui.wake, on_speech_discarded=lambda: status.publish(force=True))
     ear.start()
 
+    def show_tool_card(name: str, result: str):
+        """Pop a card out next to Appy for tools that have one."""
+        if name == "get_weather" and (card := tools.weather_card(result)):
+            ui.widget(card)
+
     agent = Agent(
         client,
         model=os.getenv("MODEL", "google/gemma-4-26b-a4b"),
@@ -67,6 +77,8 @@ def main():
         speaker=speaker,
         ui=ui,
         status=status,
+        on_tool_result=show_tool_card,
+        stale_tools=tools.STALE_TOOLS,
     )
 
     def _voice_forwarder():
@@ -102,8 +114,13 @@ def main():
 
             now = datetime.now().strftime("%I:%M %p")
             ear.pause()  # don't let Appy hear itself
+            status.begin_turn(queued=source == "text")
             try:
-                agent.run_turn(f"[{now}] {user_input}", effort=effort_state["value"])
+                agent.run_turn(
+                    f"[{now}] {user_input}",
+                    effort=effort_state["value"],
+                    force=tools.forced_call(user_input, agent.recent_tools),
+                )
                 speaker.wait()
             finally:
                 ear.resume()

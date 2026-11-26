@@ -2,12 +2,17 @@
 
 use std::time::{Duration, Instant};
 
+use gtk4::glib;
 use gtk4::prelude::*;
 
 use crate::app::App;
 use crate::chat::format_live_dots;
-use crate::protocol::{AppyState, BackendEvent};
-use crate::state::{ActiveStatus, SharedState};
+use crate::protocol::{AppyState, BackendEvent, Widget};
+use crate::state::{ActiveStatus, Card, SharedState};
+use crate::weather::CARD_SIZE;
+
+/// Lets the card render scaled-down for a couple of frames so its CSS pop-in runs.
+const CARD_POP_DELAY: Duration = Duration::from_millis(30);
 
 /// Safety net: stop the talking bounce if the backend never sends the final "idle".
 const MAX_SPEAKING: Duration = Duration::from_secs(30);
@@ -59,10 +64,37 @@ impl App {
                 s.effort = value;
                 self.ui.input.effort.show(value);
             }
+            BackendEvent::Widget(Widget::Weather(report)) => {
+                self.ui.card.set(&report);
+                self.show_card(&mut s, now);
+            }
         }
 
         self.sync_pill(&s);
         self.ui.mascot.queue_draw();
+    }
+
+    /// Pop the weather card out of Appy (or keep the current one up longer).
+    fn show_card(&self, s: &mut SharedState, now: Instant) {
+        if let Some(card) = s.card.as_mut() {
+            card.refresh(now);
+        } else {
+            // Start inside the mascot and fly out to its slot (see tick.rs)
+            let body = self.body_on_screen(s);
+            let (cx, cy) = body.center();
+            let start = (cx - CARD_SIZE * 0.5, cy - CARD_SIZE * 0.5);
+            s.card = Some(Card::new(start, now));
+            self.ui.move_card(start);
+            self.ui.card.appear();
+
+            // A little recoil, as if Appy tossed it
+            let toward_left = self.card_slot(s).0 < body.x;
+            s.wobble.kick(if toward_left { -7.0 } else { 7.0 }, 5.0);
+        }
+
+        let card = self.ui.card.root.clone();
+        glib::timeout_add_local_once(CARD_POP_DELAY, move || card.add_css_class("shown"));
+        s.last_input_region = None;
     }
 
     fn apply_status(&self, s: &mut SharedState, next: AppyState, label: &str, now: Instant) {

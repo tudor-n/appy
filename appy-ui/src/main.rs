@@ -7,6 +7,8 @@
 //! - `chat`     message log (bubbles, status pills, smooth scroll)
 //! - `input`    message field + effort picker
 //! - `mascot`   cairo drawing
+//! - `layout`   where the mascot, chat and weather card go (pure geometry)
+//! - `weather`  the weather card widget
 //! - `state`    plain-data UI state and animation physics
 //! - `events`   backend event -> state/UI
 //! - `controls` pointer and keyboard handling
@@ -19,12 +21,14 @@ mod chat;
 mod controls;
 mod events;
 mod input;
+mod layout;
 mod mascot;
 mod net;
 mod protocol;
 mod state;
 mod tick;
 mod ui;
+mod weather;
 
 use gtk4::prelude::*;
 use gtk4::{Application, glib};

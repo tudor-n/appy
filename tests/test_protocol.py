@@ -35,7 +35,34 @@ def rust_enum(name: str) -> dict[str, str]:
     return variants
 
 
+def rust_struct_fields(name: str) -> set[str]:
+    src = PROTOCOL_RS.read_text()
+    block = re.search(rf"pub struct {name} \{{(.*?)\n\}}", src, re.DOTALL).group(1)
+    return set(re.findall(r"pub (\w+):", block))
+
+
 class ProtocolDriftTests(unittest.TestCase):
+    def test_weather_card_matches_rust_widget(self):
+        import json
+
+        import tools
+
+        fields = rust_struct_fields("WeatherReport")
+        now = tools.weather_card(json.dumps({
+            "city": "X", "current": {"temp_c": 1, "condition": "c", "code": 0, "is_day": True},
+        }))
+        forecast = tools.weather_card(json.dumps({"city": "X", "forecast": {
+            "weekday": "Saturday", "high_c": 5, "low_c": 0, "condition": "c", "code": 61}}))
+        for card in (now, forecast):
+            self.assertEqual(card.pop("widget"), "weather")
+            self.assertEqual(set(card), fields)
+
+    def test_weather_icons_are_known_to_ui(self):
+        import tools
+
+        python_icons = {icon for pair in tools.WMO_ICON.values() for icon in pair}
+        self.assertLessEqual(python_icons, set(rust_enum("WeatherIcon").values()))
+
     def test_expressions_match(self):
         self.assertEqual(set(rust_enum("Expression").values()), set(VALID_EXPRESSIONS))
 

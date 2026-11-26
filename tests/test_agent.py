@@ -5,6 +5,7 @@ import unittest
 import agent as agent_mod
 from agent import Agent, compact_history, prune_old_tool_outputs
 from status import ActivityCounter, StatusTracker
+from tools import ForcedCall
 from tests.fakes import FakeClient, FakeSpeaker, FakeUi, text_chunk, tool_chunk
 
 
@@ -166,6 +167,141 @@ class AgentTurnTests(unittest.TestCase):
         run_quietly(agent, "weather?")
         self.assertIn(("response", agent_mod.TOOL_LOOP_FALLBACK, "skeptical"), ui.events)
         self.assertEqual(agent.messages[-1]["content"], agent_mod.TOOL_LOOP_FALLBACK)
+
+    def test_preamble_is_noted_in_the_tool_result(self):
+        # Regression: "hi there. what's the weather" produced the greeting twice,
+        # because the model can't see text it wrote alongside a tool call.
+        agent, client, _, _ = make_agent([
+            [text_chunk("[happy] Good afternoon, sir."), tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ], run_tool=lambda n, a: '{"temp_c":3}')
+        seen = []
+        agent.on_tool_result = lambda name, result: seen.append(result)
+        run_quietly(agent, "hi there. what's the weather btw")
+
+        tool_msg = client.calls[1]["messages"][-1]
+        self.assertEqual(tool_msg["role"], "tool")
+        self.assertTrue(tool_msg["content"].startswith('{"temp_c":3}'))
+        self.assertIn('You already told the user: "Good afternoon, sir."', tool_msg["content"])
+        self.assertEqual(seen, ['{"temp_c":3}'])  # the UI hook still gets the raw result
+
+    def test_no_note_without_a_preamble(self):
+        agent, client, _, _ = make_agent([
+            [tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ], run_tool=lambda n, a: '{"temp_c":3}')
+        run_quietly(agent, "weather?")
+        self.assertEqual(client.calls[1]["messages"][-1]["content"], '{"temp_c":3}')
+
+    def test_forced_tool_round(self):
+        agent, client, _, _ = make_agent([
+            [tool_chunk(0, "c1", "get_weather", '{"day":0}')],
+            [text_chunk("It'll be 5 degrees.")],
+        ])
+        agent.tools = [
+            {"type": "function", "function": {"name": "get_weather"}},
+            {"type": "function", "function": {"name": "other"}},
+        ]
+        run_quietly(agent, "and in 3 hours?", force=ForcedCall("get_weather", {"day": 0}))
+
+        first, second = client.calls
+        self.assertEqual(first["tool_choice"], "required")
+        self.assertEqual([t["function"]["name"] for t in first["tools"]], ["get_weather"])
+        self.assertNotIn("tool_choice", second)  # only the first round is forced
+        self.assertEqual(len(second["tools"]), 2)
+        self.assertEqual(agent.recent_tools, frozenset({"get_weather"}))
+
+    def test_recent_tools_cover_the_last_few_turns(self):
+        agent, _, _, _ = make_agent(
+            [[tool_chunk(0, "c1", "get_weather", "{}")], [text_chunk("Rain.")]]
+            + [[text_chunk("Sure.")]] * agent_mod.RECENT_TURNS
+        )
+        run_quietly(agent, "weather?")
+        for _ in range(agent_mod.RECENT_TURNS - 1):
+            run_quietly(agent, "thanks!")
+            self.assertEqual(agent.recent_tools, frozenset({"get_weather"}))
+        run_quietly(agent, "ok")
+        self.assertEqual(agent.recent_tools, frozenset())
+
+    def test_skipped_forced_call_is_made_by_the_agent(self):
+        # Regression: LM Studio's tool_choice="required" is only a hint; the model's
+        # made-up answer must never be spoken or shown, and the call happens anyway.
+        ran = []
+        agent, client, speaker, ui = make_agent([
+            [text_chunk("It's still raining, sir.")],   # ignored the requirement
+            [text_chunk("It'll clear up by five.")],    # answers from the real data
+        ], run_tool=lambda n, a: ran.append((n, a)) or '{"temp_c":5}')
+        run_quietly(agent, "and saturday?", force=ForcedCall("get_weather", {"day": 2}))
+
+        self.assertEqual(ran, [("get_weather", '{"day": 2}')])
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[0]["tool_choice"], "required")
+        self.assertNotIn("It's still raining, sir.", " ".join(speaker.spoken))
+        self.assertNotIn(("response", "It's still raining, sir.", "neutral"), ui.events)
+        self.assertEqual(speaker.spoken, ["It'll clear up by five."])
+        # The second round saw a well-formed call/result pair
+        sent = client.calls[1]["messages"]
+        self.assertEqual(sent[-2]["tool_calls"][0]["id"], sent[-1]["tool_call_id"])
+
+    def test_forced_round_preamble_is_spoken_once_the_call_is_confirmed(self):
+        agent, _, speaker, ui = make_agent([
+            [text_chunk("Let me check, sir."), tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ])
+        run_quietly(agent, "weather?", force=ForcedCall("get_weather", {"day": 0}))
+        self.assertEqual(speaker.spoken, ["Let me check, sir.", "It's 3 degrees."])
+        self.assertIn(("response", "Let me check, sir.", "neutral"), ui.events)
+
+    def test_stale_tool_exchanges_are_dropped_after_the_turn(self):
+        # Regression: with an old weather exchange in the history, Gemma answered weather
+        # follow-ups from it (no tool call, no card) and LM Studio ignored
+        # tool_choice="required".
+        agent, client, _, _ = make_agent([
+            [text_chunk("Let me check, sir."), tool_chunk(0, "c1", "get_weather", "{}"),
+             tool_chunk(1, "c2", "other_tool", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ], run_tool=lambda n, a: f'{{"from":"{n}"}}')
+        agent.stale_tools = frozenset({"get_weather"})
+        run_quietly(agent, "weather?")
+
+        # The follow-up round within the turn still saw the real result...
+        self.assertIn('{"from":"get_weather"}', client.calls[1]["messages"][-2]["content"])
+        # ...but afterwards only the other tool's exchange remains
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertEqual([m["tool_call_id"] for m in tool_msgs], ["c2"])
+        calls = agent.messages[2]["tool_calls"]
+        self.assertEqual([c["function"]["name"] for c in calls], ["other_tool"])
+
+    def test_dropping_an_exchange_folds_the_preamble_into_the_answer(self):
+        agent, _, _, _ = make_agent([
+            [text_chunk("Good afternoon, sir."), tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ])
+        agent.stale_tools = frozenset({"get_weather"})
+        run_quietly(agent, "hi, what's the weather")
+        self.assertEqual(agent.messages[1:], [
+            {"role": "user", "content": "hi, what's the weather"},
+            {"role": "assistant", "content": "Good afternoon, sir. It's 3 degrees."},
+        ])
+
+    def test_tool_results_reach_the_hook(self):
+        seen = []
+        agent, _, _, _ = make_agent([
+            [tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("Sunny.")],
+        ], run_tool=lambda n, a: '{"temp_c":21}')
+        agent.on_tool_result = lambda name, result: seen.append((name, result))
+        run_quietly(agent, "weather?")
+        self.assertEqual(seen, [("get_weather", '{"temp_c":21}')])
+
+    def test_broken_hook_does_not_break_the_turn(self):
+        agent, _, _, ui = make_agent([
+            [tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("Sunny.")],
+        ])
+        agent.on_tool_result = lambda name, result: 1 / 0
+        run_quietly(agent, "weather?")
+        self.assertIn(("response", "Sunny.", "neutral"), ui.events)
 
     def test_error_messages(self):
         import httpx

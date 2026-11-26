@@ -5,6 +5,7 @@
 //! - Double left-click the mascot to hide the overlay (the panel pill brings it back).
 //! - Double right-click to toggle glass mode (pinned open, dark backdrop); Esc leaves it.
 //! - Enter sends, Shift+Enter inserts a newline.
+//! - Click the weather card to send it back; hovering it keeps it up.
 
 use std::time::Instant;
 
@@ -17,7 +18,9 @@ use gtk4::{
 
 use crate::app::App;
 use crate::input::set_class;
+use crate::layout;
 use crate::mascot;
+use crate::state::Card;
 
 const WHEEL_STEP: f64 = 64.0;
 const ARROW_STEP: f64 = 72.0;
@@ -30,12 +33,13 @@ pub fn connect(app: &'static App) {
     connect_clicks(app);
     connect_drag(app);
     connect_input(app);
+    connect_card(app);
 }
 
 fn connect_map(app: &'static App) {
     app.ui.window.connect_map(move |_| {
         let mut s = app.state.borrow_mut();
-        s.last_input_bounds = None;
+        s.last_input_region = None;
         app.ui
             .update_input_region(s.chat_open, s.locked, s.drag.active);
     });
@@ -85,34 +89,22 @@ fn connect_hover(app: &'static App) {
         let m = &app.ui.mascot;
         mascot::body_contains(m.width() as f64, m.height() as f64, x, y)
     };
+    let mascot_hover = move |hovered: bool| {
+        app.with_state(move |s| s.set_mascot_hover(hovered, Instant::now()));
+    };
+    let panel_hover = move |hovered: bool| {
+        app.with_state(move |s| s.set_panel_hover(hovered, Instant::now()));
+    };
 
     let mascot_motion = EventControllerMotion::new();
-    mascot_motion.connect_enter(move |_, x, y| {
-        app.state
-            .borrow_mut()
-            .set_mascot_hover(on_body(x, y), Instant::now());
-    });
-    mascot_motion.connect_motion(move |_, x, y| {
-        app.state
-            .borrow_mut()
-            .set_mascot_hover(on_body(x, y), Instant::now());
-    });
-    mascot_motion.connect_leave(move |_| {
-        app.state
-            .borrow_mut()
-            .set_mascot_hover(false, Instant::now());
-    });
+    mascot_motion.connect_enter(move |_, x, y| mascot_hover(on_body(x, y)));
+    mascot_motion.connect_motion(move |_, x, y| mascot_hover(on_body(x, y)));
+    mascot_motion.connect_leave(move |_| mascot_hover(false));
     app.ui.mascot.add_controller(mascot_motion);
 
     let panel_motion = EventControllerMotion::new();
-    panel_motion.connect_enter(move |_, _, _| {
-        app.state.borrow_mut().set_panel_hover(true, Instant::now());
-    });
-    panel_motion.connect_leave(move |_| {
-        app.state
-            .borrow_mut()
-            .set_panel_hover(false, Instant::now());
-    });
+    panel_motion.connect_enter(move |_, _, _| panel_hover(true));
+    panel_motion.connect_leave(move |_| panel_hover(false));
     app.ui.chat_panel.add_controller(panel_motion);
 }
 
@@ -145,7 +137,7 @@ fn connect_drag(app: &'static App) {
         let mascot_widget: gtk4::Widget = app.ui.mascot.clone().upcast();
         let hit_mascot = app
             .ui
-            .fixed
+            .stage
             .pick(start_x, start_y, PickFlags::DEFAULT)
             .is_some_and(|w| w == mascot_widget);
 
@@ -155,22 +147,21 @@ fn connect_drag(app: &'static App) {
             s.drag.active = false;
             return;
         }
-        s.drag.begin(&s.placement);
-        s.last_input_bounds = None;
+        s.drag.begin(s.placement.anchor);
+        s.last_input_region = None;
         app.ui.update_input_region(s.chat_open, s.locked, true);
     });
 
     drag.connect_drag_update(move |_, dx, dy| {
-        let mut guard = app.state.borrow_mut();
-        let s = &mut *guard;
+        let mut s = app.state.borrow_mut();
         if !s.drag.active {
             return;
         }
+        // Only the mascot itself has to stay on screen; the shell rearranges around it
         let ui = &app.ui;
-        let max_x = (ui.window.width() as f64 - ui.root.width() as f64).max(0.0);
-        let max_y = (ui.window.height() as f64 - ui.root.height() as f64).max(0.0);
-        (s.placement.x, s.placement.y) = s.drag.target(dx, dy, max_x, max_y);
-        ui.move_shell(s.placement.x, s.placement.y);
+        s.placement.anchor =
+            layout::clamp_mascot(s.drag.target(dx, dy), ui.window_size(), ui.body_in_mascot());
+        app.layout_shell(&mut s);
 
         let (step_dx, step_dy) = s.drag.update(dx, dy);
         s.wobble.kick(step_dx, step_dy);
@@ -180,12 +171,12 @@ fn connect_drag(app: &'static App) {
         let mut s = app.state.borrow_mut();
         if s.drag.active {
             s.drag.active = false;
-            s.last_input_bounds = None;
+            s.last_input_region = None;
             app.ui.update_input_region(s.chat_open, s.locked, false);
         }
     });
 
-    app.ui.fixed.add_controller(drag);
+    app.ui.stage.add_controller(drag);
 }
 
 fn connect_input(app: &'static App) {
@@ -206,4 +197,23 @@ fn connect_input(app: &'static App) {
         let effort = *effort;
         button.connect_clicked(move |_| app.set_effort(effort));
     }
+}
+
+fn connect_card(app: &'static App) {
+    let update_card = move |f: fn(&mut Card)| {
+        app.with_state(move |s| {
+            if let Some(card) = s.card.as_mut() {
+                f(card);
+            }
+        });
+    };
+
+    let click = GestureClick::new();
+    click.connect_released(move |_, _, _, _| update_card(|card| card.dismiss(Instant::now())));
+    app.ui.card.root.add_controller(click);
+
+    let motion = EventControllerMotion::new();
+    motion.connect_enter(move |_, _, _| update_card(|card| card.hovered = true));
+    motion.connect_leave(move |_| update_card(|card| card.hovered = false));
+    app.ui.card.root.add_controller(motion);
 }

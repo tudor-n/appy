@@ -9,12 +9,17 @@ use gtk4::prelude::*;
 use crate::app::App;
 use crate::chat::format_live_dots;
 use crate::input::set_class;
+use crate::layout::{self, Rect};
 use crate::protocol::{AppyState, Expression};
 use crate::state::SharedState;
+use crate::weather::CARD_SIZE;
 
 const FRAME: Duration = Duration::from_millis(16);
 /// Live status pills cycle "." -> ".." -> "..." at this pace.
 const DOTS_STEP_MS: u128 = 400;
+/// Per-frame easing of the weather card toward its spot (and back into Appy).
+const CARD_EASE: f64 = 0.2;
+const CARD_EASE_LEAVING: f64 = 0.3;
 
 pub fn start(app: &'static App) {
     glib::timeout_add_local(FRAME, move || {
@@ -28,7 +33,8 @@ impl App {
         let now = Instant::now();
         let mut s = self.state.borrow_mut();
 
-        self.follow_layout(&mut s);
+        self.layout_shell(&mut s);
+        let card_gone = self.step_card(&mut s, now);
         self.sync_input_region(&mut s);
 
         let wobbling = s.wobble.step();
@@ -45,17 +51,103 @@ impl App {
         if redraw {
             self.ui.mascot.queue_draw();
         }
+
+        // Hiding a widget under the pointer emits `leave` synchronously, so only do it
+        // once the state is released.
+        drop(s);
+        if card_gone {
+            self.ui.card.hide();
+        }
     }
 
-    /// Place the shell on first layout, and keep its bottom edge pinned afterwards.
-    fn follow_layout(&self, s: &mut SharedState) {
+    /// Position the shell around the mascot: home it on first layout, keep the mascot
+    /// on screen, and put the chat on whichever side has room. Called every frame and
+    /// on every drag update.
+    pub fn layout_shell(&self, s: &mut SharedState) {
         let ui = &self.ui;
-        let win = (ui.window.width() as f64, ui.window.height() as f64);
-        let root = (ui.root.width() as f64, ui.root.height() as f64);
-        let dragging = s.drag.active;
-        if s.placement.follow_layout(win, root, dragging) {
-            ui.move_shell(s.placement.x, s.placement.y);
+        let win = ui.window_size();
+        if win.0 <= 0.0 || win.1 <= 0.0 {
+            return;
         }
+        let Some(shell) = ui.measure_shell(s.placement.side) else {
+            return;
+        };
+        let body = ui.body_in_mascot();
+        if !s.placement.is_initialized() {
+            s.placement.home(win, &shell, body);
+        }
+        // Also catches a screen resize leaving Appy stranded off-screen
+        s.placement.anchor = layout::clamp_mascot(s.placement.anchor, win, body);
+
+        // Pick the chat's side freely while it's hidden; while it's open, keep it put
+        // (so new messages can't make it jump) unless Appy is being dragged.
+        if (!s.chat_open || s.drag.active) && s.placement.choose_side(win, &shell, s.chat_open) {
+            ui.apply_side(s.placement.side, s.chat_open);
+        }
+        ui.move_shell(s.placement.shell_origin(&shell));
+    }
+
+    /// The mascot body in window coordinates.
+    pub fn body_on_screen(&self, s: &SharedState) -> Rect {
+        let body = self.ui.body_in_mascot();
+        let (ax, ay) = s.placement.anchor;
+        Rect {
+            x: ax + body.x,
+            y: ay + body.y,
+            ..body
+        }
+    }
+
+    /// Where the weather card belongs right now: beside Appy, or beside the whole glass
+    /// panel in glass mode (so it never sits on top of it).
+    pub fn card_slot(&self, s: &SharedState) -> layout::Point {
+        let body = self.body_on_screen(s);
+        let clear_of = if s.locked {
+            self.ui.shell_bounds().unwrap_or(body)
+        } else {
+            body
+        };
+        layout::card_slot(
+            body,
+            clear_of,
+            (CARD_SIZE, CARD_SIZE),
+            self.ui.window_size(),
+            s.placement.side,
+            s.chat_open,
+        )
+    }
+
+    /// Ease the weather card toward its spot beside Appy, or back into him when it's
+    /// leaving. Returns true once the exit animation is done and the card should be
+    /// hidden (by the caller, after releasing the state).
+    fn step_card(&self, s: &mut SharedState, now: Instant) -> bool {
+        let body = self.body_on_screen(s);
+        let slot = self.card_slot(s);
+        let Some(card) = s.card.as_mut() else {
+            return false;
+        };
+
+        card.expire(now);
+        if card.is_gone(now) {
+            s.card = None;
+            s.last_input_region = None;
+            return true;
+        }
+
+        let size = (CARD_SIZE, CARD_SIZE);
+        let (target, rate) = if card.leaving_since.is_some() {
+            if self.ui.card.is_present() {
+                self.ui.card.pop_out();
+            }
+            let (cx, cy) = body.center();
+            ((cx - size.0 * 0.5, cy - size.1 * 0.5), CARD_EASE_LEAVING)
+        } else {
+            (slot, CARD_EASE)
+        };
+        let (pos, _) = layout::ease_point(card.pos, target, rate);
+        card.pos = pos;
+        self.ui.move_card(pos);
+        false
     }
 
     /// Keep the Wayland click-through input region matched to what's on screen.
@@ -63,13 +155,10 @@ impl App {
         if !self.ui.window.is_visible() {
             return;
         }
-        let target = self.ui.input_target(s.chat_open, s.locked);
-        let desired = self.ui.input_bounds(&target, s.drag.active);
-        if let Some(bounds) = desired
-            && desired != s.last_input_bounds
-        {
-            self.ui.set_input_region(bounds);
-            s.last_input_bounds = desired;
+        let desired = self.ui.input_rects(s.chat_open, s.locked, s.drag.active);
+        if !desired.is_empty() && s.last_input_region.as_ref() != Some(&desired) {
+            self.ui.set_input_region(&desired);
+            s.last_input_region = Some(desired);
         }
     }
 

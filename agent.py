@@ -1,4 +1,7 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
+import json
+from collections import deque
+
 import openai
 
 from streaming import ExpressionTagParser, SpeechChunker
@@ -9,6 +12,17 @@ KEEP_RECENT_TOOL_OUTPUTS = 6
 # rounds the next request disables tools so the model has to answer.
 MAX_TOOL_ROUNDS = 4
 TOOL_LOOP_FALLBACK = "I got stuck going back and forth with my tools. Could you rephrase that?"
+# How many turns back a tool call still makes a time-only message ("and at 5 pm?") a
+# follow-up to it.
+RECENT_TURNS = 3
+# Added to the last tool result when the model said something before calling tools.
+# Gemma's chat template drops the text of an assistant message that has tool calls, so
+# without this the model can't see it already spoke and repeats itself ("hi there.
+# what's the weather" -> a greeting, then the greeting again with the weather).
+ALREADY_SAID_NOTE = (
+    '\n\n(You already told the user: "{said}". Continue from there with just the answer. '
+    "Don't greet them or repeat that again.)"
+)
 # Once the transcript (excluding the system prompt) grows past HISTORY_MAX_MESSAGES,
 # drop the oldest messages down to about HISTORY_KEEP_MESSAGES. Trimming in one big step
 # instead of a message at a time keeps the server's prompt cache warm between turns.
@@ -23,6 +37,42 @@ def prune_old_tool_outputs(messages: list[dict], keep_recent: int = KEEP_RECENT_
     for msg in messages[:-keep_recent]:
         if msg.get("role") == "tool" and msg.get("content") != "[pruned]":
             msg["content"] = "[pruned]"
+
+
+def drop_stale_tool_exchanges(messages: list[dict], start: int, stale_tools: frozenset[str]):
+    """After a turn, remove the calls to and results of tools whose data goes stale
+    (e.g. weather) from messages[start:], keeping the user's question and the final
+    answer. Any text said alongside a removed call is folded into the next answer.
+
+    Measured against Gemma via LM Studio: with an old weather exchange in the history,
+    follow-ups were answered from it instead of calling the tool (0-1/4), and a
+    required call was skipped every time (0/3). Removing it helps but isn't enough on
+    its own, hence tools.forced_call and the agent's fallback of making the call itself.
+    """
+    if not stale_tools:
+        return
+    turn = messages[start:]
+    names = {
+        call["id"]: call["function"]["name"] for msg in turn for call in msg.get("tool_calls") or ()
+    }
+    kept: list[dict] = []
+    carry = ""  # text from removed assistant messages, waiting for the next answer
+    for msg in turn:
+        if msg.get("role") == "tool" and names.get(msg.get("tool_call_id")) in stale_tools:
+            continue
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            calls = [c for c in msg["tool_calls"] if c["function"]["name"] not in stale_tools]
+            if not calls:
+                carry = f"{carry} {msg.get('content') or ''}".strip()
+                continue
+            msg = {**msg, "tool_calls": calls}
+        if msg.get("role") == "assistant" and carry:
+            msg = {**msg, "content": f"{carry} {msg.get('content') or ''}".strip()}
+            carry = ""
+        kept.append(msg)
+    if carry:  # the turn ended without a final answer: keep what was said
+        kept.append({"role": "assistant", "content": carry})
+    messages[start:] = kept
 
 
 def compact_history(
@@ -86,7 +136,15 @@ class Agent:
         status,
         tools: list[dict] = TOOL_SCHEMAS,
         run_tool=default_run_tool,
+        on_tool_result=None,
+        stale_tools: frozenset[str] = frozenset(),
     ):
+        """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
+        UI can show a card for it. Its errors are logged, never fatal to the turn.
+
+        Calls to `stale_tools` are removed from the history once the turn is over, so
+        the model calls them again next time instead of reusing old data (which also
+        means their UI card shows up again)."""
         self.client = client
         self.model = model
         self.temperature = temperature
@@ -95,7 +153,18 @@ class Agent:
         self.status = status
         self.tools = tools
         self.run_tool = run_tool
+        self.on_tool_result = on_tool_result
+        self.stale_tools = stale_tools
+        # Tools called in each of the last few turns, so follow-ups ("and at 5 pm?") can
+        # be recognised a couple of messages later
+        self._recent_turn_tools: deque[frozenset[str]] = deque(maxlen=RECENT_TURNS)
+        self._synthetic_calls = 0
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+    @property
+    def recent_tools(self) -> frozenset[str]:
+        """Tools called in any of the last RECENT_TURNS turns."""
+        return frozenset().union(*self._recent_turn_tools)
 
     def preheat(self):
         """Send a 1-token request so the server caches the system prompt + tool schemas."""
@@ -110,8 +179,18 @@ class Agent:
         except Exception:
             pass
 
-    def run_turn(self, user_text: str, effort: str = "none", speak_aloud: bool = True):
-        """Run one user turn to completion. Never raises on LLM/network errors."""
+    def run_turn(
+        self,
+        user_text: str,
+        effort: str = "none",
+        speak_aloud: bool = True,
+        force=None,
+    ):
+        """Run one user turn to completion. Never raises on LLM/network errors.
+
+        `force` (a tools.ForcedCall) makes the first round call that tool: the model
+        picks the arguments, and if it skips the call anyway the agent makes it itself
+        with `force.fallback_args` (see tools.forced_call for why)."""
         if compact_history(self.messages):
             print(f"[history compacted to {len(self.messages) - 1} messages]")
 
@@ -119,7 +198,7 @@ class Agent:
         self.messages.append({"role": "user", "content": user_text})
         self.status.set_phase("thinking")
         try:
-            self._run_rounds(effort, speak_aloud)
+            self._run_rounds(effort, speak_aloud, force)
         except Exception as exc:
             # Roll the whole turn back. Keeping the unanswered user message would put two
             # user messages in a row on the next turn, which strict chat templates
@@ -129,12 +208,29 @@ class Agent:
             self.ui.response(describe_error(exc), "skeptical")
         finally:
             self.status.set_phase("idle")
+            self._recent_turn_tools.append(frozenset(
+                call["function"]["name"]
+                for msg in self.messages[checkpoint:]
+                for call in msg.get("tool_calls") or ()
+            ))
+            drop_stale_tool_exchanges(self.messages, checkpoint, self.stale_tools)
             prune_old_tool_outputs(self.messages)
 
-    def _run_rounds(self, effort: str, speak_aloud: bool):
+    def _run_rounds(self, effort: str, speak_aloud: bool, force=None):
         for round_no in range(MAX_TOOL_ROUNDS + 1):
             allow_tools = round_no < MAX_TOOL_ROUNDS
-            reply, expression, tool_calls = self._stream_round(effort, speak_aloud, allow_tools)
+            forced = force if round_no == 0 else None
+            # A forced round is held back (not spoken or shown) until we know the model
+            # actually called the tool: LM Studio's tool_choice="required" is only a
+            # hint, and a skipped call means an answer made up from stale context.
+            reply, expression, tool_calls = self._stream_round(
+                effort, speak_aloud, allow_tools, forced and forced.name, hold=bool(forced)
+            )
+            if forced and not tool_calls:
+                print(f"[model skipped {forced.name}; calling it directly] ", end="", flush=True)
+                reply, tool_calls = "", [self._synthetic_call(forced)]
+            if forced and reply:
+                self._deliver(reply, expression, speak_aloud)
 
             if tool_calls and allow_tools:
                 if reply:
@@ -150,6 +246,9 @@ class Agent:
                     self.messages.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result}
                     )
+                    self._notify_tool_result(name, result)
+                if reply:
+                    self.messages[-1]["content"] += ALREADY_SAID_NOTE.format(said=reply)
                 continue  # Loop back so Appy speaks the tool result
 
             if tool_calls:
@@ -162,14 +261,54 @@ class Agent:
                 self.messages.append({"role": "assistant", "content": reply})
             return
 
+    def _synthetic_call(self, forced) -> dict:
+        self._synthetic_calls += 1
+        return {
+            "id": f"appy-{self._synthetic_calls}",
+            "type": "function",
+            "function": {"name": forced.name, "arguments": json.dumps(forced.fallback_args)},
+        }
+
+    def _deliver(self, reply: str, expression: str, speak_aloud: bool):
+        """Print and speak text that was held back during streaming."""
+        print(f"Appy [{expression}]: {reply}", end="", flush=True)
+        self.status.set_phase("replying")
+        if speak_aloud:
+            chunker = SpeechChunker()
+            for chunk in chunker.feed(reply):
+                self.speaker.speak(chunk)
+            if tail := chunker.flush():
+                self.speaker.speak(tail)
+
+    def _notify_tool_result(self, name: str, result: str):
+        if not self.on_tool_result:
+            return
+        try:
+            self.on_tool_result(name, result)
+        except Exception as exc:
+            print(f"[tool hook error] {type(exc).__name__}: {exc}")
+
     def _stream_round(
-        self, effort: str, speak_aloud: bool, allow_tools: bool = True
+        self,
+        effort: str,
+        speak_aloud: bool,
+        allow_tools: bool = True,
+        force_tool: str | None = None,
+        hold: bool = False,
     ) -> tuple[str, str, list[dict]]:
-        """Stream one completion. Returns (stripped reply, expression, tool calls)."""
+        """Stream one completion. Returns (stripped reply, expression, tool calls).
+
+        Normally text is printed and spoken as it streams; with `hold` it's only
+        collected, for the caller to `_deliver` (or drop)."""
+        tools = self.tools
+        if force_tool:
+            # LM Studio rejects tool_choice naming a function (HTTP 400), so offer only
+            # that tool and require a call
+            tools = [t for t in self.tools if t["function"]["name"] == force_tool] or self.tools
         request = dict(
             model=self.model,
             messages=self.messages,
-            tools=self.tools,
+            tools=tools,
             temperature=self.temperature,
             presence_penalty=0.3,
             reasoning_effort=effort,
@@ -177,6 +316,8 @@ class Agent:
         )
         if not allow_tools:
             request["tool_choice"] = "none"
+        elif force_tool:
+            request["tool_choice"] = "required"
         stream = self.client.chat.completions.create(**request)
 
         tags = ExpressionTagParser()
@@ -190,8 +331,14 @@ class Agent:
                 text = text.lstrip()
                 if not text:
                     return
+                if hold:
+                    reply += text
+                    return
                 print(f"Appy [{tags.expression}]: ", end="", flush=True)
                 self.status.set_phase("replying")
+            if hold:
+                reply += text
+                return
             print(text, end="", flush=True)
             reply += text
             if speak_aloud:

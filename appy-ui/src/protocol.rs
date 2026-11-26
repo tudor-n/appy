@@ -116,6 +116,49 @@ pub enum BackendEvent {
     Effort {
         value: Effort,
     },
+    /// A card for Appy to pop out next to himself.
+    Widget(Widget),
+}
+
+/// Cards the backend can ask the UI to show, tagged by `widget`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "widget", rename_all = "snake_case")]
+pub enum Widget {
+    Weather(WeatherReport),
+}
+
+/// One day's weather for the card: right now, or a forecast day (`when` set, with the
+/// high in `temp_c` and the low in `low_c`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WeatherReport {
+    pub city: String,
+    pub temp_c: f64,
+    #[serde(default)]
+    pub low_c: Option<f64>,
+    /// Short weekday ("Sat") for a forecast; absent or null for right now.
+    #[serde(default)]
+    pub when: Option<String>,
+    pub condition: String,
+    pub icon: WeatherIcon,
+}
+
+/// Monochrome weather icons the UI knows how to draw (weather.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherIcon {
+    Clear,
+    ClearNight,
+    PartlyCloudy,
+    PartlyCloudyNight,
+    Cloudy,
+    Fog,
+    Drizzle,
+    Rain,
+    Snow,
+    Thunder,
+    /// Anything newer than this UI: drawn as a cloud rather than dropping the card.
+    #[serde(other)]
+    Unknown,
 }
 
 /// UI -> backend.
@@ -182,6 +225,56 @@ mod tests {
 
         let ev: BackendEvent = serde_json::from_str(r#"{"type":"effort","value":"none"}"#).unwrap();
         assert!(matches!(ev, BackendEvent::Effort { value: Effort::Off }));
+    }
+
+    #[test]
+    fn parses_weather_widget() {
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"weather","city":"Sibiu","temp_c":21.4,"low_c":null,"when":null,"condition":"clear sky","icon":"partly_cloudy_night"}"#,
+        )
+        .unwrap();
+        let BackendEvent::Widget(Widget::Weather(report)) = ev else {
+            panic!("wrong variant: {ev:?}");
+        };
+        assert_eq!(
+            (
+                report.city.as_str(),
+                report.temp_c,
+                report.icon,
+                report.when
+            ),
+            ("Sibiu", 21.4, WeatherIcon::PartlyCloudyNight, None)
+        );
+
+        // A forecast day; optional fields may also be missing entirely
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"weather","city":"Sibiu","temp_c":5,"low_c":-0.4,"when":"Sat","condition":"light rain","icon":"rain"}"#,
+        )
+        .unwrap();
+        let BackendEvent::Widget(Widget::Weather(report)) = ev else {
+            panic!("wrong variant: {ev:?}");
+        };
+        assert_eq!(
+            (report.low_c, report.when.as_deref()),
+            (Some(-0.4), Some("Sat"))
+        );
+
+        // An icon this UI doesn't know yet still shows the card
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"weather","city":"X","temp_c":1,"condition":"c","icon":"tornado"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            ev,
+            BackendEvent::Widget(Widget::Weather(WeatherReport {
+                icon: WeatherIcon::Unknown,
+                ..
+            }))
+        ));
+        // Unknown widget kinds are rejected (and logged) rather than misread
+        assert!(
+            serde_json::from_str::<BackendEvent>(r#"{"type":"widget","widget":"stocks"}"#).is_err()
+        );
     }
 
     #[test]

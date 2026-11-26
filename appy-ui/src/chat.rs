@@ -1,7 +1,6 @@
 //! The scrolling message log: chat bubbles, status pills and smooth scrolling.
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation, PolicyType, ScrolledWindow, glib};
@@ -14,9 +13,13 @@ const LOG_MAX_HEIGHT: i32 = 360;
 pub struct ChatLog {
     pub scrolled: ScrolledWindow,
     entries: GtkBox,
-    /// Where smooth scrolling is heading; advanced each frame by `step_scroll`.
-    /// Kept in a Cell (not SharedState) so appending never contends for that RefCell.
-    scroll_target: Rc<Cell<Option<f64>>>,
+    /// Where a manual smooth scroll is heading; advanced each frame by `step_scroll`.
+    /// Cells (not SharedState) so appending never contends for that RefCell.
+    scroll_target: Cell<Option<f64>>,
+    /// Stick to the bottom: every frame eases toward the *current* bottom, so newly
+    /// added entries come into view once GTK has laid them out (their height isn't
+    /// known when they're appended). Scrolling up unpins; reaching the bottom re-pins.
+    pinned: Cell<bool>,
 }
 
 impl ChatLog {
@@ -36,7 +39,8 @@ impl ChatLog {
         Self {
             scrolled,
             entries,
-            scroll_target: Rc::new(Cell::new(None)),
+            scroll_target: Cell::new(None),
+            pinned: Cell::new(true),
         }
     }
 
@@ -96,7 +100,9 @@ impl ChatLog {
         let entry = entry.clone();
         glib::idle_add_local_once(move || entry.add_css_class("visible"));
 
-        self.scroll_to_bottom();
+        // Every new message (yours or Appy's) brings the log back to the bottom
+        self.pinned.set(true);
+        self.scroll_target.set(None);
     }
 
     fn trim(&self) {
@@ -118,40 +124,45 @@ impl ChatLog {
         (adj.upper() - adj.page_size()).max(0.0)
     }
 
-    /// Smoothly scroll to the bottom once the new entry has been laid out.
-    pub fn scroll_to_bottom(&self) {
-        let scrolled = self.scrolled.clone();
-        let target = self.scroll_target.clone();
-        glib::idle_add_local_once(move || {
-            let adj = scrolled.vadjustment();
-            target.set(Some((adj.upper() - adj.page_size()).max(0.0)));
-        });
-    }
-
     /// Smoothly scroll by `delta` pixels, accumulating onto any scroll in progress.
     pub fn scroll_by(&self, delta: f64) {
-        let base = self
-            .scroll_target
-            .get()
-            .unwrap_or_else(|| self.scrolled.vadjustment().value());
-        self.scroll_target
-            .set(Some((base + delta).clamp(0.0, self.max_scroll())));
+        let max = self.max_scroll();
+        let base = match (self.pinned.get(), self.scroll_target.get()) {
+            (true, _) => max,
+            (false, Some(target)) => target,
+            (false, None) => self.scrolled.vadjustment().value(),
+        };
+        let target = (base + delta).clamp(0.0, max);
+        self.pinned.set(is_at_bottom(target, max));
+        self.scroll_target.set(Some(target));
     }
 
     /// Advance smooth scrolling by one frame.
     pub fn step_scroll(&self) {
-        let Some(target) = self.scroll_target.get() else {
+        let max = self.max_scroll();
+        let target = if self.pinned.get() {
+            max
+        } else if let Some(target) = self.scroll_target.get() {
+            target.clamp(0.0, max)
+        } else {
             return;
         };
         let adj = self.scrolled.vadjustment();
-        let (value, done) = ease_toward(adj.value(), target.clamp(0.0, self.max_scroll()));
-        adj.set_value(value);
-        self.scroll_target.set(if done {
+        let (value, done) = ease_toward(adj.value(), target);
+        if value != adj.value() {
+            adj.set_value(value);
+        }
+        self.scroll_target.set(if done || self.pinned.get() {
             None
         } else {
-            Some(target.clamp(0.0, self.max_scroll()))
+            Some(target)
         });
     }
+}
+
+/// Within a pixel of the bottom counts as "at the bottom".
+fn is_at_bottom(value: f64, max: f64) -> bool {
+    value >= max - 1.0
 }
 
 /// One frame of exponential easing. Returns (new value, arrived).
@@ -196,6 +207,14 @@ mod tests {
             assert!(frames < 100);
         }
         assert_eq!(v, 300.0);
+    }
+
+    #[test]
+    fn bottom_detection() {
+        assert!(is_at_bottom(300.0, 300.0));
+        assert!(is_at_bottom(299.5, 300.0));
+        assert!(!is_at_bottom(250.0, 300.0));
+        assert!(is_at_bottom(0.0, 0.0)); // nothing to scroll
     }
 
     #[test]
