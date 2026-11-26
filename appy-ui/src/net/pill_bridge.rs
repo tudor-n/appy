@@ -11,6 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::protocol::{PillSyncState, UiEvent};
 
+/// Override with APPY_PILL_ADDR, e.g. to run a test copy next to the real one.
 const ADDR: &str = "127.0.0.1:8002";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -39,10 +40,11 @@ fn http_ok_json(body: &str) -> String {
 }
 
 pub async fn serve(ui_tx: async_channel::Sender<UiEvent>, pill_sync: Arc<Mutex<PillSyncState>>) {
-    let listener = match TcpListener::bind(ADDR).await {
+    let addr = std::env::var("APPY_PILL_ADDR").unwrap_or_else(|_| ADDR.to_string());
+    let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[pill] couldn't bind {ADDR} ({e}); the panel pill won't be able to connect");
+            eprintln!("[pill] couldn't bind {addr} ({e}); the panel pill won't be able to connect");
             return;
         }
     };

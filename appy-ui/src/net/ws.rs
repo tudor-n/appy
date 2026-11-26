@@ -8,6 +8,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMsg};
 
 use crate::protocol::{BackendEvent, ClientEvent, UiEvent};
 
+/// Override with APPY_WS_URL, e.g. to run a test copy next to the real one.
 const WS_URL: &str = "ws://127.0.0.1:8001/ws";
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
@@ -15,8 +16,9 @@ pub async fn run(
     ui_tx: async_channel::Sender<UiEvent>,
     mut outgoing: UnboundedReceiver<ClientEvent>,
 ) {
+    let url = std::env::var("APPY_WS_URL").unwrap_or_else(|_| WS_URL.to_string());
     loop {
-        let Ok((stream, _)) = connect_async(WS_URL).await else {
+        let Ok((stream, _)) = connect_async(url.as_str()).await else {
             tokio::time::sleep(RECONNECT_DELAY).await;
             continue;
         };
