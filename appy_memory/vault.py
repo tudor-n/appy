@@ -51,7 +51,8 @@ class VaultError(Exception):
 
 def _one_line(text: str) -> str:
     """Collapse whitespace (so a fact can't add a heading) and drop a leading bullet."""
-    return re.sub(r"\s+", " ", str(text)).strip().lstrip("-*• ").strip()
+    text = re.sub(r"\s+", " ", str(text)).strip()
+    return re.sub(r"^[-*•]\s+", "", text).strip()  # only a marker + space: "-5 C" stays
 
 
 def _match_key(text: str) -> str:

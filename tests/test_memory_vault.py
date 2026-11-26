@@ -143,6 +143,13 @@ class VaultTests(unittest.TestCase):
         gist = (self.mem / "long-one.md").read_text().splitlines()[1]
         self.assertEqual(gist, "> " + "x" * 120)
 
+    def test_remember_keeps_leading_symbols_that_belong_to_the_fact(self):
+        self.assertEqual(self.vault.remember("-5 C is the freezer setpoint", None, "s1")["line"],
+                         "- -5 C is the freezer setpoint")
+        self.assertEqual(self.vault.remember("**Important**: back up the vault", None, "s1")["line"],
+                         "- **Important**: back up the vault")
+        self.assertEqual(self.vault.remember("• bullet fact", None, "s1")["line"], "- bullet fact")
+
     def test_remember_duplicate_is_noop(self):
         self.vault.remember("Tudor lives in Sibiu.", None, "s1")
         before = commit_count(self.root)
