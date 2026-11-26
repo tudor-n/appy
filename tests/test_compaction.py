@@ -183,6 +183,9 @@ class CompactTests(unittest.TestCase):
         prompt = call["messages"][0]["content"]
         self.assertIn("User: my cat is Pixel", prompt)
         self.assertIn("Previous summary:\nnone", prompt)
+        # Weather/time answers stay in the history as Appy's words; they must not be
+        # carried into the summary as lasting facts
+        self.assertIn("Leave out live data that goes stale, like weather or the time.", prompt)
 
     def test_second_compaction_folds_previous_summary(self):
         msgs = [dict(SYSTEM)] + summary_pair("FACTS: cat is Pixel") + history(10)[1:]

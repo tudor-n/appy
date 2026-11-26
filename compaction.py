@@ -30,7 +30,7 @@ SUMMARY_TEMPLATE = """\
 Update the session summary. Keep it under 250 words. Use exactly these sections; omit empty ones.
 GOAL: what the user is trying to do right now
 DECISIONS: choices already made
-FACTS: things the user stated that matter later (names, numbers, preferences)
+FACTS: things the user stated that matter later (names, numbers, preferences). Leave out live data that goes stale, like weather or the time.
 OPEN: unresolved questions / pending tasks
 PROMISES: anything Appy said it would do
 STATE: where we left off
