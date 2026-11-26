@@ -304,8 +304,8 @@ fn draw_coaster(cr: &Context, w: f64, h: f64, cy: f64, t: f64) {
 
     // Cairo measures angles from +x, clockwise on screen; ours start at the top
     let (start, end) = coaster_arc(t);
-    set_ink(cr);
-    cr.set_line_width((w * 0.062).max(2.5));
+    cr.set_source_rgba(INK.0, INK.1, INK.2, 0.85);
+    cr.set_line_width((w * 0.045).max(2.0));
     cr.set_line_cap(LineCap::Round);
     cr.arc(cx, cy, radius, start - PI / 2.0, end - PI / 2.0);
     let _ = cr.stroke();
