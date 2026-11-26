@@ -92,3 +92,26 @@ curl -X POST -H "Authorization: Bearer $MEMORY_TOKEN" $MEMORY_URL/undo   # undo 
 
 Set `APPY_DUMP_PROMPT=1` to write the exact system prompt of a run to `<session>.prompt.txt` next
 to its log.
+
+### Learning from conversations (the consolidator)
+
+You don't have to say "remember". After a session's log reaches the Mac, the memory service
+reads it in the background: it cuts the transcript into ~5k-token windows, asks the model which
+notes each window adds durable facts to (project details, decisions, preferences; never small
+talk), and rewrites those notes with the new facts folded in. Code checks every rewrite (title and
+gist kept, bullets only, under the size cap, actually changed). The result waits as a proposal in
+`~/appy-data/pending/<note>.json`, one per note, for you to accept in the overlay; nothing reaches
+memory without that. While you're talking to Appy the consolidator waits (the laptop pings
+`/activity` at each turn), so it never competes with live chat for the model.
+
+Mac `~/appy-memory/.env` additions: `BASE_URL=http://100.103.162.57:1234/v1` (LM Studio listens on
+the Tailscale IP only), `MODEL=google/gemma-4-26b-a4b`, optionally `CONSOLIDATOR_EFFORT` (default
+`none`: same quality as `low` here, 15x faster), `CONSOLIDATOR_WINDOW_TOKENS` (5000),
+`CONSOLIDATOR_IDLE_SECONDS` (120), and `CONSOLIDATOR_DUMP=1` to write every prompt and output to
+`~/appy-data/dumps/`.
+
+```sh
+ssh macmini grep consolidator appy-memory/service.log    # one line per session processed
+curl -H "Authorization: Bearer $MEMORY_TOKEN" $MEMORY_URL/proposals   # what's waiting for review
+.venv/bin/python dev/check_consolidator.py 2             # live check on 7 fixture sessions
+```

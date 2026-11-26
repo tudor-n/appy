@@ -13,7 +13,8 @@ cd "$ROOT"
 echo "deploy: copying code to $HOST:~/appy-memory"
 ssh "$HOST" 'mkdir -p ~/appy-memory/tests'
 rsync -a --delete --exclude __pycache__ appy_memory/ "$HOST":appy-memory/appy_memory/
-rsync -a tests/__init__.py tests/test_memory_vault.py tests/test_memory_server.py "$HOST":appy-memory/tests/
+rsync -a tests/__init__.py tests/test_memory_vault.py tests/test_memory_server.py \
+    tests/test_transcript.py tests/test_consolidator.py "$HOST":appy-memory/tests/
 
 echo "deploy: venv, deps and tests on $HOST"
 ssh "$HOST" 'bash -s' <<'REMOTE'
@@ -27,7 +28,8 @@ fi
 [[ -d .venv ]] || /usr/bin/python3 -m venv .venv
 .venv/bin/pip install -q --upgrade pip
 .venv/bin/pip install -q -r appy_memory/requirements.txt
-PATH=/opt/homebrew/bin:$PATH .venv/bin/python -m unittest tests.test_memory_vault tests.test_memory_server 2>&1 | tail -3
+PATH=/opt/homebrew/bin:$PATH .venv/bin/python -m unittest tests.test_memory_vault tests.test_memory_server \
+    tests.test_transcript tests.test_consolidator 2>&1 | tail -3
 plist=~/Library/LaunchAgents/local.appy.memory.plist
 cp appy_memory/deploy/local.appy.memory.plist "$plist"
 job="gui/$(id -u)/local.appy.memory"
