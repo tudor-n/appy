@@ -1,3 +1,4 @@
+import math
 import os
 import queue
 import threading
@@ -11,6 +12,7 @@ from openai import OpenAI
 import tools
 from agent import Agent
 from hearing import Ear
+from memory_client import MemoryClient, system_prompt
 from session_log import SessionLogger, default_logs_dir
 from status import StatusTracker
 from voice import Speaker
@@ -79,11 +81,36 @@ def main():
     log = SessionLogger(default_logs_dir())
     log.start(model=model, effort=effort_state["value"])
 
+    # Long-term memory lives on the Mac. Its context goes into the system prompt once,
+    # here, so the prompt stays byte-for-byte the same all run (KV cache); writes made
+    # during the run show up next session.
+    memory = MemoryClient.from_env(log.session_id)
+    tools.set_memory(memory)
+    context = memory.context() if memory else None
+    if context is not None:
+        notes = len(context["index"].splitlines())
+        print(f"[memory] core ~{math.ceil(len(context['core']) / 3.2)} tokens, {notes} notes")
+    elif memory is None:
+        print("[memory] off (MEMORY_URL not set)")
+    prompt = system_prompt(load_system_prompt(), context)
+    if os.getenv("APPY_DUMP_PROMPT"):  # exactly what the model gets as its system prompt
+        dump = log.path.with_suffix(".prompt.txt")
+        try:
+            dump.parent.mkdir(parents=True, exist_ok=True)
+            dump.write_text(prompt, encoding="utf-8")
+            print(f"[memory] system prompt -> {dump}")
+        except OSError as exc:
+            print(f"[memory] couldn't write {dump}: {exc}")
+    if memory:  # logs left behind by a crash or while the Mac was down
+        threading.Thread(target=memory.upload_leftovers, args=(log.path.parent, log.path),
+                         daemon=True).start()
+
     agent = Agent(
         client,
         model=model,
         temperature=float(os.getenv("TEMPERATURE", "0.4")),
-        system_prompt=load_system_prompt(),
+        system_prompt=prompt,
+        tools=tools.TOOL_SCHEMAS + (tools.MEMORY_TOOL_SCHEMAS if memory else []),
         speaker=speaker,
         ui=ui,
         status=status,
@@ -156,6 +183,9 @@ def main():
         raise
     finally:
         log.end(reason=reason)
+        if memory:
+            uploaded = memory.upload_log(log.path)
+            print(f"[memory] log {'uploaded' if uploaded else 'kept locally'}")
         ear.stop()
         speaker.close()
 

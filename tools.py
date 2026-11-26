@@ -176,8 +176,99 @@ def get_weather(day: int = 0) -> str:
     }, separators=(",", ":"))
 
 
+# Long-term memory (memory_client.MemoryClient on the Mac's memory service). Only sent
+# to the model when MEMORY_URL is set; every schema costs context on every request.
+MEMORY_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_read",
+            "description": (
+                "Read one long-term memory note. slug must be one listed under "
+                "[Notes you can read]."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_remember",
+            "description": (
+                "Save a fact to long-term memory. Only call this when the user explicitly "
+                "asks you to remember something. Leave out slug for facts about the user "
+                "themselves (core memory); give a slug to file it under a note (a new slug "
+                "creates the note)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "One short, self-contained sentence, e.g. "
+                            "'Tudor's lab printer is a Prusa MK4.'"
+                        ),
+                    },
+                    "slug": {
+                        "type": "string",
+                        "description": "Note slug: lowercase letters, digits and dashes.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_forget",
+            "description": "Remove a fact from long-term memory when the user asks you to forget it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "'core' or a note slug"},
+                    "text": {
+                        "type": "string",
+                        "description": "The fact to remove, as it appears in memory.",
+                    },
+                },
+                "required": ["slug", "text"],
+            },
+        },
+    },
+]
+
+_memory = None  # a memory_client.MemoryClient, set by main() when memory is on
+_NO_MEMORY = json.dumps({"error": "long-term memory isn't set up"})
+
+
+def set_memory(client) -> None:
+    global _memory
+    _memory = client
+
+
+def memory_read(slug: str) -> str:
+    return _memory.read(slug) if _memory else _NO_MEMORY
+
+
+def memory_remember(text: str, slug: str | None = None) -> str:
+    return _memory.remember(text, slug) if _memory else _NO_MEMORY
+
+
+def memory_forget(slug: str, text: str) -> str:
+    return _memory.forget(slug, text) if _memory else _NO_MEMORY
+
+
 TOOL_MAP = {
     "get_weather": get_weather,
+    "memory_read": memory_read,
+    "memory_remember": memory_remember,
+    "memory_forget": memory_forget,
 }
 
 # Words that make a message unmistakably about the weather. Deliberately excludes
