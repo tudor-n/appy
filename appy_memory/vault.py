@@ -193,7 +193,7 @@ class Vault:
             raise VaultError(413, f"log is too big ({len(data)} bytes)")
         try:
             text = data.decode("utf-8")
-            for line in text.splitlines():
+            for line in text.split("\n"):  # not splitlines: U+2028 etc. are valid in JSON
                 if line.strip() and not isinstance(json.loads(line), dict):
                     raise ValueError("not a JSON object")
         except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError included

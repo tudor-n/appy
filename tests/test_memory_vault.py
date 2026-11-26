@@ -338,6 +338,12 @@ class LogStoreTests(unittest.TestCase):
         self.assertStatus(413, SID, b" " * (MAX_LOG_BYTES + 1))
         self.assertEqual(list((self.root / "logs").iterdir()), [])
 
+    def test_store_log_allows_unicode_line_separators_inside_strings(self):
+        # session_log writes ensure_ascii=False, so U+2028/U+2029/U+0085 stay raw in
+        # JSON strings; they aren't line breaks in JSONL
+        data = ('{"type":"user","text":"a\u2028b\u2029c\u0085d"}\n').encode()
+        self.assertTrue(self.vault.store_log(SID, data))
+
     def test_store_log_is_not_committed(self):
         before = commit_count(self.root)
         self.vault.store_log(SID, LOG)
