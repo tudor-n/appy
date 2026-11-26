@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
+import org.kde.plasma.plasma5support as P5Support
 
 PlasmoidItem {
     id: root
@@ -13,6 +14,7 @@ PlasmoidItem {
         PlasmaCore.Action {
             text: "Quit Appy"
             icon.name: "application-exit"
+            visible: root.connected
             onTriggered: {
                 var xhr = new XMLHttpRequest();
                 xhr.open("POST", "http://127.0.0.1:8002/quit");
@@ -29,11 +31,58 @@ PlasmoidItem {
     property real phase: 0.0
     property real talkPhase: 0.0
     property real blinkScale: 1.0
+    // Clicked while Appy was off: starting, until the overlay answers (or LAUNCH_TIMEOUT)
+    property bool launching: false
+    // When the current boot began, for the loading bar's fill (ms since epoch; 0 = none)
+    property real bootStart: 0
 
-    readonly property bool isBusy: appyState === "booting" || appyState === "thinking" || appyState === "compacting"
-    readonly property bool isSpeaking: appyState === "speaking"
-    readonly property bool inEditMode: (Plasmoid.containment && Plasmoid.containment.corona) ? Plasmoid.containment.corona.editMode : false
-    readonly property bool showPill: (connected && minimized) || inEditMode
+    // The pill is always in the panel: asleep while Appy is off, click to start him
+    readonly property bool showPill: true
+    readonly property bool asleep: !connected && !launching
+    readonly property bool isBooting: (launching && !connected) || (connected && appyState === "booting")
+    readonly property bool isBusy: isBooting || (connected && (appyState === "thinking" || appyState === "compacting"))
+    readonly property bool isSpeaking: connected && appyState === "speaking"
+    readonly property string launchCommand: 'mkdir -p "$HOME/.cache/appy" && setsid -f "$HOME/.local/bin/appy" --no-build >"$HOME/.cache/appy/appy.log" 2>&1 </dev/null'
+
+    // Same curve as the overlay's mascot (mascot.rs loading_fill): a stub that eases
+    // towards 95%, since booting reports no real progress
+    function loadingFill() {
+        var secs = bootStart > 0 ? (Date.now() - bootStart) / 1000 : 0;
+        return 0.08 + 0.87 * (1 - Math.exp(-secs / 3));
+    }
+
+    function launch() {
+        launching = true;
+        bootStart = Date.now();
+        launchTimeout.restart();
+        launcher.connectSource(launchCommand);
+    }
+
+    P5Support.DataSource {
+        id: launcher
+        engine: "executable"
+        connectedSources: []
+        onNewData: function(source, data) { disconnectSource(source); }
+    }
+
+    Timer {
+        id: launchTimeout
+        interval: 60000
+        repeat: false
+        onTriggered: root.launching = false
+    }
+
+    onConnectedChanged: {
+        if (connected) {
+            launching = false;
+            launchTimeout.stop();
+        } else if (!launching) {
+            bootStart = 0;
+        }
+        if (fullRepresentationItem && fullRepresentationItem.faceCanvas) {
+            fullRepresentationItem.faceCanvas.requestPaint();
+        }
+    }
 
     Timer {
         interval: 200
@@ -56,6 +105,7 @@ PlasmoidItem {
                     } else {
                         root.connected = false;
                         root.minimized = false;
+                        root.msgCount = 0;
                     }
                 }
             };
@@ -66,7 +116,7 @@ PlasmoidItem {
     // 60fps animation when busy or speaking
     Timer {
         interval: 16
-        running: root.showPill && (root.isBusy || root.isSpeaking)
+        running: root.isBusy || root.isSpeaking
         repeat: true
         onTriggered: {
             if (root.isBusy) {
@@ -85,7 +135,7 @@ PlasmoidItem {
     Timer {
         id: blinkTrigger
         interval: 3400
-        running: root.showPill && !root.isBusy && root.appyState !== "listening"
+        running: !root.asleep && !root.isBusy && root.appyState !== "listening"
         repeat: false
         onTriggered: {
             blinkAnim.restart();
@@ -119,6 +169,11 @@ PlasmoidItem {
     }
 
     onAppyStateChanged: {
+        if (appyState === "booting" && bootStart === 0) {
+            bootStart = Date.now();
+        } else if (appyState !== "booting" && connected) {
+            bootStart = 0;
+        }
         if (isBusy) {
             blinkAnim.stop();
             blinkScale = 1.0;
@@ -163,6 +218,7 @@ PlasmoidItem {
                     id: canvas
                     Layout.preferredWidth: 26
                     Layout.preferredHeight: 26
+                    opacity: root.asleep ? 0.6 : 1.0
 
                     function roundedRect(ctx, x, y, w, h, r) {
                         var rad = Math.min(r, w * 0.5, h * 0.5);
@@ -206,7 +262,31 @@ PlasmoidItem {
                         ctx.fillStyle = "rgb(20, 20, 24)";
                         ctx.strokeStyle = "rgb(20, 20, 24)";
 
-                        if (root.isBusy) {
+                        if (root.isBooting) {
+                            // Loading bar: outline + fill
+                            var barW = w * 0.52, barH = h * 0.17;
+                            var bx = (w - barW) / 2, by = cy - barH / 2;
+                            var line = Math.max(w * 0.05, 1.2);
+                            ctx.lineWidth = line;
+                            roundedRect(ctx, bx, by, barW, barH, barH / 2);
+                            ctx.stroke();
+                            var gap = line * 1.1;
+                            var innerH = barH - gap * 2;
+                            var innerW = Math.max((barW - gap * 2) * root.loadingFill(), innerH);
+                            roundedRect(ctx, bx + gap, by + gap, innerW, innerH, innerH / 2);
+                            ctx.fill();
+                        } else if (root.asleep) {
+                            // Asleep: closed eyes
+                            ctx.lineWidth = Math.max(w * 0.06, 1.6);
+                            ctx.lineCap = "round";
+                            var sleepEyes = [w * 0.37, w * 0.63];
+                            for (var si = 0; si < sleepEyes.length; si++) {
+                                ctx.beginPath();
+                                ctx.moveTo(sleepEyes[si] - w * 0.06, cy + h * 0.02);
+                                ctx.lineTo(sleepEyes[si] + w * 0.06, cy + h * 0.02);
+                                ctx.stroke();
+                            }
+                        } else if (root.isBusy) {
                             var spacing = w * 0.14;
                             var baseX = w * 0.50 - spacing;
                             for (var i = 0; i < 3; i++) {
@@ -273,7 +353,7 @@ PlasmoidItem {
                 }
 
                 Rectangle {
-                    visible: root.msgCount > 0
+                    visible: root.connected && root.msgCount > 0
                     height: 18
                     implicitWidth: Math.max(18, countText.implicitWidth + 10)
                     radius: 9
@@ -295,9 +375,13 @@ PlasmoidItem {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                    var xhr = new XMLHttpRequest();
-                    xhr.open("POST", "http://127.0.0.1:8002/toggle");
-                    xhr.send();
+                    if (root.connected) {
+                        var xhr = new XMLHttpRequest();
+                        xhr.open("POST", "http://127.0.0.1:8002/toggle");
+                        xhr.send();
+                    } else if (!root.launching) {
+                        root.launch();
+                    }
                 }
             }
         }

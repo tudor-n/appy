@@ -31,6 +31,8 @@ speaker still has text queued or playing. `booting` is sent with `StatusTracker.
 `compacting` is a tracker phase, set while older turns are summarised between turns.
 After a `wake`, the tracker never sends `idle` until the user's turn starts (or the speech is
 discarded as noise), so a late end-of-audio or end-of-compaction can't cancel "listening".
+The bridge replays the last `status` (after `effort`) to every UI that connects, so an overlay
+that connects mid-boot still shows "loading…" and the mascot's loading bar.
 
 **Expressions:** `neutral`, `happy`, `excited`, `curious`, `surprised`, `focused`,
 `skeptical`. The LLM picks one by starting its reply with a tag like `[happy]`, which

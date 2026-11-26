@@ -29,6 +29,8 @@ pub struct Pose {
     pub phase: f64,
     /// Phase of the talking bounce, radians.
     pub talk_phase: f64,
+    /// Seconds the current busy state has lasted (drives the booting loading bar).
+    pub busy_secs: f64,
     pub wobble_x: f64,
     pub wobble_y: f64,
     /// 1.0 = eyes open, 0.0 = fully closed.
@@ -117,6 +119,11 @@ fn draw_body(cr: &Context, w: f64, h: f64) {
 fn draw_face(cr: &Context, w: f64, h: f64, pose: &Pose) {
     let cy = h * 0.59;
     set_ink(cr);
+
+    if pose.state == AppyState::Booting {
+        draw_loading_bar(cr, w, h, cy, loading_fill(pose.busy_secs));
+        return;
+    }
 
     if pose.state == AppyState::Compacting {
         draw_coaster(cr, w, h, cy, pose.phase / BUSY_PHASE_WRAP);
@@ -275,6 +282,33 @@ fn draw_face(cr: &Context, w: f64, h: f64, pose: &Pose) {
     }
 }
 
+/// How full the booting bar is after `secs`. Booting reports no real progress, so
+/// it starts with a small stub and eases towards 95% without ever claiming done;
+/// a typical few-second model load lands it a bit past half.
+fn loading_fill(secs: f64) -> f64 {
+    0.08 + 0.87 * (1.0 - (-secs / 3.0).exp())
+}
+
+/// Booting face: a classic outlined loading bar filling left to right.
+fn draw_loading_bar(cr: &Context, w: f64, h: f64, cy: f64, fill: f64) {
+    let bar_w = w * 0.46;
+    let bar_h = h * 0.14;
+    let x = (w - bar_w) * 0.5;
+    let y = cy - bar_h * 0.5;
+    let line = (w * 0.022).max(1.4);
+
+    set_ink(cr);
+    cr.set_line_width(line);
+    rounded_rect(cr, x, y, bar_w, bar_h, bar_h * 0.5);
+    let _ = cr.stroke();
+
+    let gap = line * 1.1;
+    let inner_h = bar_h - gap * 2.0;
+    let inner_w = (bar_w - gap * 2.0) * fill.clamp(0.0, 1.0);
+    rounded_rect(cr, x + gap, y + gap, inner_w.max(inner_h), inner_h, inner_h * 0.5);
+    let _ = cr.fill();
+}
+
 /// Angle of the coaster car, clockwise from the top, for loop progress `t` in 0..=1.
 /// Its speed is 2π(1 - k·cos 2πt): it crawls over the top, then falls and races
 /// through the bottom.
@@ -396,6 +430,24 @@ mod tests {
         // Just after the top the arc's tail is still behind it, not a full turn away
         let (start, end) = coaster_arc(0.01);
         assert!(end - start < PI);
+    }
+
+    #[test]
+    fn loading_bar_starts_with_a_stub_and_never_claims_done() {
+        assert!((loading_fill(0.0) - 0.08).abs() < 1e-9);
+        assert!(loading_fill(600.0) < 0.96);
+        let mut prev = loading_fill(0.0);
+        for i in 1..200 {
+            let f = loading_fill(i as f64 * 0.1);
+            assert!(f > prev);
+            prev = f;
+        }
+    }
+
+    #[test]
+    fn loading_bar_is_past_half_after_a_typical_boot() {
+        let f = loading_fill(3.0);
+        assert!(f > 0.5 && f < 0.75, "{f}");
     }
 
     #[test]

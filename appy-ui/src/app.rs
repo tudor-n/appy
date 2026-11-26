@@ -57,8 +57,26 @@ impl App {
             }
         });
 
-        app.ui.window.set_visible(false);
+        app.pop_out_booting();
         app
+    }
+
+    /// Startup: show the mascot right away with the booting loading bar and a "loading"
+    /// chat status, and a little hop. Nothing is connected yet; the backend's replayed
+    /// status continues or ends this (`apply_status` keeps a status of the same state).
+    fn pop_out_booting(&self) {
+        self.ui.window.set_visible(true);
+        let mut s = self.state.borrow_mut();
+        let word = AppyState::Booting.live_status_text().unwrap_or("loading");
+        let label = self.ui.chat.push_status(&format_live_dots(word, 0));
+        s.active_status = Some(ActiveStatus {
+            state: AppyState::Booting,
+            label,
+            started: Instant::now(),
+        });
+        s.wobble.kick(0.0, -9.0);
+        s.last_input_region = None;
+        self.sync_pill(&s);
     }
 
     fn connect_draw(&'static self) {
@@ -71,6 +89,11 @@ impl App {
                 expression: s.expression,
                 phase: s.phase,
                 talk_phase: s.talk_phase,
+                busy_secs: s
+                    .active_status
+                    .as_ref()
+                    .filter(|a| a.state == s.state)
+                    .map_or(0.0, |a| a.started.elapsed().as_secs_f64()),
                 wobble_x: s.wobble.x * wobble_mul,
                 wobble_y: s.wobble.y * wobble_mul,
                 blink_scale: s.blink.scale,

@@ -51,7 +51,9 @@ pub struct SharedState {
 impl SharedState {
     pub fn new(now: Instant) -> Self {
         Self {
-            state: AppyState::Idle,
+            // The overlay comes up before the backend, which replays "booting" (continuing
+            // this) or "idle" (ending it) once it's connected
+            state: AppyState::Booting,
             expression: Expression::Neutral,
             effort: Effort::Off,
             phase: 0.0,
@@ -107,10 +109,15 @@ impl SharedState {
     }
 
     pub fn should_show_chat(&self, input_selected: bool, now: Instant) -> bool {
+        // While booting there's nothing to read or type into yet: only the mascot shows
+        if self.state == AppyState::Booting {
+            return false;
+        }
         self.locked
             || self.hover.is_hovered(now)
             || self.drag.active
             || input_selected
+            // Busy opens the chat to show its status pill
             || self.is_busy()
             || self.voice_cooldown_until.is_some_and(|until| now < until)
     }
@@ -348,9 +355,40 @@ mod tests {
     }
 
     #[test]
+    fn booting_does_not_open_the_chat() {
+        // At startup only the mascot pops out; the chat waits for a hover as usual
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.state = AppyState::Booting;
+        assert!(!s.should_show_chat(false, t0));
+        s.state = AppyState::Thinking;
+        assert!(s.should_show_chat(false, t0));
+    }
+
+    #[test]
+    fn chat_stays_hidden_while_booting_even_on_hover() {
+        // Nothing to read or type into until Appy is up
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.state = AppyState::Booting;
+        s.hover.mascot = true;
+        assert!(!s.should_show_chat(false, t0));
+        assert!(!s.should_show_chat(true, t0));
+        s.state = AppyState::Idle;
+        assert!(s.should_show_chat(false, t0));
+    }
+
+    #[test]
+    fn starts_booting() {
+        // The overlay is up before the backend: it shows booting until told otherwise
+        assert_eq!(SharedState::new(Instant::now()).state, AppyState::Booting);
+    }
+
+    #[test]
     fn hover_grace_keeps_chat_open_briefly() {
         let t0 = Instant::now();
         let mut s = SharedState::new(t0);
+        s.state = AppyState::Idle; // booted
         s.set_mascot_hover(true, t0);
         assert!(s.should_show_chat(false, t0));
         s.set_mascot_hover(false, t0);
@@ -362,6 +400,7 @@ mod tests {
     fn mouse_out_cancels_voice_cooldown() {
         let t0 = Instant::now();
         let mut s = SharedState::new(t0);
+        s.state = AppyState::Idle; // booted
         s.trigger_voice_cooldown(t0);
         assert!(s.should_show_chat(false, t0 + ms(5000)));
         s.set_panel_hover(true, t0);
@@ -373,6 +412,7 @@ mod tests {
     fn busy_locked_or_typing_shows_chat() {
         let t0 = Instant::now();
         let mut s = SharedState::new(t0);
+        s.state = AppyState::Idle; // booted
         assert!(!s.should_show_chat(false, t0));
         assert!(s.should_show_chat(true, t0));
         s.state = AppyState::Thinking;
