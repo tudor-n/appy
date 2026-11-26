@@ -122,5 +122,7 @@ def run_tool(name: str, arguments: str) -> str:
     return fn(**args)
 
 
-# Prefetch weather in the background on startup
-threading.Thread(target=_fetch_weather, daemon=True).start()
+
+def prefetch():
+    """Warm the weather cache in the background so the first ask is instant."""
+    threading.Thread(target=_fetch_weather, daemon=True).start()
