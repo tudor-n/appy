@@ -167,6 +167,31 @@ class AgentTurnTests(unittest.TestCase):
         self.assertIn(("response", agent_mod.TOOL_LOOP_FALLBACK, "skeptical"), ui.events)
         self.assertEqual(agent.messages[-1]["content"], agent_mod.TOOL_LOOP_FALLBACK)
 
+    def test_preamble_is_noted_in_the_tool_result(self):
+        # Regression: "hi there. what's the weather" produced the greeting twice,
+        # because the model can't see text it wrote alongside a tool call.
+        agent, client, _, _ = make_agent([
+            [text_chunk("[happy] Good afternoon, sir."), tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ], run_tool=lambda n, a: '{"temp_c":3}')
+        seen = []
+        agent.on_tool_result = lambda name, result: seen.append(result)
+        run_quietly(agent, "hi there. what's the weather btw")
+
+        tool_msg = client.calls[1]["messages"][-1]
+        self.assertEqual(tool_msg["role"], "tool")
+        self.assertTrue(tool_msg["content"].startswith('{"temp_c":3}'))
+        self.assertIn('You already told the user: "Good afternoon, sir."', tool_msg["content"])
+        self.assertEqual(seen, ['{"temp_c":3}'])  # the UI hook still gets the raw result
+
+    def test_no_note_without_a_preamble(self):
+        agent, client, _, _ = make_agent([
+            [tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ], run_tool=lambda n, a: '{"temp_c":3}')
+        run_quietly(agent, "weather?")
+        self.assertEqual(client.calls[1]["messages"][-1]["content"], '{"temp_c":3}')
+
     def test_tool_results_reach_the_hook(self):
         seen = []
         agent, _, _, _ = make_agent([

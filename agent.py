@@ -9,6 +9,14 @@ KEEP_RECENT_TOOL_OUTPUTS = 6
 # rounds the next request disables tools so the model has to answer.
 MAX_TOOL_ROUNDS = 4
 TOOL_LOOP_FALLBACK = "I got stuck going back and forth with my tools. Could you rephrase that?"
+# Added to the last tool result when the model said something before calling tools.
+# Gemma's chat template drops the text of an assistant message that has tool calls, so
+# without this the model can't see it already spoke and repeats itself ("hi there.
+# what's the weather" -> a greeting, then the greeting again with the weather).
+ALREADY_SAID_NOTE = (
+    '\n\n(You already told the user: "{said}". Continue from there with just the answer. '
+    "Don't greet them or repeat that again.)"
+)
 # Once the transcript (excluding the system prompt) grows past HISTORY_MAX_MESSAGES,
 # drop the oldest messages down to about HISTORY_KEEP_MESSAGES. Trimming in one big step
 # instead of a message at a time keeps the server's prompt cache warm between turns.
@@ -155,6 +163,8 @@ class Agent:
                         {"role": "tool", "tool_call_id": call["id"], "content": result}
                     )
                     self._notify_tool_result(name, result)
+                if reply:
+                    self.messages[-1]["content"] += ALREADY_SAID_NOTE.format(said=reply)
                 continue  # Loop back so Appy speaks the tool result
 
             if tool_calls:
