@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from appy_memory.consolidator import Rejected, rewrite, route
 from appy_memory.llm import LLM, LLMError
 from appy_memory.vault import Vault
 
@@ -140,6 +141,144 @@ class VaultProposalTests(unittest.TestCase):
         for entry in ("logs/", "pending/", "state.json", "memory/_index.md", "dumps/"):
             self.assertIn(entry, lines)
         self.assertEqual(len(lines), 5)
+
+
+class FakeLLM:
+    """Stands in for LLM: replays scripted outputs and records every call."""
+
+    def __init__(self, responses=()):
+        self.responses = list(responses)
+        self.calls = []
+
+    def chat(self, messages, *, temperature, max_tokens, schema=None):
+        self.calls.append({"messages": [dict(m) for m in messages], "temperature": temperature,
+                           "max_tokens": max_tokens, "schema": schema})
+        if not self.responses:
+            raise AssertionError("FakeLLM ran out of responses")
+        out = self.responses.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return out, 100
+
+    def prompt(self, i=-1) -> str:
+        return "\n".join(m["content"] for m in self.calls[i]["messages"])
+
+
+def routed(*notes) -> str:
+    return json.dumps({"notes": [dict(zip(("slug", "new", "title", "why"), n)) for n in notes]})
+
+
+NOTE = "# Mark I suit\n> Iron Man style arm exoskeleton\n- The suit uses BLDC motors.\n"
+
+
+class RouteRewriteTests(unittest.TestCase):
+    def test_route_parses_and_validates(self):
+        llm = FakeLLM([routed(("Bad Slug", True, "X", "w"), ("core", True, "Core", "name"),
+                              ("mark-i-suit", True, "Mark I", "hud"), ("lumen", False, "", "kpi"),
+                              ("mark-i-suit", False, "", "dup"), ("extra-one", True, "E", "e"),
+                              ("extra-two", True, "F", "f"))])
+        notes, tokens = route(llm, "idx", "", [], "U: hi", existing={"mark-i-suit"})
+        self.assertEqual(tokens, 100)
+        self.assertEqual(notes, [
+            {"slug": "core", "new": False, "title": "Core", "why": "name"},
+            {"slug": "mark-i-suit", "new": False, "title": "Mark I", "why": "hud"},
+            {"slug": "lumen", "new": True, "title": "Lumen", "why": "kpi"},
+        ])
+
+    def test_route_empty_and_bad_json(self):
+        self.assertEqual(route(FakeLLM([routed()]), "", "", [], "w", existing=set())[0], [])
+        with self.assertRaises(Rejected):
+            route(FakeLLM(["not json"]), "", "", [], "w", existing=set())
+
+    def test_route_sends_schema(self):
+        llm = FakeLLM([routed()])
+        route(llm, "idx-line", "- core fact", [], "U: window text", existing=set())
+        call = llm.calls[0]
+        self.assertEqual(call["schema"]["required"], ["notes"])
+        self.assertEqual((call["temperature"], call["max_tokens"]), (0.1, 400))
+        for text in ("idx-line", "- core fact", "U: window text"):
+            self.assertIn(text, llm.prompt())
+
+    def test_prompts_carry_forgotten_lines(self):
+        forgotten = ["- Tudor lives in Sibiu.", "- The PSU is a Riden."]
+        r = FakeLLM([routed()])
+        route(r, "", "", forgotten, "w", existing=set())
+        w = FakeLLM(["- Tudor likes tea.\nSUMMARY: tea"])
+        rewrite(w, "core", "", "Core", "w", forgotten)
+        for llm in (r, w):
+            for line in forgotten:
+                self.assertIn(line, llm.prompt())
+
+    def test_rewrite_new_note_ok(self):
+        llm = FakeLLM(["# Lumen\n> Tudor's BI app\n- Lumen uses DuckDB.\n\nSUMMARY: new note for Lumen"])
+        text, summary, _ = rewrite(llm, "lumen", None, "Lumen", "w", [], why="BI app")
+        self.assertEqual(text, "# Lumen\n> Tudor's BI app\n- Lumen uses DuckDB.\n")
+        self.assertEqual(summary, "new note for Lumen")
+        self.assertIn("BI app", llm.prompt())
+        self.assertEqual((llm.calls[0]["temperature"], llm.calls[0]["max_tokens"]), (0.1, 1200))
+        self.assertIsNone(llm.calls[0]["schema"])
+
+    def test_rewrite_strips_fences_and_long_gist(self):
+        llm = FakeLLM(["```markdown\n# Mark I suit\n> " + "g " * 80 + "\n- The suit uses BLDC motors.\n"
+                       "- The HUD runs on a Pi Zero 2 W.\n```\nSUMMARY: added HUD"])
+        text, summary, _ = rewrite(llm, "mark-i-suit", NOTE, "Mark I suit", "w", [])
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "# Mark I suit")
+        self.assertLessEqual(len(lines[1]), 122)
+        self.assertEqual(lines[-1], "- The HUD runs on a Pi Zero 2 W.")
+        self.assertEqual(summary, "added HUD")
+
+    def test_rewrite_rejects_lost_title(self):
+        llm = FakeLLM(["- The suit uses BLDC motors.\n- New fact.\nSUMMARY: x"])
+        with self.assertRaises(Rejected) as ctx:
+            rewrite(llm, "mark-i-suit", NOTE, "Mark I suit", "w", [])
+        self.assertIn("title", ctx.exception.reason)
+
+    def test_rewrite_rejects_renamed_title(self):
+        llm = FakeLLM(["# Iron suit\n> g\n- The suit uses BLDC motors.\n- New.\nSUMMARY: x"])
+        with self.assertRaises(Rejected):
+            rewrite(llm, "mark-i-suit", NOTE, "Mark I suit", "w", [])
+
+    def test_rewrite_rejects_non_bullet_lines(self):
+        llm = FakeLLM(["# Mark I suit\n> g\nThe suit has a new HUD now.\nSUMMARY: x"])
+        with self.assertRaises(Rejected) as ctx:
+            rewrite(llm, "mark-i-suit", NOTE, "Mark I suit", "w", [])
+        self.assertIn("bullet", ctx.exception.reason)
+
+    def test_rewrite_rejects_unchanged(self):
+        llm = FakeLLM([NOTE.replace("motors.", "motors. ") + "SUMMARY: nothing new"])
+        with self.assertRaises(Rejected) as ctx:
+            rewrite(llm, "mark-i-suit", NOTE, "Mark I suit", "w", [])
+        self.assertIn("no change", ctx.exception.reason)
+
+    def test_rewrite_retries_once_when_too_long(self):
+        long_note = "# Mark I suit\n> g\n" + "- A fact that takes room in the note.\n" * 80
+        llm = FakeLLM([long_note + "SUMMARY: x", "# Mark I suit\n> g\n- Short.\nSUMMARY: y"])
+        text, summary, tokens = rewrite(llm, "mark-i-suit", NOTE, "Mark I suit", "w", [])
+        self.assertEqual((text, summary, tokens), ("# Mark I suit\n> g\n- Short.\n", "y", 200))
+        self.assertIn("shorter", llm.calls[1]["messages"][-1]["content"])
+        llm = FakeLLM([long_note + "SUMMARY: x", long_note + "SUMMARY: x"])
+        with self.assertRaises(Rejected) as ctx:
+            rewrite(llm, "mark-i-suit", NOTE, "Mark I suit", "w", [])
+        self.assertIn("over cap", ctx.exception.reason)
+
+    def test_rewrite_core_has_no_header(self):
+        llm = FakeLLM(["# Core\n- Tudor lives in Sibiu.\nSUMMARY: x"])
+        with self.assertRaises(Rejected):
+            rewrite(llm, "core", "", "Core", "w", [])
+        llm = FakeLLM(["- Tudor lives in Sibiu.\n"])  # no SUMMARY line
+        self.assertEqual(rewrite(llm, "core", "", "Core", "w", [])[:2],
+                         ("- Tudor lives in Sibiu.\n", "updated core"))
+
+    def test_dump_files_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, w = Path(tmp) / "r.txt", Path(tmp) / "w.txt"
+            route(FakeLLM([routed()]), "", "", [], "WINDOW", existing=set(), dump=r)
+            rewrite(FakeLLM(["- x\nSUMMARY: s"]), "core", "", "Core", "WINDOW", [], dump=w)
+            for path in (r, w):
+                text = path.read_text()
+                self.assertIn("WINDOW", text)
+                self.assertIn("--- output", text)
 
 
 if __name__ == "__main__":
