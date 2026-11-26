@@ -36,9 +36,18 @@ $EDITOR prompt.txt              # system prompt (gitignored)
 # Overlay
 cd appy-ui && cargo run --release
 
-# Panel pill (once)
+# Panel pill (once; use -u instead of -i to update it, then restart plasmashell)
 kpackagetool6 -t Plasma/Applet -i appy-pill
 ```
+
+Or start both together with `bin/appy`: it rebuilds the overlay if needed, and Ctrl+C,
+saying "quit", or quitting from the pill stops everything. Put it on your PATH with
+`ln -s "$PWD/bin/appy" ~/.local/bin/appy`.
+
+The panel pill is always in the panel. While Appy is off it shows him asleep; clicking it
+runs `~/.local/bin/appy --no-build` (so the symlink above is needed, and the overlay must
+have been built once), logging to `~/.cache/appy/appy.log`. Appy pops out showing a
+loading bar until he's ready; after that a click shows or hides him.
 
 To work on the UI without the audio stack or an LLM, run `dev/mock_backend.py` instead
 of `main.py`.

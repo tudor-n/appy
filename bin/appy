@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Start Appy: the Python brain (main.py) and the overlay (appy-ui) together.
+# Ctrl+C, saying "quit", or quitting from the panel pill stops both.
+#
+#   appy             build the overlay if needed, then run everything
+#   appy --no-build  skip the cargo build step
+#
+# Overlay output goes to ~/.cache/appy/ui.log; the brain prints to this terminal.
+
+set -euo pipefail
+
+# Resolve the repo root even when called through a symlink (e.g. ~/.local/bin/appy)
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+PYTHON="$ROOT/.venv/bin/python"
+UI_BIN="$ROOT/appy-ui/target/release/appy-ui"
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/appy"
+UI_LOG="$LOG_DIR/ui.log"
+
+build=1
+case "${1:-}" in
+    --no-build) build=0 ;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    "") ;;
+    *) echo "appy: unknown option '$1' (try --help)" >&2; exit 2 ;;
+esac
+
+die() { echo "appy: $*" >&2; exit 1; }
+
+[[ -x "$PYTHON" ]] || die "no virtualenv at $ROOT/.venv (see README: python -m venv .venv && .venv/bin/pip install -r requirements.txt)"
+[[ -f "$ROOT/.env" ]] || die "missing $ROOT/.env (copy .env.example and fill it in)"
+
+# Refuse to start a second copy; the ports would clash
+if ss -ltn 2>/dev/null | grep -qE '127\.0\.0\.1:(8001|8002)\b'; then
+    die "Appy already seems to be running (port 8001 or 8002 is in use)"
+fi
+
+if (( build )); then
+    echo "appy: building overlay..."
+    cargo build --release --quiet --manifest-path "$ROOT/appy-ui/Cargo.toml" \
+        || die "overlay build failed"
+fi
+[[ -x "$UI_BIN" ]] || die "overlay binary not found at $UI_BIN (run without --no-build)"
+
+mkdir -p "$LOG_DIR"
+cd "$ROOT"  # main.py reads .env, prompt.txt and the Kokoro models relative to here
+
+ui_pid=""
+brain_pid=""
+cleanup() {
+    trap - EXIT INT TERM
+    if [[ -n "$ui_pid" ]]; then
+        kill "$ui_pid" 2>/dev/null || true
+    fi
+    # Interrupt the brain like Ctrl+C would, so main.py's `finally` runs (it stops the
+    # mic and switches a Bluetooth headset back to A2DP). Force it after 5s.
+    if [[ -n "$brain_pid" ]] && kill -0 "$brain_pid" 2>/dev/null; then
+        kill -INT "$brain_pid" 2>/dev/null || true
+        for _ in {1..50}; do
+            kill -0 "$brain_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -TERM "$brain_pid" 2>/dev/null || true
+    fi
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# Job control: without it, bash starts background jobs with SIGINT ignored, and Python
+# then never installs its KeyboardInterrupt handler. It also keeps the terminal's Ctrl+C
+# going to this script only, which then shuts the jobs down in order.
+set -m
+
+"$UI_BIN" >"$UI_LOG" 2>&1 &
+ui_pid=$!
+
+"$PYTHON" main.py &
+brain_pid=$!
+
+echo "appy: running (brain pid $brain_pid, overlay pid $ui_pid). Overlay log: $UI_LOG"
+
+# When either side exits, the EXIT trap takes the other one down
+wait -n "$brain_pid" "$ui_pid" || true
