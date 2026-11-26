@@ -55,3 +55,15 @@ class FakeUi:
 
     def response(self, text: str, expression: str = "neutral"):
         self.events.append(("response", text, expression))
+
+
+class RecordingLogger:
+    """Stands in for SessionLogger; records (method, kwargs) for every call."""
+
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def __getattr__(self, name: str):
+        if name in ("start", "user", "assistant", "tool_call", "tool_result", "compaction", "end"):
+            return lambda **kwargs: self.events.append((name, kwargs))
+        raise AttributeError(name)

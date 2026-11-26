@@ -1,6 +1,7 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
 import openai
 
+from session_log import NullLogger
 from streaming import ExpressionTagParser, SpeechChunker
 from tools import TOOL_SCHEMAS, run_tool as default_run_tool
 
@@ -113,6 +114,7 @@ class Agent:
         run_tool=default_run_tool,
         on_tool_result=None,
         stale_tools: frozenset[str] = frozenset(),
+        log=None,
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
         UI can show a card for it. Its errors are logged, never fatal to the turn.
@@ -129,6 +131,7 @@ class Agent:
         self.tools = tools
         self.run_tool = run_tool
         self.on_tool_result = on_tool_result
+        self.log = log or NullLogger()
         self.stale_tools = stale_tools
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
@@ -175,6 +178,7 @@ class Agent:
             if tool_calls and allow_tools:
                 if reply:
                     self.ui.response(reply, expression)
+                    self.log.assistant(text=reply, expression=expression)
                 self.status.set_phase("thinking")
                 self.messages.append(
                     {"role": "assistant", "content": reply or None, "tool_calls": tool_calls}
@@ -182,7 +186,10 @@ class Agent:
                 for call in tool_calls:
                     name = call["function"]["name"]
                     print(f"[tool: {name}] ", end="", flush=True)
-                    result = self.run_tool(name, call["function"]["arguments"])
+                    args = call["function"]["arguments"]
+                    self.log.tool_call(call_id=call["id"], name=name, args=args)
+                    result = self.run_tool(name, args)
+                    self.log.tool_result(call_id=call["id"], name=name, result=result)
                     self.messages.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result}
                     )
@@ -198,6 +205,7 @@ class Agent:
             print("\n")
             if reply:
                 self.ui.response(reply, expression)
+                self.log.assistant(text=reply, expression=expression)
                 self.messages.append({"role": "assistant", "content": reply})
             return
 

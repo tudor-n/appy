@@ -5,10 +5,10 @@ import unittest
 import agent as agent_mod
 from agent import Agent, compact_history, prune_old_tool_outputs
 from status import ActivityCounter, StatusTracker
-from tests.fakes import FakeClient, FakeSpeaker, FakeUi, text_chunk, tool_chunk
+from tests.fakes import FakeClient, FakeSpeaker, FakeUi, RecordingLogger, text_chunk, tool_chunk
 
 
-def make_agent(scripts, run_tool=None):
+def make_agent(scripts, run_tool=None, log=None):
     client = FakeClient(scripts)
     speaker = FakeSpeaker()
     ui = FakeUi()
@@ -21,6 +21,7 @@ def make_agent(scripts, run_tool=None):
         ui=ui,
         status=StatusTracker(lambda state: ui.events.append(("status", state))),
         run_tool=run_tool or (lambda name, args: '{"ok":true}'),
+        log=log,
     )
     return agent, client, speaker, ui
 
@@ -238,6 +239,33 @@ class AgentTurnTests(unittest.TestCase):
         self.assertIn("couldn't reach", agent_mod.describe_error(conn))
         self.assertIn("500", agent_mod.describe_error(status))
         self.assertIn("ValueError", agent_mod.describe_error(ValueError("x")))
+
+
+class AgentLoggingTests(unittest.TestCase):
+    def test_plain_reply_is_logged(self):
+        log = RecordingLogger()
+        agent, _, _, _ = make_agent([[text_chunk("[happy] Hello there.")]], log=log)
+        run_quietly(agent, "hi")
+        self.assertEqual(log.events, [("assistant", {"text": "Hello there.", "expression": "happy"})])
+
+    def test_tool_turn_is_logged_in_order(self):
+        log = RecordingLogger()
+        agent, _, _, _ = make_agent([
+            [text_chunk("Let me check."), tool_chunk(0, "c1", "get_weather", "{}")],
+            [text_chunk("It's 3 degrees.")],
+        ], run_tool=lambda n, a: '{"temp_c":3}', log=log)
+        run_quietly(agent, "weather?")
+
+        self.assertEqual([e[0] for e in log.events], ["assistant", "tool_call", "tool_result", "assistant"])
+        self.assertEqual(log.events[1][1], {"call_id": "c1", "name": "get_weather", "args": "{}"})
+        self.assertEqual(log.events[2][1]["result"], '{"temp_c":3}')  # raw, no ALREADY_SAID_NOTE
+        self.assertEqual(log.events[3][1]["text"], "It's 3 degrees.")
+
+    def test_failed_turn_logs_nothing_from_agent(self):
+        log = RecordingLogger()
+        agent, _, _, _ = make_agent([ConnectionError("down")], log=log)
+        run_quietly(agent, "hi")
+        self.assertEqual(log.events, [])
 
 
 class CompactHistoryTests(unittest.TestCase):
