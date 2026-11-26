@@ -30,7 +30,10 @@ fi
 PATH=/opt/homebrew/bin:$PATH .venv/bin/python -m unittest tests.test_memory_vault tests.test_memory_server 2>&1 | tail -3
 plist=~/Library/LaunchAgents/local.appy.memory.plist
 cp appy_memory/deploy/local.appy.memory.plist "$plist"
-launchctl bootout "gui/$(id -u)/local.appy.memory" 2>/dev/null || true
+job="gui/$(id -u)/local.appy.memory"
+launchctl bootout "$job" 2>/dev/null || true
+# bootout returns before the old job is gone; bootstrapping too soon fails with error 5
+for _ in $(seq 1 20); do launchctl print "$job" >/dev/null 2>&1 || break; sleep 0.5; done
 launchctl bootstrap "gui/$(id -u)" "$plist"
 echo "deploy: service (re)started; log at ~/appy-memory/service.log"
 REMOTE
