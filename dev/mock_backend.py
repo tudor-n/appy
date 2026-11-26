@@ -1,3 +1,9 @@
+"""Standalone mock backend for UI work: no audio stack or LLM needed.
+
+Serves the same WebSocket on :8001 as main.py. Replies come from APPY_LLM_URL (any
+OpenAI-compatible chat endpoint) if set, otherwise from canned keyword responses.
+Run: .venv/bin/python dev/mock_backend.py
+"""
 import asyncio
 import json
 import os
