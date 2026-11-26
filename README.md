@@ -67,3 +67,28 @@ older turns are folded into a summary between turns and the UI shows "compacting
 Set `APPY_DUMP_COMPACTION=1` to also write each compaction's exact prompt and the summary that
 came back to `<session>.compaction-N.txt` next to the log; `COMPACT_AT=2500` makes it happen
 sooner when testing.
+
+## Long-term memory
+
+Durable facts live on the Mac mini, in a git repo at `~/appy-data` (`memory/core.md` plus one
+markdown note per topic). The memory service (`appy_memory/`, FastAPI on port 8765) owns every
+read and write. At startup Appy puts `core.md` and the note index into its system prompt; the
+model can then call `memory_read`, `memory_remember` and `memory_forget`. Each change is a commit
+whose message carries the session id. When Appy quits, it uploads its session log to
+`~/appy-data/logs/` and deletes the local copy; logs that couldn't be uploaded go up at the next
+start. If the Mac is unreachable, Appy starts without long-term memory.
+
+Laptop `.env`: `MEMORY_URL=http://100.103.162.57:8765` and `MEMORY_TOKEN=<shared token>`.
+Mac `~/appy-memory/.env`: `MEMORY_TOKEN=<same token>`, `MEMORY_DIR=~/appy-data`,
+`MEMORY_HOST=0.0.0.0`, `MEMORY_PORT=8765`.
+
+```sh
+appy_memory/deploy/deploy.sh        # copy to the Mac, run its tests, (re)start under launchd
+ssh macmini tail -f appy-memory/service.log         # one line per remember/forget/undo/upload
+ssh macmini git -C appy-data log --stat             # history of every memory change
+curl -X POST -H "Authorization: Bearer $MEMORY_TOKEN" $MEMORY_URL/undo   # undo the last change
+.venv/bin/python dev/check_memory_tools.py          # live check that the model calls the tools
+```
+
+Set `APPY_DUMP_PROMPT=1` to write the exact system prompt of a run to `<session>.prompt.txt` next
+to its log.

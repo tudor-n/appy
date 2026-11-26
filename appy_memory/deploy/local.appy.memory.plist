@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>local.appy.memory</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/tudor/appy-memory/.venv/bin/python</string>
+    <string>-m</string><string>appy_memory.server</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/tudor/appy-memory</string>
+  <!-- launchd's default PATH has no Homebrew, and git lives there -->
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/tudor/appy-memory/service.log</string>
+  <key>StandardErrorPath</key><string>/Users/tudor/appy-memory/service.log</string>
+</dict></plist>
