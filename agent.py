@@ -1,6 +1,7 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
 import openai
 
+from compaction import estimate_tokens
 from session_log import NullLogger
 from streaming import ExpressionTagParser, SpeechChunker
 from tools import TOOL_SCHEMAS, run_tool as default_run_tool
@@ -134,6 +135,8 @@ class Agent:
         self.log = log or NullLogger()
         self.stale_tools = stale_tools
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        # prompt + completion tokens of the last request, as reported by the server
+        self.last_usage: int | None = None
 
     def preheat(self):
         """Send a 1-token request so the server caches the system prompt + tool schemas."""
@@ -147,6 +150,13 @@ class Agent:
             )
         except Exception:
             pass
+
+    def context_tokens(self) -> int:
+        """Size of the conversation as the model sees it: the server's own count from the
+        last request when it reports one, otherwise an estimate."""
+        if self.last_usage is not None:
+            return self.last_usage
+        return estimate_tokens(self.messages) + estimate_tokens(self.tools)
 
     def run_turn(self, user_text: str, effort: str = "none", speak_aloud: bool = True):
         """Run one user turn to completion. Never raises on LLM/network errors."""
@@ -229,9 +239,11 @@ class Agent:
             presence_penalty=0.3,
             reasoning_effort=effort,
             stream=True,
+            stream_options={"include_usage": True},
         )
         if not allow_tools:
             request["tool_choice"] = "none"
+        self.last_usage = None
         stream = self.client.chat.completions.create(**request)
 
         tags = ExpressionTagParser()
@@ -254,8 +266,11 @@ class Agent:
                     self.speaker.speak(chunk)
 
         for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage:
+                self.last_usage = usage.prompt_tokens + usage.completion_tokens
             if not chunk.choices:
-                continue  # some servers send usage-only chunks
+                continue  # the usage chunk has no choices
             delta = chunk.choices[0].delta
             if delta.tool_calls:
                 _accumulate_tool_calls(tool_calls, delta.tool_calls)

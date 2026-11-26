@@ -5,7 +5,10 @@ import unittest
 import agent as agent_mod
 from agent import Agent, compact_history, prune_old_tool_outputs
 from status import ActivityCounter, StatusTracker
-from tests.fakes import FakeClient, FakeSpeaker, FakeUi, RecordingLogger, text_chunk, tool_chunk
+from compaction import estimate_tokens
+from tests.fakes import (
+    FakeClient, FakeSpeaker, FakeUi, RecordingLogger, text_chunk, tool_chunk, usage_chunk,
+)
 
 
 def make_agent(scripts, run_tool=None, log=None):
@@ -239,6 +242,23 @@ class AgentTurnTests(unittest.TestCase):
         self.assertIn("couldn't reach", agent_mod.describe_error(conn))
         self.assertIn("500", agent_mod.describe_error(status))
         self.assertIn("ValueError", agent_mod.describe_error(ValueError("x")))
+
+
+class ContextSizeTests(unittest.TestCase):
+    def test_usage_chunk_sets_context_tokens(self):
+        agent, client, _, _ = make_agent([[text_chunk("Hi."), usage_chunk(9000, 50)]])
+        run_quietly(agent, "hi")
+        self.assertEqual(agent.context_tokens(), 9050)
+        self.assertEqual(client.calls[0]["stream_options"], {"include_usage": True})
+
+    def test_context_tokens_falls_back_to_estimate(self):
+        agent, _, _, _ = make_agent([[text_chunk("Hi.")]])
+        run_quietly(agent, "hi")
+        self.assertIsNone(agent.last_usage)
+        self.assertEqual(
+            agent.context_tokens(),
+            estimate_tokens(agent.messages) + estimate_tokens(agent.tools),
+        )
 
 
 class AgentLoggingTests(unittest.TestCase):

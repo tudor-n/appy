@@ -67,3 +67,9 @@ class RecordingLogger:
         if name in ("start", "user", "assistant", "tool_call", "tool_result", "compaction", "end"):
             return lambda **kwargs: self.events.append((name, kwargs))
         raise AttributeError(name)
+
+
+def usage_chunk(prompt_tokens: int, completion_tokens: int):
+    """The final usage-only chunk a server sends when stream_options.include_usage is set."""
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    return SimpleNamespace(choices=[], usage=usage)
