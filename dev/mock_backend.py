@@ -96,6 +96,8 @@ def fallback_reply(user_text: str) -> Dict[str, str]:
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
+    # The overlay starts out showing "booting"; tell it the (instant) mock is ready
+    await ws.send_json({"type": "status", "state": "idle", "label": "idle"})
     history: List[Dict[str, str]] = []
 
     try:
