@@ -54,7 +54,6 @@ impl Ui {
         let window = ApplicationWindow::builder()
             .application(app)
             .decorated(false)
-            .resizable(false)
             .build();
         init_layer_shell(&window);
 
