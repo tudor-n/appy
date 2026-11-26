@@ -14,12 +14,18 @@ const BOTTOM_PAD: f64 = 12.0;
 
 const INK: (f64, f64, f64) = (20.0 / 255.0, 20.0 / 255.0, 24.0 / 255.0);
 
+/// The busy phase wraps here: two dot-wave cycles, one coaster loop (about 1.5 s).
+pub const BUSY_PHASE_WRAP: f64 = TAU * 2.0;
+/// How much the coaster slows over the top and speeds through the bottom (0 = even).
+const COASTER_EASE: f64 = 0.75;
+
 /// Everything that affects how the mascot looks on a given frame.
 #[derive(Debug, Clone, Copy)]
 pub struct Pose {
     pub state: AppyState,
     pub expression: Expression,
-    /// Phase of the busy "dots" wave, radians.
+    /// Phase of the busy animations, radians, wrapping at BUSY_PHASE_WRAP. The dots
+    /// wave repeats every TAU; the compacting coaster loops once per wrap.
     pub phase: f64,
     /// Phase of the talking bounce, radians.
     pub talk_phase: f64,
@@ -111,6 +117,11 @@ fn draw_body(cr: &Context, w: f64, h: f64) {
 fn draw_face(cr: &Context, w: f64, h: f64, pose: &Pose) {
     let cy = h * 0.59;
     set_ink(cr);
+
+    if pose.state == AppyState::Compacting {
+        draw_coaster(cr, w, h, cy, pose.phase / BUSY_PHASE_WRAP);
+        return;
+    }
 
     if pose.state.is_busy() {
         // Three-dot wave
@@ -264,6 +275,40 @@ fn draw_face(cr: &Context, w: f64, h: f64, pose: &Pose) {
     }
 }
 
+/// Angle of the coaster car, clockwise from the top, for loop progress `t` in 0..=1.
+/// Its speed is 2π(1 - k·cos 2πt): it crawls over the top, then falls and races
+/// through the bottom.
+fn coaster_angle(t: f64) -> f64 {
+    TAU * t - COASTER_EASE * (TAU * t).sin()
+}
+
+/// Compacting face: a car looping clockwise round a thin track, with a short trail
+/// that bunches up over the slow top and stretches out on the fast fall.
+fn draw_coaster(cr: &Context, w: f64, h: f64, cy: f64, t: f64) {
+    let cx = w * 0.50;
+    let radius = h * 0.13;
+    let point = |t: f64| {
+        let a = coaster_angle(t.rem_euclid(1.0));
+        (cx + radius * a.sin(), cy - radius * a.cos())
+    };
+
+    cr.set_source_rgba(INK.0, INK.1, INK.2, 0.22);
+    cr.set_line_width((w * 0.022).max(1.2));
+    cr.arc(cx, cy, radius, 0.0, TAU);
+    let _ = cr.stroke();
+
+    for i in (1..=3).rev() {
+        let (x, y) = point(t - i as f64 * 0.035);
+        cr.set_source_rgba(INK.0, INK.1, INK.2, 0.55 - i as f64 * 0.13);
+        cr.arc(x, y, w * (0.042 - i as f64 * 0.006), 0.0, TAU);
+        let _ = cr.fill();
+    }
+    let (x, y) = point(t);
+    set_ink(cr);
+    cr.arc(x, y, w * 0.048, 0.0, TAU);
+    let _ = cr.fill();
+}
+
 /// Upward "^ ^" arcs, all values as fractions of the mascot size.
 struct ArcEyes {
     half_w: f64,
@@ -306,6 +351,31 @@ fn rounded_rect(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coaster_starts_at_the_top_and_bottoms_out_halfway() {
+        assert!(coaster_angle(0.0).abs() < 1e-9);
+        assert!((coaster_angle(0.5) - PI).abs() < 1e-9);
+        assert!((coaster_angle(1.0) - TAU).abs() < 1e-9);
+    }
+
+    #[test]
+    fn coaster_only_moves_forward() {
+        let mut prev = coaster_angle(0.0);
+        for i in 1..=1000 {
+            let a = coaster_angle(i as f64 / 1000.0);
+            assert!(a > prev, "went backwards at step {i}");
+            prev = a;
+        }
+    }
+
+    #[test]
+    fn coaster_crawls_over_the_top_and_races_through_the_bottom() {
+        let speed = |t: f64| (coaster_angle(t + 0.001) - coaster_angle(t)) / 0.001;
+        let average = TAU;
+        assert!(speed(0.0) < average * 0.3, "top: {}", speed(0.0));
+        assert!(speed(0.5) > average * 1.6, "bottom: {}", speed(0.5));
+    }
 
     #[test]
     fn body_hit_test_ignores_headroom() {

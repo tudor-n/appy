@@ -10,6 +10,7 @@ use crate::app::App;
 use crate::chat::format_live_dots;
 use crate::input::set_class;
 use crate::layout::{self, Rect};
+use crate::mascot::BUSY_PHASE_WRAP;
 use crate::protocol::{AppyState, Expression};
 use crate::state::SharedState;
 use crate::weather::CARD_SIZE;
@@ -236,7 +237,7 @@ impl App {
     /// Advance the busy-dots / talking animations. Returns true if the mascot needs a redraw.
     fn advance_face(&self, s: &mut SharedState, now: Instant) -> bool {
         if s.is_busy() {
-            s.phase = (s.phase + 0.14) % TAU;
+            s.phase = (s.phase + 0.14) % BUSY_PHASE_WRAP;
             return true;
         }
         if s.state != AppyState::Speaking {
