@@ -7,7 +7,6 @@ use gtk4::prelude::*;
 
 use crate::app::App;
 use crate::chat::format_live_dots;
-use crate::layout;
 use crate::protocol::{AppyState, BackendEvent, Widget};
 use crate::state::{ActiveStatus, Card, SharedState};
 use crate::weather::CARD_SIZE;
@@ -94,15 +93,7 @@ impl App {
             self.ui.card.appear();
 
             // A little recoil, as if Appy tossed it
-            let win = self.ui.window_size();
-            let slot = layout::card_slot(
-                body,
-                (CARD_SIZE, CARD_SIZE),
-                win,
-                s.placement.side,
-                s.chat_open,
-            );
-            let toward_left = slot.0 < body.x;
+            let toward_left = self.card_slot(s).0 < body.x;
             s.wobble.kick(if toward_left { -7.0 } else { 7.0 }, 5.0);
         }
 

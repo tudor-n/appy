@@ -98,12 +98,31 @@ impl App {
         }
     }
 
+    /// Where the weather card belongs right now: beside Appy, or beside the whole glass
+    /// panel in glass mode (so it never sits on top of it).
+    pub fn card_slot(&self, s: &SharedState) -> layout::Point {
+        let body = self.body_on_screen(s);
+        let clear_of = if s.locked {
+            self.ui.shell_bounds().unwrap_or(body)
+        } else {
+            body
+        };
+        layout::card_slot(
+            body,
+            clear_of,
+            (CARD_SIZE, CARD_SIZE),
+            self.ui.window_size(),
+            s.placement.side,
+            s.chat_open,
+        )
+    }
+
     /// Ease the weather card toward its spot beside Appy, or back into him when it's
     /// leaving. Returns true once the exit animation is done and the card should be
     /// hidden (by the caller, after releasing the state).
     fn step_card(&self, s: &mut SharedState, now: Instant) -> bool {
         let body = self.body_on_screen(s);
-        let (win, side, chat_open) = (self.ui.window_size(), s.placement.side, s.chat_open);
+        let slot = self.card_slot(s);
         let Some(card) = s.card.as_mut() else {
             return false;
         };
@@ -123,10 +142,7 @@ impl App {
             let (cx, cy) = body.center();
             ((cx - size.0 * 0.5, cy - size.1 * 0.5), CARD_EASE_LEAVING)
         } else {
-            (
-                layout::card_slot(body, size, win, side, chat_open),
-                CARD_EASE,
-            )
+            (slot, CARD_EASE)
         };
         let (pos, _) = layout::ease_point(card.pos, target, rate);
         card.pos = pos;

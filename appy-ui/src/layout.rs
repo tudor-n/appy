@@ -149,16 +149,26 @@ pub fn clamp_mascot(anchor: Point, win: Size, body: Rect) -> Point {
     )
 }
 
-/// Where the weather card should sit, given the mascot body in window coordinates.
+/// Where the weather card should sit. `body` is the mascot body in window coordinates;
+/// the card stays clear of `clear_of` (the body itself, or the whole glass panel in
+/// glass mode) and is bottom-aligned with the body.
 ///
-/// Preference: beside the mascot on the side away from the chat, then above it, then
-/// (if the chat is hidden) on the chat's side. The first spot that's fully on screen
-/// wins; otherwise the one sticking out least.
-pub fn card_slot(body: Rect, card: Size, win: Size, chat_side: HSide, chat_open: bool) -> Point {
+/// Preference: beside it on the side away from the chat, then above it, then (if the
+/// chat is hidden) on the chat's side. The first spot that's fully on screen wins;
+/// otherwise the one sticking out least.
+pub fn card_slot(
+    body: Rect,
+    clear_of: Rect,
+    card: Size,
+    win: Size,
+    chat_side: HSide,
+    chat_open: bool,
+) -> Point {
     let (cw, ch) = card;
-    let left = (body.x - CARD_GAP - cw, body.y + body.h - ch);
-    let right = (body.x + body.w + CARD_GAP, body.y + body.h - ch);
-    let above = (body.x + (body.w - cw) * 0.5, body.y - CARD_GAP - ch);
+    let bottom = body.y + body.h - ch;
+    let left = (clear_of.x - CARD_GAP - cw, bottom);
+    let right = (clear_of.x + clear_of.w + CARD_GAP, bottom);
+    let above = (body.x + (body.w - cw) * 0.5, clear_of.y - CARD_GAP - ch);
 
     let (away, toward) = match chat_side {
         HSide::Right => (left, right),
@@ -309,9 +319,9 @@ mod tests {
             h: 96.0,
         };
         let card = (104.0, 104.0);
-        let p = card_slot(body, card, WIN, HSide::Right, true);
+        let p = card_slot(body, body, card, WIN, HSide::Right, true);
         assert_eq!(p, (800.0 - 14.0 - 104.0, 600.0 + 96.0 - 104.0));
-        let p = card_slot(body, card, WIN, HSide::Left, true);
+        let p = card_slot(body, body, card, WIN, HSide::Left, true);
         assert_eq!(p.0, 800.0 + 96.0 + 14.0);
     }
 
@@ -324,8 +334,28 @@ mod tests {
             w: 96.0,
             h: 96.0,
         };
-        let p = card_slot(body, (104.0, 104.0), WIN, HSide::Right, true);
+        let p = card_slot(body, body, (104.0, 104.0), WIN, HSide::Right, true);
         assert_eq!(p, (-4.0, 600.0 - 14.0 - 104.0));
+    }
+
+    #[test]
+    fn card_stays_clear_of_the_glass_panel() {
+        let body = Rect {
+            x: 800.0,
+            y: 600.0,
+            w: 96.0,
+            h: 96.0,
+        };
+        // Glass panel around the mascot (chat on the right): starts 28px left of the body
+        let glass = Rect {
+            x: 772.0,
+            y: 480.0,
+            w: 454.0,
+            h: 248.0,
+        };
+        let p = card_slot(body, glass, (104.0, 104.0), WIN, HSide::Right, true);
+        assert_eq!(p, (772.0 - 14.0 - 104.0, 600.0 + 96.0 - 104.0));
+        assert!(p.0 + 104.0 <= glass.x);
     }
 
     #[test]
@@ -337,7 +367,7 @@ mod tests {
             w: 96.0,
             h: 96.0,
         };
-        let p = card_slot(body, (104.0, 104.0), WIN, HSide::Right, false);
+        let p = card_slot(body, body, (104.0, 104.0), WIN, HSide::Right, false);
         assert_eq!(p.0, 96.0 + 14.0);
     }
 

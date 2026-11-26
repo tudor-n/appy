@@ -157,6 +157,16 @@ impl Ui {
         }
     }
 
+    /// The shell's visible rect (margins excluded): the glass panel in glass mode.
+    pub fn shell_bounds(&self) -> Option<Rect> {
+        self.root.compute_bounds(&self.stage).map(|b| Rect {
+            x: b.x() as f64,
+            y: b.y() as f64,
+            w: b.width() as f64,
+            h: b.height() as f64,
+        })
+    }
+
     /// The mascot body relative to the mascot's own drawing area.
     pub fn body_in_mascot(&self) -> Rect {
         let (x, y, w, h) =

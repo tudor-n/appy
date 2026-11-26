@@ -35,14 +35,19 @@ def main():
         print(f"[effort -> {value}]")
         ui.effort(value)  # echo so every connected UI converges on the same value
 
+    def on_user_text(text: str):
+        turn_queue.put(("text", text))
+        status.queue_turn()
+
+    # Created before the bridge so a message arriving right away finds it
+    status = StatusTracker(lambda state: ui.status(state))
     # Start WebSocket bridge immediately so the UI shows "loading..." during boot
     ui = UiBridge(
-        on_user_text=lambda txt: turn_queue.put(("text", txt)),
+        on_user_text=on_user_text,
         on_set_effort=set_effort,
         get_effort=lambda: effort_state["value"],
     )
     ui.start()
-    status = StatusTracker(ui.status)
     status.announce("booting")
 
     client = OpenAI(
@@ -108,6 +113,7 @@ def main():
 
             now = datetime.now().strftime("%I:%M %p")
             ear.pause()  # don't let Appy hear itself
+            status.begin_turn(queued=source == "text")
             try:
                 agent.run_turn(f"[{now}] {user_input}", effort=effort_state["value"])
                 speaker.wait()

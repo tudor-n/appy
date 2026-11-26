@@ -19,13 +19,15 @@ class StatusTracker:
         self._lock = threading.Lock()
         self._phase = "idle"
         self._speaking = False
+        # Typed messages waiting for their turn (sent while Appy was still talking)
+        self._queued = 0
         self._last: str | None = None
 
     @property
     def state(self) -> str:
         if self._speaking or self._phase == "replying":
             return "speaking"
-        if self._phase == "thinking":
+        if self._phase == "thinking" or self._queued:
             return "thinking"
         return "idle"
 
@@ -34,6 +36,22 @@ class StatusTracker:
             raise ValueError(f"unknown phase: {phase}")
         with self._lock:
             self._phase = phase
+            self._publish_locked(force=False)
+
+    def queue_turn(self):
+        """A typed message is waiting for its turn. The UI already shows "thinking" for
+        it, so when the current answer finishes we stay "thinking" instead of
+        flashing "idle" (which would close that badge and open a second one)."""
+        with self._lock:
+            self._queued += 1
+            self._publish_locked(force=False)
+
+    def begin_turn(self, queued: bool):
+        """A turn starts now; `queued` if its message went through `queue_turn`."""
+        with self._lock:
+            if queued:
+                self._queued = max(0, self._queued - 1)
+            self._phase = "thinking"
             self._publish_locked(force=False)
 
     def set_speaking(self, speaking: bool):

@@ -48,6 +48,26 @@ class StatusTrackerTests(unittest.TestCase):
             self.tracker.set_phase("dancing")
 
 
+    def test_message_typed_while_talking_keeps_thinking(self):
+        # Regression: typing while Appy was still talking flashed "idle" when the
+        # audio ended, closing the UI's "thinking" badge and opening a second one.
+        t = self.tracker
+        t.set_phase("replying")
+        t.set_speaking(True)
+        t.set_phase("idle")          # previous answer streamed, audio still playing
+        t.queue_turn()               # user types the next message
+        t.set_speaking(False)        # audio ends
+        self.assertEqual(self.sent, ["speaking", "thinking"])
+        t.begin_turn(queued=True)    # the queued message's turn starts
+        t.set_phase("replying")
+        t.set_phase("idle")
+        self.assertEqual(self.sent, ["speaking", "thinking", "speaking", "idle"])
+
+    def test_begin_turn_without_queue(self):
+        self.tracker.begin_turn(queued=False)
+        self.tracker.set_phase("idle")
+        self.assertEqual(self.sent, ["thinking", "idle"])
+
     def test_announce_is_followed_by_derived_state(self):
         self.tracker.announce("booting")
         self.tracker.publish()  # still idle, but must be re-sent to clear "booting"
