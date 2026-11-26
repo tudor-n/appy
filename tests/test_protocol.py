@@ -54,6 +54,12 @@ class ProtocolDriftTests(unittest.TestCase):
         self.assertEqual(card.pop("widget"), "weather")
         self.assertEqual(set(card), rust_struct_variant_fields("Widget", "Weather"))
 
+    def test_weather_icons_are_known_to_ui(self):
+        import tools
+
+        python_icons = {icon for pair in tools.WMO_ICON.values() for icon in pair}
+        self.assertLessEqual(python_icons, set(rust_enum("WeatherIcon").values()))
+
     def test_expressions_match(self):
         self.assertEqual(set(rust_enum("Expression").values()), set(VALID_EXPRESSIONS))
 

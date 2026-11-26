@@ -69,9 +69,9 @@ impl App {
                 city,
                 temp_c,
                 condition,
-                emoji,
+                icon,
             }) => {
-                self.ui.card.set(&emoji, temp_c, &city, &condition);
+                self.ui.card.set(icon, temp_c, &city, &condition);
                 self.show_card(&mut s, now);
             }
         }
@@ -99,7 +99,7 @@ impl App {
                 body,
                 (CARD_SIZE, CARD_SIZE),
                 win,
-                s.placement.h,
+                s.placement.side,
                 s.chat_open,
             );
             let toward_left = slot.0 < body.x;

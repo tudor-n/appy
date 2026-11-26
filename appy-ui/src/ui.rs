@@ -15,14 +15,12 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::chat::ChatLog;
 use crate::input::{ChatInput, set_class};
-use crate::layout::{HSide, Rect, Shell, VSide};
+use crate::layout::{HSide, Rect, Shell};
 use crate::mascot;
 use crate::weather::WeatherCard;
 
 const STYLE: &str = include_str!("style.css");
 const CHAT_WIDTH: i32 = 290;
-/// Spacing inside the mascot column (between the brand header and the mascot).
-const COLUMN_SPACING: i32 = 6;
 
 pub type IntRect = (i32, i32, i32, i32);
 
@@ -35,7 +33,6 @@ pub struct Ui {
     /// The visible shell: mascot column + chat panel.
     pub root: GtkBox,
     left_col: GtkBox,
-    brand_header: GtkBox,
     pub mascot: DrawingArea,
     pub chat_panel: GtkBox,
     pub chat: ChatLog,
@@ -63,10 +60,9 @@ impl Ui {
         mascot.set_vexpand(true);
         mascot.set_valign(Align::End);
 
-        let brand_header = brand_header();
-        let left_col = GtkBox::new(Orientation::Vertical, COLUMN_SPACING);
+        let left_col = GtkBox::new(Orientation::Vertical, 6);
         left_col.set_valign(Align::Fill);
-        left_col.append(&brand_header);
+        left_col.append(&brand_header());
         left_col.append(&mascot);
 
         let chat = ChatLog::new();
@@ -119,8 +115,10 @@ impl Ui {
                 } else {
                     return None;
                 };
-                let (_, natural) = child.preferred_size();
-                Some(Rectangle::new(x, y, natural.width(), natural.height()))
+                // Minimum size, like the GtkFixed this replaced: it keeps the message
+                // list as tall as the mascot column instead of its full 360px
+                let (minimum, _) = child.preferred_size();
+                Some(Rectangle::new(x, y, minimum.width(), minimum.height()))
             }
         });
         window.set_child(Some(&stage));
@@ -130,7 +128,6 @@ impl Ui {
             stage,
             root,
             left_col,
-            brand_header,
             mascot,
             chat_panel,
             chat,
@@ -168,44 +165,33 @@ impl Ui {
     }
 
     /// Measure the shell, predicting where the mascot would sit with the chat on the
-    /// other side. None until the first layout.
-    pub fn measure_shell(&self, h: HSide) -> Option<Shell> {
-        let (_, natural) = self.root.preferred_size();
-        let size = (natural.width() as f64, natural.height() as f64);
+    /// other side (mirrored). None until the first layout.
+    pub fn measure_shell(&self, side: HSide) -> Option<Shell> {
+        let (minimum, _) = self.root.preferred_size();
+        let size = (minimum.width() as f64, minimum.height() as f64);
         let mascot = self.mascot.compute_bounds(&self.stage)?;
-        let column = self.left_col.compute_bounds(&self.stage)?;
-        let header = self.brand_header.compute_bounds(&self.stage)?;
         if size.0 <= 0.0 || mascot.width() <= 0.0 {
             return None;
         }
 
         let (px, py) = self.shell_pos.get();
-        let (mw, mh) = (mascot.width() as f64, mascot.height() as f64);
-        // Horizontal: measured for the current side, mirrored for the other one
         let ox = mascot.x() as f64 - px as f64;
-        let mirrored = size.0 - ox - mw;
-        let mascot_x = match h {
+        let mirrored = size.0 - ox - mascot.width() as f64;
+        let mascot_x = match side {
             HSide::Right => [ox, mirrored],
             HSide::Left => [mirrored, ox],
         };
-        // Vertical: mascot at the bottom of its column (chat above) or right under the
-        // brand header (chat below)
-        let col_top = column.y() as f64 - py as f64;
-        let up = col_top + column.height() as f64 - mh;
-        let down = col_top + header.height() as f64 + COLUMN_SPACING as f64;
-
         Some(Shell {
             size,
-            mascot: (mw, mh),
             mascot_x,
-            mascot_y: [up, down],
+            mascot_y: mascot.y() as f64 - py as f64,
         })
     }
 
-    /// Arrange the shell for the chat's sides. When the chat is open, it replays its
+    /// Put the chat on `side` of the mascot. When the chat is open, it replays its
     /// entrance on the new side instead of jumping across the mascot.
-    pub fn apply_sides(&self, h: HSide, v: VSide, chat_open: bool) {
-        let left = h == HSide::Left;
+    pub fn apply_side(&self, side: HSide, chat_open: bool) {
+        let left = side == HSide::Left;
         if left {
             self.root
                 .reorder_child_after(&self.left_col, Some(&self.chat_panel));
@@ -214,15 +200,6 @@ impl Ui {
                 .reorder_child_after(&self.chat_panel, Some(&self.left_col));
         }
         set_class(&self.chat_panel, "left", left);
-
-        let (align, top_margin) = match v {
-            VSide::Up => (Align::End, 0),
-            // Line the chat's top up with the mascot's, below the brand header
-            VSide::Down => (Align::Start, self.brand_header.height() + COLUMN_SPACING),
-        };
-        self.mascot.set_valign(align);
-        self.chat_panel.set_valign(align);
-        self.chat_panel.set_margin_top(top_margin);
 
         if chat_open {
             self.chat_panel.add_css_class("flipping");

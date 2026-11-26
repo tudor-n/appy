@@ -4,8 +4,8 @@
 //!
 //! The mascot's position (`Placement::anchor`) is the source of truth; the shell
 //! (mascot column + chat panel) is positioned around it. This lets the mascot reach
-//! every screen edge while the chat is hidden, and lets the chat swap sides when the
-//! preferred side has no room, instead of the whole shell being blocked by the edges.
+//! every screen edge while the chat is hidden, and lets the chat open on the mascot's
+//! left when there's no room on the right, instead of the shell hitting the edge.
 
 pub type Point = (f64, f64);
 pub type Size = (f64, f64);
@@ -13,6 +13,9 @@ pub type Size = (f64, f64);
 /// Shell's initial distance from the bottom-right corner of the screen.
 const HOME_MARGIN_RIGHT: f64 = 24.0;
 const HOME_MARGIN_BOTTOM: f64 = 56.0;
+/// While dragging with the chat open, only switch sides once the other side sticks
+/// out this much less, so the chat doesn't flicker back and forth at the boundary.
+const FLIP_HYSTERESIS: f64 = 32.0;
 /// Space between the mascot body and the weather card.
 const CARD_GAP: f64 = 14.0;
 
@@ -22,15 +25,6 @@ pub enum HSide {
     #[default]
     Right,
     Left,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum VSide {
-    /// Chat grows upward from the mascot's bottom edge (preferred).
-    #[default]
-    Up,
-    /// Chat hangs downward from the mascot's top, for when Appy is near the top.
-    Down,
 }
 
 /// Axis-aligned rectangle (x, y, w, h).
@@ -58,20 +52,18 @@ fn overflow(start: f64, len: f64, limit: f64) -> f64 {
     (-start).max(0.0) + (start + len - limit).max(0.0)
 }
 
-/// The shell's measured size and the mascot's offset inside it for each arrangement.
+/// The shell's measured size and the mascot's offset inside it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shell {
     pub size: Size,
-    pub mascot: Size,
     /// Mascot x offset with the chat on the [right, left].
     pub mascot_x: [f64; 2],
-    /// Mascot y offset with the chat [above, below].
-    pub mascot_y: [f64; 2],
+    pub mascot_y: f64,
 }
 
 impl Shell {
-    pub fn offset(&self, h: HSide, v: VSide) -> Point {
-        (self.mascot_x[h as usize], self.mascot_y[v as usize])
+    pub fn offset(&self, h: HSide) -> Point {
+        (self.mascot_x[h as usize], self.mascot_y)
     }
 }
 
@@ -79,8 +71,8 @@ impl Shell {
 pub struct Placement {
     /// Top-left of the mascot's drawing area, in window coordinates. Dragging moves it.
     pub anchor: Point,
-    pub h: HSide,
-    pub v: VSide,
+    /// Which side of the mascot the chat is on.
+    pub side: HSide,
     initialized: bool,
 }
 
@@ -91,53 +83,48 @@ impl Placement {
 
     /// First layout: the bottom-right corner, with the chat fitting to its right.
     pub fn home(&mut self, win: Size, shell: &Shell, body: Rect) {
-        let (ox, oy) = shell.offset(HSide::Right, VSide::Up);
+        let (ox, oy) = shell.offset(HSide::Right);
         let anchor = (
             win.0 - shell.size.0 - HOME_MARGIN_RIGHT + ox,
             win.1 - shell.size.1 - HOME_MARGIN_BOTTOM + oy,
         );
         self.anchor = clamp_mascot(anchor, win, body);
-        self.h = HSide::Right;
-        self.v = VSide::Up;
+        self.side = HSide::Right;
         self.initialized = true;
     }
 
-    /// Re-pick the chat's sides: right/above when they fit, otherwise whichever side
-    /// sticks out less. Returns true when either side changed.
-    pub fn choose_sides(&mut self, win: Size, shell: &Shell) -> bool {
-        let x_overflow = |h: HSide| {
+    /// Re-pick the chat's side. Normally: the right if it fits, otherwise whichever
+    /// side sticks out less. `sticky` (dragging with the chat open) keeps the current
+    /// side until the other is clearly better. Returns true when the side changed.
+    pub fn choose_side(&mut self, win: Size, shell: &Shell, sticky: bool) -> bool {
+        let sticks_out = |h: HSide| {
             overflow(
                 self.anchor.0 - shell.mascot_x[h as usize],
                 shell.size.0,
                 win.0,
             )
         };
-        let y_overflow = |v: VSide| {
-            overflow(
-                self.anchor.1 - shell.mascot_y[v as usize],
-                shell.size.1,
-                win.1,
-            )
-        };
+        let (right, left) = (sticks_out(HSide::Right), sticks_out(HSide::Left));
 
-        let h = if x_overflow(HSide::Right) <= x_overflow(HSide::Left) {
+        let side = if sticky {
+            match self.side {
+                HSide::Right if left + FLIP_HYSTERESIS < right => HSide::Left,
+                HSide::Left if right + FLIP_HYSTERESIS < left => HSide::Right,
+                current => current,
+            }
+        } else if right <= left {
             HSide::Right
         } else {
             HSide::Left
         };
-        let v = if y_overflow(VSide::Up) <= y_overflow(VSide::Down) {
-            VSide::Up
-        } else {
-            VSide::Down
-        };
-        let changed = (h, v) != (self.h, self.v);
-        (self.h, self.v) = (h, v);
+        let changed = side != self.side;
+        self.side = side;
         changed
     }
 
     /// Top-left of the shell that puts the mascot at the anchor.
     pub fn shell_origin(&self, shell: &Shell) -> Point {
-        let (ox, oy) = shell.offset(self.h, self.v);
+        let (ox, oy) = shell.offset(self.side);
         (self.anchor.0 - ox, self.anchor.1 - oy)
     }
 }
@@ -221,21 +208,20 @@ mod tests {
         h: 96.0,
     };
 
-    /// A shell shaped like the real one: 120px mascot column + 300px chat + padding.
+    /// Shaped like the real shell: 120px mascot column + 290px chat + padding/margins.
     fn shell() -> Shell {
         Shell {
-            size: (490.0, 500.0),
-            mascot: (120.0, 136.0),
+            size: (490.0, 244.0),
             mascot_x: [34.0, 336.0],
-            mascot_y: [334.0, 110.0],
+            mascot_y: 78.0,
         }
     }
 
-    fn placement_at(x: f64, y: f64) -> Placement {
+    fn placement_at(x: f64, side: HSide) -> Placement {
         Placement {
-            anchor: (x, y),
+            anchor: (x, 700.0),
+            side,
             initialized: true,
-            ..Default::default()
         }
     }
 
@@ -243,9 +229,11 @@ mod tests {
     fn homes_in_the_bottom_right_with_the_chat_on_screen() {
         let mut p = Placement::default();
         p.home(WIN, &shell(), BODY);
-        let origin = p.shell_origin(&shell());
-        assert_eq!(origin, (1920.0 - 490.0 - 24.0, 1080.0 - 500.0 - 56.0));
-        assert_eq!((p.h, p.v), (HSide::Right, VSide::Up));
+        assert_eq!(
+            p.shell_origin(&shell()),
+            (1920.0 - 490.0 - 24.0, 1080.0 - 244.0 - 56.0)
+        );
+        assert_eq!(p.side, HSide::Right);
     }
 
     #[test]
@@ -262,52 +250,42 @@ mod tests {
     }
 
     #[test]
-    fn chat_prefers_right_and_above() {
-        let mut p = placement_at(800.0, 700.0);
-        assert!(!p.choose_sides(WIN, &shell()));
-        assert_eq!((p.h, p.v), (HSide::Right, VSide::Up));
+    fn chat_prefers_the_right() {
+        let mut p = placement_at(800.0, HSide::Right);
+        assert!(!p.choose_side(WIN, &shell(), false));
+        assert_eq!(p.side, HSide::Right);
     }
 
     #[test]
-    fn chat_flips_left_near_the_right_edge() {
-        let mut p = placement_at(1900.0 - 120.0, 700.0);
-        assert!(p.choose_sides(WIN, &shell()));
-        assert_eq!(p.h, HSide::Left);
-        // The mascot doesn't move; the chat lands fully on screen to its left
-        let origin = p.shell_origin(&shell());
-        assert_eq!(origin.0 + 336.0, 1780.0);
-        assert!(origin.0 >= 0.0);
+    fn chat_opens_left_near_the_right_edge() {
+        let mut p = placement_at(1780.0, HSide::Right);
+        assert!(p.choose_side(WIN, &shell(), false));
+        assert_eq!(p.side, HSide::Left);
+        // The mascot stays put; the shell extends to its left
+        assert_eq!(p.shell_origin(&shell()).0, 1780.0 - 336.0);
     }
 
     #[test]
-    fn chat_flips_back_right_when_there_is_room_again() {
-        let mut p = placement_at(1780.0, 700.0);
-        p.choose_sides(WIN, &shell());
-        assert_eq!(p.h, HSide::Left);
-        p.anchor.0 = 900.0;
-        assert!(p.choose_sides(WIN, &shell()));
-        assert_eq!(p.h, HSide::Right);
+    fn hidden_chat_goes_back_to_the_right_when_there_is_room() {
+        let mut p = placement_at(900.0, HSide::Left);
+        assert!(p.choose_side(WIN, &shell(), false));
+        assert_eq!(p.side, HSide::Right);
     }
 
     #[test]
-    fn chat_hangs_below_near_the_top_edge() {
-        let mut p = placement_at(800.0, 20.0);
-        p.choose_sides(WIN, &shell());
-        assert_eq!(p.v, VSide::Down);
-        let origin = p.shell_origin(&shell());
-        assert!(origin.1 + 500.0 <= 1080.0);
-    }
+    fn dragging_with_the_chat_open_is_sticky() {
+        // Room on both sides: keeps the current side instead of jumping to the right
+        let mut p = placement_at(900.0, HSide::Left);
+        assert!(!p.choose_side(WIN, &shell(), true));
+        assert_eq!(p.side, HSide::Left);
 
-    #[test]
-    fn corner_cases_pick_the_least_overflow() {
-        // Top-right corner: chat goes left and down
-        let mut p = placement_at(1800.0, 0.0);
-        p.choose_sides(WIN, &shell());
-        assert_eq!((p.h, p.v), (HSide::Left, VSide::Down));
-        // Bottom-left corner: right and up
-        let mut p = placement_at(0.0, 940.0);
-        p.choose_sides(WIN, &shell());
-        assert_eq!((p.h, p.v), (HSide::Right, VSide::Up));
+        // Just past the point where the right side stops fitting: not yet
+        let mut p = placement_at(1920.0 - 490.0 + 34.0 + 20.0, HSide::Right);
+        assert!(!p.choose_side(WIN, &shell(), true));
+        // Clearly better on the left: switch
+        let mut p = placement_at(1920.0 - 490.0 + 34.0 + 60.0, HSide::Right);
+        assert!(p.choose_side(WIN, &shell(), true));
+        assert_eq!(p.side, HSide::Left);
     }
 
     #[test]

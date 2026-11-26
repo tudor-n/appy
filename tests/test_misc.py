@@ -78,12 +78,12 @@ class WeatherCardTests(unittest.TestCase):
             "city": "Sibiu",
             "temp_c": 21.4,
             "condition": "clear sky",
-            "emoji": "☀️",
+            "icon": "clear",
         })
 
     def test_night_and_unknown_codes(self):
-        self.assertEqual(tools.weather_card(self.result(is_day=False))["emoji"], "🌙")
-        self.assertEqual(tools.weather_card(self.result(code=999))["emoji"], "🌡️")
+        self.assertEqual(tools.weather_card(self.result(is_day=False))["icon"], "clear_night")
+        self.assertEqual(tools.weather_card(self.result(code=999))["icon"], "cloudy")
 
     def test_errors_and_garbage_give_no_card(self):
         self.assertIsNone(tools.weather_card(json.dumps({"error": "timeout"})))

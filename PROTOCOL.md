@@ -22,7 +22,7 @@ Python and Rust lists of expressions, efforts or states drift apart.
 | `status`     | `state`, `label`                         | See states below. Busy states (`booting`, `thinking`, `compacting`) add an animated pill to the chat, e.g. "thinking..." → "thought for 3s". |
 | `response`   | `text`, `expression` (optional)          | A reply bubble. `expression` sets the mascot's face. |
 | `effort`     | `value`                                  | Current reasoning effort; sent on connect and after every change so all UIs agree. |
-| `widget`     | `widget` (kind) + that kind's fields     | A card Appy pops out next to himself. Kinds: `weather` with `city`, `temp_c`, `condition`, `emoji`. Sent when `get_weather` runs; the card flies back into Appy after ~14s or when clicked. |
+| `widget`     | `widget` (kind) + that kind's fields     | A card Appy pops out next to himself. Kinds: `weather` with `city`, `temp_c`, `condition`, `icon` (`clear`, `clear_night`, `partly_cloudy`, `partly_cloudy_night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`, `thunder`; unknown names draw as a cloud). Sent when `get_weather` runs; the card flies back into Appy after ~14s or when clicked. |
 
 **States:** `idle`, `listening`, `booting`, `thinking`, `compacting`, `speaking`.
 On the Python side `StatusTracker` (`status.py`) is the only thing that sends

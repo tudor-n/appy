@@ -128,8 +128,27 @@ pub enum Widget {
         city: String,
         temp_c: f64,
         condition: String,
-        emoji: String,
+        icon: WeatherIcon,
     },
+}
+
+/// Monochrome weather icons the UI knows how to draw (weather.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherIcon {
+    Clear,
+    ClearNight,
+    PartlyCloudy,
+    PartlyCloudyNight,
+    Cloudy,
+    Fog,
+    Drizzle,
+    Rain,
+    Snow,
+    Thunder,
+    /// Anything newer than this UI: drawn as a cloud rather than dropping the card.
+    #[serde(other)]
+    Unknown,
 }
 
 /// UI -> backend.
@@ -201,22 +220,31 @@ mod tests {
     #[test]
     fn parses_weather_widget() {
         let ev: BackendEvent = serde_json::from_str(
-            r#"{"type":"widget","widget":"weather","city":"Sibiu","temp_c":21.4,"condition":"clear sky","emoji":"☀️"}"#,
+            r#"{"type":"widget","widget":"weather","city":"Sibiu","temp_c":21.4,"condition":"clear sky","icon":"partly_cloudy_night"}"#,
         )
         .unwrap();
         let BackendEvent::Widget(Widget::Weather {
-            city,
-            temp_c,
-            emoji,
-            ..
+            city, temp_c, icon, ..
         }) = ev
         else {
             panic!("wrong variant: {ev:?}");
         };
         assert_eq!(
-            (city.as_str(), temp_c, emoji.as_str()),
-            ("Sibiu", 21.4, "☀️")
+            (city.as_str(), temp_c, icon),
+            ("Sibiu", 21.4, WeatherIcon::PartlyCloudyNight)
         );
+        // An icon this UI doesn't know yet still shows the card
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"weather","city":"X","temp_c":1,"condition":"c","icon":"tornado"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            ev,
+            BackendEvent::Widget(Widget::Weather {
+                icon: WeatherIcon::Unknown,
+                ..
+            })
+        ));
         // Unknown widget kinds are rejected (and logged) rather than misread
         assert!(
             serde_json::from_str::<BackendEvent>(r#"{"type":"widget","widget":"stocks"}"#).is_err()

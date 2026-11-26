@@ -20,6 +20,7 @@ use crate::app::App;
 use crate::input::set_class;
 use crate::layout;
 use crate::mascot;
+use crate::state::Card;
 
 const WHEEL_STEP: f64 = 64.0;
 const ARROW_STEP: f64 = 72.0;
@@ -88,34 +89,22 @@ fn connect_hover(app: &'static App) {
         let m = &app.ui.mascot;
         mascot::body_contains(m.width() as f64, m.height() as f64, x, y)
     };
+    let mascot_hover = move |hovered: bool| {
+        app.with_state(move |s| s.set_mascot_hover(hovered, Instant::now()));
+    };
+    let panel_hover = move |hovered: bool| {
+        app.with_state(move |s| s.set_panel_hover(hovered, Instant::now()));
+    };
 
     let mascot_motion = EventControllerMotion::new();
-    mascot_motion.connect_enter(move |_, x, y| {
-        app.state
-            .borrow_mut()
-            .set_mascot_hover(on_body(x, y), Instant::now());
-    });
-    mascot_motion.connect_motion(move |_, x, y| {
-        app.state
-            .borrow_mut()
-            .set_mascot_hover(on_body(x, y), Instant::now());
-    });
-    mascot_motion.connect_leave(move |_| {
-        app.state
-            .borrow_mut()
-            .set_mascot_hover(false, Instant::now());
-    });
+    mascot_motion.connect_enter(move |_, x, y| mascot_hover(on_body(x, y)));
+    mascot_motion.connect_motion(move |_, x, y| mascot_hover(on_body(x, y)));
+    mascot_motion.connect_leave(move |_| mascot_hover(false));
     app.ui.mascot.add_controller(mascot_motion);
 
     let panel_motion = EventControllerMotion::new();
-    panel_motion.connect_enter(move |_, _, _| {
-        app.state.borrow_mut().set_panel_hover(true, Instant::now());
-    });
-    panel_motion.connect_leave(move |_| {
-        app.state
-            .borrow_mut()
-            .set_panel_hover(false, Instant::now());
-    });
+    panel_motion.connect_enter(move |_, _, _| panel_hover(true));
+    panel_motion.connect_leave(move |_| panel_hover(false));
     app.ui.chat_panel.add_controller(panel_motion);
 }
 
@@ -211,24 +200,20 @@ fn connect_input(app: &'static App) {
 }
 
 fn connect_card(app: &'static App) {
+    let update_card = move |f: fn(&mut Card)| {
+        app.with_state(move |s| {
+            if let Some(card) = s.card.as_mut() {
+                f(card);
+            }
+        });
+    };
+
     let click = GestureClick::new();
-    click.connect_released(move |_, _, _, _| {
-        if let Some(card) = app.state.borrow_mut().card.as_mut() {
-            card.dismiss(Instant::now());
-        }
-    });
+    click.connect_released(move |_, _, _, _| update_card(|card| card.dismiss(Instant::now())));
     app.ui.card.root.add_controller(click);
 
     let motion = EventControllerMotion::new();
-    motion.connect_enter(move |_, _, _| {
-        if let Some(card) = app.state.borrow_mut().card.as_mut() {
-            card.hovered = true;
-        }
-    });
-    motion.connect_leave(move |_| {
-        if let Some(card) = app.state.borrow_mut().card.as_mut() {
-            card.hovered = false;
-        }
-    });
+    motion.connect_enter(move |_, _, _| update_card(|card| card.hovered = true));
+    motion.connect_leave(move |_| update_card(|card| card.hovered = false));
     app.ui.card.root.add_controller(motion);
 }

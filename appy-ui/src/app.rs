@@ -87,6 +87,19 @@ impl App {
         }
     }
 
+    /// Update the state now, or on the next idle if it's already borrowed further up
+    /// the stack. GTK emits some signals synchronously from inside other calls (hiding
+    /// a widget under the pointer emits `leave` right away), so pointer handlers must
+    /// never assume the state is free.
+    pub fn with_state(&'static self, f: impl FnOnce(&mut SharedState) + 'static) {
+        match self.state.try_borrow_mut() {
+            Ok(mut s) => f(&mut s),
+            Err(_) => {
+                glib::idle_add_local_once(move || self.with_state(f));
+            }
+        }
+    }
+
     /// Publish the current state for the panel pill's `GET /state`.
     pub fn sync_pill(&self, s: &SharedState) {
         if let Ok(mut p) = self.pill_sync.lock() {

@@ -26,28 +26,28 @@ WMO_CODES = {
     95: "thunderstorm",
 }
 
-# Emoji for the UI's weather card: (day, night). Not shown to the LLM, so it can't end
-# up in a spoken reply.
-WMO_EMOJI = {
-    0: ("☀️", "🌙"),
-    1: ("🌤️", "🌙"),
-    2: ("⛅", "☁️"),
-    3: ("☁️", "☁️"),
-    45: ("🌫️", "🌫️"),
-    48: ("🌫️", "🌫️"),
-    51: ("🌦️", "🌧️"),
-    53: ("🌦️", "🌧️"),
-    55: ("🌧️", "🌧️"),
-    61: ("🌦️", "🌧️"),
-    63: ("🌧️", "🌧️"),
-    65: ("🌧️", "🌧️"),
-    71: ("🌨️", "🌨️"),
-    73: ("🌨️", "🌨️"),
-    75: ("❄️", "❄️"),
-    80: ("🌦️", "🌧️"),
-    81: ("🌧️", "🌧️"),
-    82: ("⛈️", "⛈️"),
-    95: ("⛈️", "⛈️"),
+# Icon names for the UI's weather card, (day, night); the UI draws them in its own
+# monochrome style. Not shown to the LLM.
+WMO_ICON = {
+    0: ("clear", "clear_night"),
+    1: ("partly_cloudy", "partly_cloudy_night"),
+    2: ("partly_cloudy", "partly_cloudy_night"),
+    3: ("cloudy", "cloudy"),
+    45: ("fog", "fog"),
+    48: ("fog", "fog"),
+    51: ("drizzle", "drizzle"),
+    53: ("drizzle", "drizzle"),
+    55: ("drizzle", "drizzle"),
+    61: ("rain", "rain"),
+    63: ("rain", "rain"),
+    65: ("rain", "rain"),
+    71: ("snow", "snow"),
+    73: ("snow", "snow"),
+    75: ("snow", "snow"),
+    80: ("rain", "rain"),
+    81: ("rain", "rain"),
+    82: ("rain", "rain"),
+    95: ("thunder", "thunder"),
 }
 
 TOOL_SCHEMAS = [
@@ -165,13 +165,13 @@ def weather_card(result: str) -> dict | None:
         temp = float(cur["temp_c"])
     except (ValueError, TypeError, KeyError):
         return None
-    day, night = WMO_EMOJI.get(cur.get("code"), ("🌡️", "🌡️"))
+    day, night = WMO_ICON.get(cur.get("code"), ("cloudy", "cloudy"))
     return {
         "widget": "weather",
         "city": str(data.get("city", "")),
         "temp_c": temp,
         "condition": str(cur.get("condition", "")),
-        "emoji": day if cur.get("is_day", True) else night,
+        "icon": day if cur.get("is_day", True) else night,
     }
 
 
