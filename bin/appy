@@ -2,9 +2,13 @@
 # Start Appy: the Python brain (main.py) and the overlay (appy-ui) together.
 # Ctrl+C, saying "quit", or quitting from the panel pill stops both.
 #
-#   appy             build the overlay if needed, then run everything
-#   appy --no-build  skip the cargo build step
+#   appy              update to origin/main, build the overlay if needed, run everything
+#   appy --no-build   skip the cargo build step (unless the update changed the overlay)
+#   appy --no-update  start the checkout as it is
+#   appy --update     only update (and rebuild what changed), don't start
 #
+# Updating fast-forwards a clean `main` to origin/main; on another branch, with local
+# changes, offline, or diverged, it says why and starts what's there.
 # Overlay output goes to ~/.cache/appy/ui.log; the brain prints to this terminal.
 
 set -euo pipefail
@@ -15,30 +19,105 @@ PYTHON="$ROOT/.venv/bin/python"
 UI_BIN="$ROOT/appy-ui/target/release/appy-ui"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/appy"
 UI_LOG="$LOG_DIR/ui.log"
+CARGO="${APPY_CARGO:-cargo}"
+KPACKAGETOOL="${APPY_KPACKAGETOOL:-kpackagetool6}"
 
 build=1
-case "${1:-}" in
-    --no-build) build=0 ;;
-    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    "") ;;
-    *) echo "appy: unknown option '$1' (try --help)" >&2; exit 2 ;;
-esac
+update=1
+start=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-build) build=0 ;;
+        --no-update) update=0 ;;
+        --update) start=0 ;;
+        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "appy: unknown option '$arg' (try --help)" >&2; exit 2 ;;
+    esac
+done
 
 die() { echo "appy: $*" >&2; exit 1; }
+note() { echo "appy: $*"; }
+
+running() { ss -ltn 2>/dev/null | grep -qE '127\.0\.0\.1:(8001|8002)\b'; }
+
+# Fast-forward a clean main to origin/main. Never fatal: Appy starts either way.
+pull_main() {
+    local branch
+    if ! branch=$(git -C "$ROOT" symbolic-ref --short -q HEAD); then
+        note "not updating: no branch checked out"; return 1
+    fi
+    if [[ "$branch" != main ]]; then
+        note "not updating: on branch '$branch', not main"; return 1
+    fi
+    if ! git -C "$ROOT" diff --quiet HEAD --; then
+        note "not updating: there are uncommitted changes"; return 1
+    fi
+    # No prompts and a time limit, so a launch from the pill can't hang on the network
+    if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes" \
+            timeout 20 git -C "$ROOT" fetch --quiet origin main 2>/dev/null; then
+        note "not updating: couldn't reach origin"; return 1
+    fi
+    if [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$(git -C "$ROOT" rev-parse FETCH_HEAD)" ]]; then
+        note "up to date ($(git -C "$ROOT" log -1 --format=%h))"; return 1
+    fi
+    if ! git -C "$ROOT" merge --ff-only --quiet FETCH_HEAD >/dev/null 2>&1; then
+        note "not updating: local main has diverged from origin/main"; return 1
+    fi
+}
+
+# Update, unless Appy is already running (don't swap code under it; the start below
+# refuses anyway). A launcher re-run after an update gets APPY_UPDATED_FROM instead.
+updated_from="${APPY_UPDATED_FROM:-}"
+if (( update )) && [[ -z "$updated_from" ]] && ! { (( start )) && running; }; then
+    before="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -n "$before" ]] && pull_main; then
+        note "updated $(git -C "$ROOT" rev-list --count "$before..HEAD") commit(s), now at $(git -C "$ROOT" log -1 --format='%h %s')"
+        # This script may be one of the files that changed: hand over to the new version
+        if ! git -C "$ROOT" diff --quiet "$before" HEAD -- bin/appy; then
+            APPY_UPDATED_FROM="$before" exec "$ROOT/bin/appy" "$@"
+        fi
+        updated_from="$before"
+    fi
+fi
+
+needs_rebuild=0
+if [[ -n "$updated_from" ]]; then
+    changed="$(git -C "$ROOT" diff --name-only "$updated_from" HEAD)"
+    if grep -q '^appy-ui/' <<<"$changed"; then
+        needs_rebuild=1
+    fi
+    if grep -q '^appy-pill/' <<<"$changed"; then
+        if "$KPACKAGETOOL" -t Plasma/Applet -u "$ROOT/appy-pill" >/dev/null 2>&1; then
+            note "panel pill updated; it switches over when plasmashell restarts"
+        else
+            note "the panel pill changed but couldn't be reinstalled (kpackagetool6 -t Plasma/Applet -u appy-pill)"
+        fi
+    fi
+    if grep -qx 'requirements.txt' <<<"$changed"; then
+        note "requirements.txt changed; to install: .venv/bin/pip install -r requirements.txt && .venv/bin/pip install --force-reinstall --no-deps onnxruntime-gpu"
+    fi
+fi
+
+if (( needs_rebuild )) || { (( build )) && (( start )); }; then
+    if (( needs_rebuild )); then
+        note "the overlay changed; rebuilding..."
+    else
+        note "building overlay..."
+    fi
+    "$CARGO" build --release --quiet --manifest-path "$ROOT/appy-ui/Cargo.toml" \
+        || die "overlay build failed"
+fi
+
+(( start )) || exit 0
 
 [[ -x "$PYTHON" ]] || die "no virtualenv at $ROOT/.venv (see README: python -m venv .venv && .venv/bin/pip install -r requirements.txt)"
 [[ -f "$ROOT/.env" ]] || die "missing $ROOT/.env (copy .env.example and fill it in)"
 
 # Refuse to start a second copy; the ports would clash
-if ss -ltn 2>/dev/null | grep -qE '127\.0\.0\.1:(8001|8002)\b'; then
+if running; then
     die "Appy already seems to be running (port 8001 or 8002 is in use)"
 fi
 
-if (( build )); then
-    echo "appy: building overlay..."
-    cargo build --release --quiet --manifest-path "$ROOT/appy-ui/Cargo.toml" \
-        || die "overlay build failed"
-fi
 [[ -x "$UI_BIN" ]] || die "overlay binary not found at $UI_BIN (run without --no-build)"
 
 mkdir -p "$LOG_DIR"

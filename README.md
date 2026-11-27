@@ -47,6 +47,14 @@ Or start both together with `bin/appy`: it rebuilds the overlay if needed, and C
 saying "quit", or quitting from the pill stops everything. Put it on your PATH with
 `ln -s "$PWD/bin/appy" ~/.local/bin/appy`.
 
+Each start first updates the checkout: on a clean `main` it fast-forwards to
+`origin/main`, rebuilds the overlay if that changed (even with `--no-build`), and
+reinstalls the panel pill if that changed (it switches over when plasmashell restarts).
+On another branch, with uncommitted changes, offline, or diverged, it says why and
+starts what's there. If `requirements.txt` changed it only prints the install command,
+since a plain `pip install` puts the CPU-only onnxruntime back over the GPU one.
+`appy --no-update` skips this; `appy --update` updates without starting.
+
 The panel pill is always in the panel. While Appy is off it shows him asleep; clicking it
 runs `~/.local/bin/appy --no-build` (so the symlink above is needed, and the overlay must
 have been built once), logging to `~/.cache/appy/appy.log`. Appy pops out showing a
