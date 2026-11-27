@@ -345,7 +345,9 @@ class AutoApproveTests(unittest.TestCase):
         self.assertIn("sessions=s1", git_out(self.root, "log", "-1", "--format=%b"))
         self.assertEqual(self.vault.changes(head),
                          {"head": sha, "items": [{"commit": sha, "slug": "bench",
-                                                  "summary": "PSU is a Korad"}]})
+                                                  "summary": "PSU is a Korad",
+                                                  "added": ["PSU is a Korad."],
+                                                  "removed": ["PSU is a Riden."]}]})
         self.assertEqual(self.vault.changes(sha), {"head": sha, "items": []})
 
     def test_auto_commit_skips_a_moved_note(self):

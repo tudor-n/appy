@@ -14,6 +14,27 @@ from typing import Callable
 POLL_SECONDS = 60
 
 
+def _bullets(text: str) -> list[str]:
+    return [line[2:].strip() for line in text.splitlines() if line.startswith("- ")]
+
+
+def describe_change(slug: str, added: list[str], removed: list[str], summary: str) -> str:
+    """One line for Appy about a memory change: the facts themselves when there are any
+    (a model told only "saved: <summary>" tends to deny knowing the fact)."""
+    parts = []
+    if added:
+        parts.append(f"now also says: {'; '.join(added)}")
+    if removed:
+        parts.append(f"no longer says: {'; '.join(removed)}")
+    return f"note '{slug}' " + ("; ".join(parts) if parts else f"changed: {summary}")
+
+
+def change_between(slug: str, before: str, after: str, summary: str) -> str:
+    old, new = _bullets(before), _bullets(after)
+    return describe_change(slug, [b for b in new if b not in old],
+                           [b for b in old if b not in new], summary)
+
+
 class MemoryReview:
     def __init__(self, client, emit_proposals: Callable[[list], None],
                  emit_committed: Callable[[str, str], None],
@@ -106,12 +127,16 @@ class MemoryReview:
             if result.get("undone"):
                 print(f"[memory] undid: {result['undone']}")
                 self.emit_committed("undo", str(result["undone"]))
-                self.on_change(f"undid {str(result['undone']).removeprefix('memory: ')}")
+                what = str(result["undone"]).removeprefix("memory: ")
+                for tag in (" [approved]", " [edited]", " [auto]"):
+                    what = what.removesuffix(tag)
+                self.on_change(f"undone, no longer true: {what}")
             elif result.get("error"):
                 print(f"[memory] undo failed: {result['error']}")
             self._sync(force=True)
 
     def _decide(self, slug: str, decision: str, text: str | None, before: str | None) -> None:
+        item = next((i for i in self._last or [] if i["slug"] == slug), None)
         result = self.client.decide(slug, decision, text, before)
         status = result.get("status")
         print(f"[memory] {decision} {slug}: {status or result.get('error')}")
@@ -123,10 +148,14 @@ class MemoryReview:
             pass  # nothing was written (denied, stale, or an edit identical to the note)
         elif status == "accepted":
             self.emit_committed("approved", str(result.get("summary", "")))
-            self.on_change(f"saved to {slug}: {result.get('summary', '')}")
+            if item:
+                self.on_change(change_between(slug, item["before"], item["after"],
+                                              str(result.get("summary", ""))))
         elif status == "edited":
             self.emit_committed("edited", str(result.get("summary", "")))
-            self.on_change(f"saved Tudor's edit to {slug}: {result.get('summary', '')}")
+            self.on_change(change_between(slug, before if before is not None else
+                                          (item or {}).get("before", ""), text or "",
+                                          str(result.get("summary", ""))))
         self._sync(force=True)
 
     def _send_settings(self) -> None:
@@ -144,7 +173,8 @@ class MemoryReview:
             for item in data["items"]:
                 print(f"[memory] auto-saved {item['slug']}: {item['summary']}")
                 self.emit_committed("auto", item["summary"])
-                self.on_change(f"saved to {item['slug']}: {item['summary']}")
+                self.on_change(describe_change(item["slug"], item.get("added", []),
+                                               item.get("removed", []), item["summary"]))
         if data["head"]:
             self._head = data["head"]
 

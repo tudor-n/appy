@@ -19,6 +19,10 @@ UNREACHABLE = json.dumps({"error": "long-term memory is unreachable right now"})
 # The fields of a proposal as the overlay gets them (see PROTOCOL.md memory_proposals)
 PROPOSAL_FIELDS = ("slug", "title", "summary", "before", "after", "stale")
 TIMEOUT = 3.0
+# The Mac's uvicorn drops idle keep-alive connections after 5 s. Let them go sooner here, or
+# a request after a quiet spell can go out on a connection the server just closed
+# ("Server disconnected without sending a response").
+KEEPALIVE_SECONDS = 2.0
 UPLOAD_TIMEOUT = 5.0
 
 
@@ -57,7 +61,8 @@ class MemoryClient:
         token = os.getenv("MEMORY_TOKEN", "").strip()
         try:
             http = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"},
-                                timeout=TIMEOUT)
+                                timeout=TIMEOUT,
+                                limits=httpx.Limits(keepalive_expiry=KEEPALIVE_SECONDS))
         except Exception as exc:  # a typo in .env must not stop Appy from booting
             print(f"[memory] off: bad MEMORY_URL or MEMORY_TOKEN ({type(exc).__name__}: {exc})")
             return None
@@ -140,7 +145,10 @@ class MemoryClient:
             data = r.json()
             return {"head": str(data.get("head", "")),
                     "items": [{"commit": str(i.get("commit", "")), "slug": str(i.get("slug", "")),
-                               "summary": str(i.get("summary", ""))} for i in data["items"]]}
+                               "summary": str(i.get("summary", "")),
+                               "added": [str(x) for x in i.get("added", [])],
+                               "removed": [str(x) for x in i.get("removed", [])]}
+                              for i in data["items"]]}
         except Exception as exc:
             print(f"[memory] changes unavailable ({type(exc).__name__})")
             return None

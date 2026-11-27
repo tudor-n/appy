@@ -215,10 +215,12 @@ class MemoryReviewTests(unittest.TestCase):
     def test_auto_commits_become_chips_and_notes(self):
         self.review.start()
         self.wait(lambda: self.lists)
-        self.client.auto_items = [{"commit": "bbb", "slug": "bench", "summary": "PSU is a Korad"}]
+        self.client.auto_items = [{"commit": "bbb", "slug": "bench", "summary": "PSU is a Korad",
+                                   "added": ["PSU is a Korad."], "removed": ["PSU is a Riden."]}]
         self.wait(lambda: self.chips)
         self.assertEqual(self.chips, [("auto", "PSU is a Korad")])
-        self.assertEqual(self.notes, ["saved to bench: PSU is a Korad"])
+        self.assertEqual(self.notes, ["note 'bench' now also says: PSU is a Korad.; "
+                                      "no longer says: PSU is a Riden."])
         time.sleep(0.2)  # later polls ask after "bbb": no repeats
         self.assertEqual(len(self.chips), 1)
 
@@ -239,9 +241,23 @@ class MemoryReviewTests(unittest.TestCase):
         self.wait(lambda: len(self.notes) >= 2)
         self.review.undo()
         self.wait(lambda: len(self.notes) >= 3)
-        self.assertEqual(self.notes, ["saved to bench: Replaced the PSU.",
-                                      "saved Tudor's edit to bench: Replaced the PSU.",
-                                      "undid Replaced the PSU. [approved]"])
+        self.assertEqual(self.notes, ["note 'bench' now also says: Korad",
+                                      "note 'bench' now also says: x",
+                                      "undone, no longer true: Replaced the PSU."])
+
+    def test_note_describes_removed_facts_and_falls_back_to_the_summary(self):
+        self.client.items = [dict(ITEM, before="# Bench\n- Riden\n- Rigol\n",
+                                  after="# Bench\n- Korad\n- Rigol\n")]
+        self.review.start()
+        self.review.decide("bench", "accept", None)
+        self.wait(lambda: self.notes)
+        self.assertEqual(self.notes[0], "note 'bench' now also says: Korad; no longer says: Riden")
+        self.client.items = [dict(ITEM, before="# Bench\n> old\n", after="# Bench\n> new\n")]
+        self.review.refresh()
+        self.wait(lambda: len(self.lists) >= 3)
+        self.review.decide("bench", "accept", None)
+        self.wait(lambda: len(self.notes) >= 2)
+        self.assertEqual(self.notes[1], "note 'bench' changed: Replaced the PSU.")
 
     def test_set_auto_approve_emits_the_macs_value(self):
         self.review.start()

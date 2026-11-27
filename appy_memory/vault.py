@@ -501,8 +501,14 @@ class Vault:
             except GitError:
                 continue
             notes = [f for f in files if f.startswith("memory/") and f.endswith(".md")]
+            before = (self.git.file_at(f"{sha}^", notes[0]) or "") if notes else ""
+            after = (self.git.file_at(sha, notes[0]) or "") if notes else ""
+            old, new = self._bullets(before), self._bullets(after)
             items.append({"commit": sha, "slug": notes[0][len("memory/"):-3] if notes else "",
-                          "summary": subject[len("memory: "):-len(AUTO_TAG)]})
+                          "summary": subject[len("memory: "):-len(AUTO_TAG)],
+                          # the facts themselves, so Appy can be told what changed
+                          "added": [b[2:] for b in new if b not in old],
+                          "removed": [b[2:] for b in old if b not in new]})
         return {"head": self.git.head(), "items": items}
 
     def _save_state(self, state: dict) -> None:

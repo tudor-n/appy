@@ -81,6 +81,13 @@ class GitRepo:
             return []
         return [tuple(line.split("\x1f", 1)) for line in out.splitlines() if "\x1f" in line]
 
+    def file_at(self, rev: str, path: str) -> str | None:
+        """A file's text at a revision (None if it didn't exist there)."""
+        try:
+            return self._git("show", f"{rev}:{path}")
+        except GitError:
+            return None
+
     def commit_info(self, sha: str) -> tuple[str, list[str]]:
         """A commit's message body and the files it changed."""
         out = self._git("show", "--name-only", "--format=%b%x1e", sha)

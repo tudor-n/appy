@@ -138,7 +138,9 @@ panel; undoing an auto-approved one just reverts it.
 
 Appy knows about every change right away: his memory in the system prompt is built once at
 startup (so the prompt stays cached), and changes made during the session ride along with your
-next message as a short `[Memory updated since your last reply: …]` note.
+next message as a short note with the facts themselves, like
+`[Memory update: … treat as known: note 'bench' now also says: The PSU is a Korad KA3005P.; no
+longer says: The PSU is a Riden RD6024.]`.
 
 **Auto-approve.** Right-click the panel pill → **Auto-approve memories** (shown while Appy runs).
 With it on, nothing waits for review: what the consolidator learns is committed straight away

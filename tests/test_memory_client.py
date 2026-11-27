@@ -147,6 +147,10 @@ class MemoryClientTests(unittest.TestCase):
             memory = MemoryClient.from_env(SID)
         self.assertEqual(memory.http.headers["authorization"], "Bearer k")
         self.assertEqual(str(memory.http.base_url).rstrip("/"), "http://h:1")
+        # The Mac's uvicorn closes idle connections after 5 s; reusing one it just closed
+        # fails with "Server disconnected" (a toggle or a click after a quiet spell), so
+        # the client must let them go first. (httpx keeps this on a private attribute.)
+        self.assertLess(memory.http._transport._pool._keepalive_expiry, 5.0)
 
 
     def test_bad_config_means_memory_off(self):
