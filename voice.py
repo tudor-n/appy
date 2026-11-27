@@ -6,17 +6,17 @@ import onnxruntime as ort
 import sounddevice as sd
 from kokoro_onnx import Kokoro
 
-from status import ActivityCounter
+from status import SpeechActivity
 
 
 class Speaker:
-    def __init__(self, on_speak_start=None, on_speak_end=None):
-        """on_speak_start fires when text is queued with nothing else pending;
-        on_speak_end fires once everything queued has played (or failed to synthesise)."""
+    def __init__(self, on_audio=None):
+        """on_audio(state) reports "queued", "playing" (the audio has actually started)
+        and "silent" (everything queued has played or failed); see SpeechActivity."""
         ort.set_default_logger_severity(3)
         ort.preload_dlls()
 
-        self._activity = ActivityCounter(on_speak_start, on_speak_end)
+        self._activity = SpeechActivity(on_audio)
 
         model = os.getenv("KOKORO_MODEL", "kokoro-v1.0.onnx")
         voices = os.getenv("KOKORO_VOICES", "voices-v1.0.bin")
@@ -63,6 +63,7 @@ class Speaker:
                     break
 
                 try:
+                    self._activity.playing()
                     stream.write(samples)
                 finally:
                     self.audio_queue.task_done()

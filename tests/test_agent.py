@@ -5,7 +5,7 @@ import unittest
 import agent as agent_mod
 import compaction
 from agent import Agent, prune_old_tool_outputs
-from status import ActivityCounter, StatusTracker
+from status import SpeechActivity, StatusTracker
 from compaction import estimate_tokens
 from tools import ForcedCall
 from tests.fakes import (
@@ -93,10 +93,12 @@ class AgentTurnTests(unittest.TestCase):
 
 
     def test_status_sequence_for_tool_turn(self):
-        agent, _, _, ui = make_agent([
+        agent, _, speaker, ui = make_agent([
             [text_chunk("Let me check, one moment please. "), tool_chunk(0, "c1", "get_weather", "{}")],
             [text_chunk("Sunny and warm.")],
         ])
+        activity = SpeechActivity(agent.status.set_audio)
+        speaker.on_speak = lambda: (activity.add(), activity.playing(), activity.done())  # instant playback
         run_quietly(agent, "weather?")
         statuses = [e[1] for e in ui.events if e[0] == "status"]
         # thinking -> talking -> back to thinking while the tool runs -> talking -> idle
@@ -147,13 +149,13 @@ class AgentTurnTests(unittest.TestCase):
         # Regression: the last sentence is only queued when the stream ends, so the
         # turn finishes before its audio starts. That must not flash "idle".
         agent, _, speaker, ui = make_agent([[text_chunk("Sure, it's 14 degrees in Sibiu.")]])
-        activity = ActivityCounter(
-            lambda: agent.status.set_speaking(True), lambda: agent.status.set_speaking(False)
-        )
+        activity = SpeechActivity(agent.status.set_audio)
         speaker.on_speak = activity.add
         run_quietly(agent, "temp?")
 
         statuses = lambda: [e[1] for e in ui.events if e[0] == "status"]
+        self.assertEqual(statuses(), ["thinking"])  # not "speaking" until it's audible
+        activity.playing()
         self.assertEqual(statuses(), ["thinking", "speaking"])
         activity.done()  # audio finished
         self.assertEqual(statuses(), ["thinking", "speaking", "idle"])

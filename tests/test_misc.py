@@ -4,7 +4,7 @@ import time
 import unittest
 
 import tools
-from status import ActivityCounter, StatusTracker
+from status import SpeechActivity, StatusTracker
 
 
 class StatusTrackerTests(unittest.TestCase):
@@ -12,32 +12,57 @@ class StatusTrackerTests(unittest.TestCase):
         self.sent = []
         self.tracker = StatusTracker(self.sent.append)
 
-    def test_dedupes_and_combines_phase_with_audio(self):
+    def test_speaking_only_once_audio_plays(self):
+        # Regression: the mascot's mouth moved for ~1s before any sound, because the
+        # first streamed token already counted as "speaking"
         t = self.tracker
         t.set_phase("thinking")
         t.set_phase("thinking")
         t.set_phase("replying")
-        t.set_speaking(True)
-        t.set_speaking(False)  # gap between sentences: still replying
+        t.set_audio("queued")        # first sentence is being synthesised
+        self.assertEqual(self.sent, ["thinking"])
+        t.set_audio("playing")
+        t.set_audio("silent")        # gap between sentences: still replying
         t.set_phase("idle")
         self.assertEqual(self.sent, ["thinking", "speaking", "idle"])
 
     def test_audio_outlasting_the_turn(self):
         t = self.tracker
         t.set_phase("replying")
-        t.set_speaking(True)
+        t.set_audio("queued")
+        t.set_audio("playing")
         t.set_phase("idle")  # LLM done, audio still playing
         self.assertEqual(self.sent[-1], "speaking")
-        t.set_speaking(False)
+        t.set_audio("silent")
         self.assertEqual(self.sent[-1], "idle")
+
+    def test_queued_audio_after_the_turn_keeps_thinking(self):
+        t = self.tracker
+        t.set_phase("replying")
+        t.set_audio("queued")
+        t.set_phase("idle")  # stream ended before the audio started
+        self.assertEqual(self.sent, ["thinking"])
+        t.set_audio("playing")
+        t.set_audio("silent")
+        self.assertEqual(self.sent, ["thinking", "speaking", "idle"])
 
     def test_trailing_speech_during_tool_round_falls_back_to_thinking(self):
         t = self.tracker
         t.set_phase("replying")
-        t.set_speaking(True)
+        t.set_audio("queued")
+        t.set_audio("playing")
         t.set_phase("thinking")  # tool call starts while pre-tool sentence plays
-        t.set_speaking(False)
-        self.assertEqual(self.sent, ["speaking", "thinking"])
+        t.set_audio("silent")
+        self.assertEqual(self.sent, ["thinking", "speaking", "thinking"])
+        t.set_phase("replying")  # the answer streams, but isn't audible yet
+        self.assertEqual(self.sent[-1], "thinking")
+        t.set_audio("queued")
+        t.set_audio("playing")
+        self.assertEqual(self.sent, ["thinking", "speaking", "thinking", "speaking"])
+
+    def test_rejects_unknown_audio_state(self):
+        with self.assertRaises(ValueError):
+            self.tracker.set_audio("loud")
 
     def test_force_publish_resends(self):
         self.tracker.publish(force=True)
@@ -55,15 +80,17 @@ class StatusTrackerTests(unittest.TestCase):
         # audio ended, closing the UI's "thinking" badge and opening a second one.
         t = self.tracker
         t.set_phase("replying")
-        t.set_speaking(True)
+        t.set_audio("playing")
         t.set_phase("idle")          # previous answer streamed, audio still playing
         t.queue_turn()               # user types the next message
-        t.set_speaking(False)        # audio ends
-        self.assertEqual(self.sent, ["speaking", "thinking"])
+        t.set_audio("silent")        # audio ends
+        self.assertEqual(self.sent, ["thinking", "speaking", "thinking"])
         t.begin_turn(queued=True)    # the queued message's turn starts
         t.set_phase("replying")
+        t.set_audio("playing")
         t.set_phase("idle")
-        self.assertEqual(self.sent, ["speaking", "thinking", "speaking", "idle"])
+        t.set_audio("silent")
+        self.assertEqual(self.sent, ["thinking", "speaking", "thinking", "speaking", "idle"])
 
     def test_begin_turn_without_queue(self):
         self.tracker.begin_turn(queued=False)
@@ -74,13 +101,14 @@ class StatusTrackerTests(unittest.TestCase):
         # The last sentence's audio can report "done" after compaction has started
         t = self.tracker
         t.set_phase("replying")
-        t.set_speaking(True)
+        t.set_audio("queued")
+        t.set_audio("playing")
         t.set_phase("idle")
         t.set_phase("compacting")
-        t.set_speaking(False)
-        self.assertEqual(self.sent, ["speaking", "compacting"])
+        t.set_audio("silent")
+        self.assertEqual(self.sent, ["thinking", "speaking", "compacting"])
         t.set_phase("idle")
-        self.assertEqual(self.sent, ["speaking", "compacting", "idle"])
+        self.assertEqual(self.sent, ["thinking", "speaking", "compacting", "idle"])
 
     def test_typed_message_during_compaction_keeps_the_pill(self):
         t = self.tracker
@@ -103,9 +131,9 @@ class StatusTrackerTests(unittest.TestCase):
 
     def test_late_speaking_end_does_not_cancel_listening(self):
         t = self.tracker
-        t.set_speaking(True)
+        t.set_audio("playing")
         t.heard_speech()
-        t.set_speaking(False)
+        t.set_audio("silent")
         self.assertEqual(self.sent, ["speaking"])
 
     def test_discarded_speech_resends_the_real_state(self):
@@ -123,17 +151,36 @@ class StatusTrackerTests(unittest.TestCase):
         self.assertEqual(self.sent, ["booting", "idle"])
 
 
-class ActivityCounterTests(unittest.TestCase):
-    def test_start_and_end_fire_once_per_burst(self):
-        events = []
-        c = ActivityCounter(lambda: events.append("start"), lambda: events.append("end"))
-        c.add(); c.add(); c.done()
-        self.assertTrue(c.active)
-        c.done()
-        c.done()  # extra done() is ignored
-        c.add(); c.done()
-        self.assertEqual(events, ["start", "end", "start", "end"])
-        self.assertFalse(c.active)
+class SpeechActivityTests(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        self.a = SpeechActivity(self.events.append)
+
+    def test_playing_only_when_audio_starts(self):
+        a = self.a
+        a.add(); a.add()
+        self.assertEqual(self.events, ["queued"])
+        a.playing(); a.done()
+        a.playing()  # second sentence of the same burst
+        self.assertTrue(a.active)
+        a.done()
+        a.done()  # extra done() is ignored
+        self.assertEqual(self.events, ["queued", "playing", "silent"])
+        self.assertFalse(a.active)
+
+    def test_playing_with_nothing_queued_is_ignored(self):
+        self.a.playing()
+        self.assertEqual(self.events, [])
+
+    def test_failed_synthesis_goes_silent_without_playing(self):
+        self.a.add(); self.a.done()
+        self.assertEqual(self.events, ["queued", "silent"])
+
+    def test_each_burst_reports_playing_again(self):
+        a = self.a
+        a.add(); a.playing(); a.done()
+        a.add(); a.playing(); a.done()
+        self.assertEqual(self.events, ["queued", "playing", "silent"] * 2)
 
 
 # Shaped like Open-Meteo's response (what tools._fetch_weather caches)
