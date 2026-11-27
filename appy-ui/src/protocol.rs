@@ -126,6 +126,11 @@ pub enum BackendEvent {
     MemoryCommitted {
         kind: MemoryKind,
         summary: String,
+        /// The sentences the change added and removed (older backends send neither).
+        #[serde(default)]
+        facts: Vec<String>,
+        #[serde(default)]
+        dropped: Vec<String>,
     },
     /// The memory service's settings (sent on connect and after every change).
     MemorySettings {
@@ -434,6 +439,25 @@ mod tests {
         assert_eq!(json, r#"{"type":"memory_undo"}"#);
         let json = serde_json::to_string(&ClientEvent::MemoryAutoApprove { on: true }).unwrap();
         assert_eq!(json, r#"{"type":"memory_auto_approve","on":true}"#);
+    }
+
+    #[test]
+    fn memory_committed_facts_are_optional() {
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"memory_committed","kind":"approved","summary":"s","facts":["A."],"dropped":["B."]}"#,
+        )
+        .unwrap();
+        let BackendEvent::MemoryCommitted { facts, dropped, .. } = ev else {
+            panic!("wrong event")
+        };
+        assert_eq!((facts, dropped), (vec!["A.".to_string()], vec!["B.".to_string()]));
+        let ev: BackendEvent =
+            serde_json::from_str(r#"{"type":"memory_committed","kind":"undo","summary":"s"}"#)
+                .unwrap();
+        let BackendEvent::MemoryCommitted { facts, dropped, .. } = ev else {
+            panic!("wrong event")
+        };
+        assert!(facts.is_empty() && dropped.is_empty());
     }
 
     #[test]

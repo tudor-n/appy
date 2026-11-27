@@ -300,6 +300,121 @@ impl TrayState {
     }
 }
 
+/// Memory changes this close together share one pill in the chat.
+pub const BURST_WINDOW: Duration = Duration::from_secs(4);
+
+/// One pill's worth of memory changes: "Remembered 3 facts", unfolding into the facts.
+#[derive(Debug, Clone)]
+pub struct MemoryBurst {
+    /// A burst of undos (they never mix with changes).
+    undo: bool,
+    /// Every change was of a kind this UI doesn't know (no Undo for those).
+    unknown: bool,
+    changes: usize,
+    remembered: usize,
+    forgot: usize,
+    /// (sentence, removed)
+    lines: Vec<(String, bool)>,
+    last: Instant,
+}
+
+impl MemoryBurst {
+    pub fn new(
+        kind: MemoryKind,
+        summary: &str,
+        facts: Vec<String>,
+        dropped: Vec<String>,
+        now: Instant,
+    ) -> Self {
+        let mut burst = Self {
+            undo: kind == MemoryKind::Undo,
+            unknown: true,
+            changes: 0,
+            remembered: 0,
+            forgot: 0,
+            lines: Vec::new(),
+            last: now,
+        };
+        burst.add(kind, summary, facts, dropped, now);
+        burst
+    }
+
+    /// Whether a change arriving `now` joins this pill.
+    pub fn accepts(&self, kind: MemoryKind, now: Instant) -> bool {
+        (kind == MemoryKind::Undo) == self.undo
+            && now.saturating_duration_since(self.last) <= BURST_WINDOW
+    }
+
+    pub fn add(
+        &mut self,
+        kind: MemoryKind,
+        summary: &str,
+        facts: Vec<String>,
+        dropped: Vec<String>,
+        now: Instant,
+    ) {
+        self.changes += 1;
+        self.last = now;
+        self.unknown &= kind == MemoryKind::Other;
+        if facts.is_empty() && dropped.is_empty() {
+            let text = summary.strip_prefix("memory: ").unwrap_or(summary);
+            let text = ["[approved]", "[edited]", "[auto]"]
+                .iter()
+                .fold(text, |t, tag| t.strip_suffix(tag).unwrap_or(t))
+                .trim();
+            let text = text.strip_prefix("- ").unwrap_or(text);
+            if !self.undo {
+                self.remembered += 1;
+            }
+            self.lines.push((text.to_string(), false));
+            return;
+        }
+        self.remembered += facts.len();
+        self.forgot += dropped.len();
+        self.lines.extend(facts.into_iter().map(|f| (f, false)));
+        self.lines.extend(dropped.into_iter().map(|d| (d, true)));
+    }
+
+    pub fn title(&self) -> String {
+        let count = |n: usize, one: &str, many: &str| {
+            if n == 1 {
+                one.to_string()
+            } else {
+                format!("{n} {many}")
+            }
+        };
+        if self.undo {
+            return format!("Undid {}", count(self.changes, "a change", "changes"));
+        }
+        match (self.remembered, self.forgot) {
+            (r, 0) => format!("Remembered {}", count(r, "a fact", "facts")),
+            (0, f) => format!("Forgot {}", count(f, "a fact", "facts")),
+            (r, f) => format!("Remembered {} · forgot {f}", count(r, "a fact", "facts")),
+        }
+    }
+
+    /// What the dropdown lists: (sentence, removed).
+    pub fn lines(&self) -> Vec<(String, bool)> {
+        self.lines.clone()
+    }
+
+    /// How many `memory_undo`s the Undo button sends: the whole pill, or (on an "Undid"
+    /// pill) one more step back.
+    pub fn undo_count(&self) -> usize {
+        if self.undo { 1 } else { self.changes }
+    }
+
+    pub fn undo_label(&self) -> Option<&'static str> {
+        if self.undo {
+            Some("Undo earlier")
+        } else if self.unknown {
+            None
+        } else {
+            Some("Undo")
+        }
+    }
+}
+
 /// The chip's Undo button label: every change can be undone; after an undo, the next
 /// press goes further back.
 pub fn undo_label(kind: MemoryKind) -> Option<&'static str> {
@@ -847,6 +962,68 @@ mod tests {
     #[test]
     fn accept_button_reads_approve() {
         assert_eq!(Action::Accept.label(), "Approve");
+    }
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn burst_title_counts() {
+        let t0 = Instant::now();
+        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], t0);
+        assert_eq!(b.title(), "Remembered a fact");
+        b.add(MemoryKind::Auto, "s", v(&["B.", "C."]), vec![], t0);
+        assert_eq!(b.title(), "Remembered 3 facts");
+        let f = MemoryBurst::new(MemoryKind::Forget, "- x", vec![], v(&["x"]), t0);
+        assert_eq!(f.title(), "Forgot a fact");
+        let mut m = MemoryBurst::new(MemoryKind::Remember, "- a", v(&["a"]), vec![], t0);
+        m.add(MemoryKind::Approved, "s", v(&["b"]), v(&["c"]), t0);
+        assert_eq!(m.title(), "Remembered 2 facts · forgot 1");
+        let mut u = MemoryBurst::new(MemoryKind::Undo, "memory: x [approved]", vec![], vec![], t0);
+        assert_eq!(u.title(), "Undid a change");
+        u.add(MemoryKind::Undo, "memory: y", vec![], vec![], t0);
+        assert_eq!(u.title(), "Undid 2 changes");
+        assert_eq!(m.lines(), vec![("a".into(), false), ("b".into(), false), ("c".into(), true)]);
+    }
+
+    #[test]
+    fn burst_window_and_family() {
+        let t0 = Instant::now();
+        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], t0);
+        assert!(b.accepts(MemoryKind::Auto, t0 + Duration::from_secs(3)));
+        assert!(!b.accepts(MemoryKind::Undo, t0 + Duration::from_secs(1)));
+        b.add(MemoryKind::Auto, "s", v(&["B."]), vec![], t0 + Duration::from_secs(3));
+        // the window runs from the newest change
+        assert!(b.accepts(MemoryKind::Approved, t0 + Duration::from_secs(6)));
+        assert!(!b.accepts(MemoryKind::Approved, t0 + Duration::from_secs(8)));
+        let u = MemoryBurst::new(MemoryKind::Undo, "memory: x", vec![], vec![], t0);
+        assert!(u.accepts(MemoryKind::Undo, t0));
+        assert!(!u.accepts(MemoryKind::Approved, t0));
+    }
+
+    #[test]
+    fn summary_fallback_when_no_facts() {
+        let t0 = Instant::now();
+        let b = MemoryBurst::new(MemoryKind::Approved, "Retitled the note", vec![], vec![], t0);
+        assert_eq!(b.title(), "Remembered a fact");
+        assert_eq!(b.lines(), vec![("Retitled the note".into(), false)]);
+        let u = MemoryBurst::new(MemoryKind::Undo, "memory: Added the HUD [approved]", vec![], vec![], t0);
+        assert_eq!(u.lines(), vec![("Added the HUD".into(), false)]);
+    }
+
+    #[test]
+    fn undo_count_matches_changes() {
+        let t0 = Instant::now();
+        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], t0);
+        b.add(MemoryKind::Approved, "s", v(&["B.", "C."]), vec![], t0);
+        b.add(MemoryKind::Auto, "s", v(&["D."]), vec![], t0);
+        assert_eq!((b.undo_count(), b.undo_label()), (3, Some("Undo")));
+        let mut u = MemoryBurst::new(MemoryKind::Undo, "memory: x", vec![], vec![], t0);
+        u.add(MemoryKind::Undo, "memory: y", vec![], vec![], t0);
+        assert_eq!((u.undo_count(), u.undo_label()), (1, Some("Undo earlier")));
+        let o = MemoryBurst::new(MemoryKind::Other, "x", vec![], vec![], t0);
+        assert_eq!(o.undo_label(), None);
     }
 
     #[test]

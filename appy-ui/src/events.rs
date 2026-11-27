@@ -70,7 +70,7 @@ impl App {
                 self.show_card(&mut s, now);
             }
             BackendEvent::MemoryProposals { items } => self.ui.memory.set_items(&items),
-            BackendEvent::MemoryCommitted { kind, summary } => {
+            BackendEvent::MemoryCommitted { kind, summary, .. } => {
                 let undo = undo_label(kind).map(|label| {
                     let tx = self.sender();
                     let undo: Box<dyn Fn()> = Box::new(move || {
