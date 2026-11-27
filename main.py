@@ -56,6 +56,10 @@ def main():
         if review_box["review"]:
             review_box["review"].undo()
 
+    def on_memory_auto_approve(on: bool):
+        if review_box["review"]:
+            review_box["review"].set_auto_approve(on)
+
     # Start WebSocket bridge immediately so the UI shows "loading..." during boot
     ui = UiBridge(
         on_user_text=on_user_text,
@@ -64,6 +68,7 @@ def main():
         on_compact=lambda: turn_queue.put(("compact", "")),
         on_memory_decision=on_memory_decision,
         on_memory_undo=on_memory_undo,
+        on_memory_auto_approve=on_memory_auto_approve,
     )
     ui.start()
     status.announce("booting")
@@ -98,8 +103,8 @@ def main():
     log.start(model=model, effort=effort_state["value"])
 
     # Long-term memory lives on the Mac. Its context goes into the system prompt once,
-    # here, so the prompt stays byte-for-byte the same all run (KV cache); writes made
-    # during the run show up next session.
+    # here, so the prompt stays byte-for-byte the same all run (KV cache); changes made
+    # during the run reach Appy as a note on his next message (Agent.note_memory_change).
     memory = MemoryClient.from_env(log.session_id)
     tools.set_memory(memory)
     context = memory.context() if memory else None
@@ -117,9 +122,6 @@ def main():
             print(f"[memory] system prompt -> {dump}")
         except OSError as exc:
             print(f"[memory] couldn't write {dump}: {exc}")
-    if memory:  # the overlay's review card for what the consolidator learned
-        review_box["review"] = MemoryReview(memory, ui.memory_proposals, ui.memory_committed)
-        review_box["review"].start()
     if memory:  # logs left behind by a crash or while the Mac was down
         threading.Thread(target=memory.upload_leftovers, args=(log.path.parent, log.path),
                          daemon=True).start()
@@ -143,6 +145,11 @@ def main():
         # APPY_DUMP_COMPACTION=1: write each compaction's prompt + summary next to the log
         compaction_dump=log.path.with_suffix("") if os.getenv("APPY_DUMP_COMPACTION") else None,
     )
+    if memory:  # the overlay's review panel for what the consolidator learned
+        review_box["review"] = MemoryReview(memory, ui.memory_proposals, ui.memory_committed,
+                                            emit_settings=ui.memory_settings,
+                                            on_change=agent.note_memory_change)
+        review_box["review"].start()
 
     def _voice_forwarder():
         while ear.running:

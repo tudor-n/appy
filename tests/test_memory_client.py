@@ -1,3 +1,5 @@
+import io
+from contextlib import redirect_stdout
 import json
 import os
 import subprocess
@@ -157,6 +159,22 @@ class MemoryClientTests(unittest.TestCase):
     def test_odd_slug_never_raises(self):
         self.assertIn("error", json.loads(down_client().read("a\nb")))
         self.assertIn("error", json.loads(self.memory.read("a\x00b")))
+
+    def test_settings_and_changes(self):
+        self.assertEqual(self.memory.settings(), {"auto_approve": False})
+        head = self.memory.changes("")["head"]
+        self.assertTrue(head)
+        r = self.memory.set_settings(True)
+        self.assertEqual((r["auto_approve"], r["accepted"]), (True, []))
+        self.assertEqual(self.memory.settings(), {"auto_approve": True})
+        self.assertEqual(self.memory.changes(head), {"head": head, "items": []})
+
+    def test_settings_service_down(self):
+        down = down_client()
+        with redirect_stdout(io.StringIO()):
+            self.assertIsNone(down.settings())
+            self.assertIsNone(down.changes("abc"))
+            self.assertEqual(down.set_settings(True), UNREACHABLE)
 
 if __name__ == "__main__":
     unittest.main()

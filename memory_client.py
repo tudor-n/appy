@@ -119,6 +119,32 @@ class MemoryClient:
     def undo(self) -> dict:
         return json.loads(self._call("POST", "/undo", {}))
 
+    def settings(self) -> dict | None:
+        """{"auto_approve": bool}, or None if the service can't be reached."""
+        try:
+            r = self.http.get("/settings")
+            r.raise_for_status()
+            return {"auto_approve": r.json().get("auto_approve") is True}
+        except Exception as exc:
+            print(f"[memory] settings unavailable ({type(exc).__name__})")
+            return None
+
+    def set_settings(self, auto_approve: bool) -> dict:
+        return json.loads(self._call("PUT", "/settings", {"auto_approve": bool(auto_approve)}))
+
+    def changes(self, after: str) -> dict | None:
+        """Auto-approved commits after `after`: {"head", "items"}; None if unreachable."""
+        try:
+            r = self.http.get("/changes", params={"after": after})
+            r.raise_for_status()
+            data = r.json()
+            return {"head": str(data.get("head", "")),
+                    "items": [{"commit": str(i.get("commit", "")), "slug": str(i.get("slug", "")),
+                               "summary": str(i.get("summary", ""))} for i in data["items"]]}
+        except Exception as exc:
+            print(f"[memory] changes unavailable ({type(exc).__name__})")
+            return None
+
     def _call(self, method: str, path: str, body: dict | None = None) -> str:
         try:
             r = self.http.request(method, path, json=body)

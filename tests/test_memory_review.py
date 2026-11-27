@@ -17,6 +17,25 @@ class FakeClient:
         self.down = False
         self.next_decision = None
         self.undone = "memory: Replaced the PSU. [approved]"
+        self.auto = False
+        self.set_result = None
+        self.head = "aaa"
+        self.auto_items = []
+
+    def settings(self):
+        return None if self.down else {"auto_approve": self.auto}
+
+    def set_settings(self, auto_approve):
+        if self.set_result is not None:
+            return self.set_result
+        self.auto = auto_approve
+        return {"auto_approve": auto_approve, "accepted": [], "stale": []}
+
+    def changes(self, after):
+        if self.down:
+            return None
+        items = self.auto_items if after == "aaa" else []
+        return {"head": "bbb" if items else after or self.head, "items": items}
 
     def proposals(self):
         return None if self.down else [dict(i) for i in self.items]
@@ -56,7 +75,21 @@ class MemoryReviewTests(unittest.TestCase):
                 self.chips.append((kind, summary))
                 self.changed.notify_all()
 
-        self.review = MemoryReview(self.client, emit_list, emit_chip, poll_seconds=0.05)
+        self.settings = []
+        self.notes = []
+
+        def emit_settings(on):
+            with self.changed:
+                self.settings.append(on)
+                self.changed.notify_all()
+
+        def on_change(line):
+            with self.changed:
+                self.notes.append(line)
+                self.changed.notify_all()
+
+        self.review = MemoryReview(self.client, emit_list, emit_chip, emit_settings=emit_settings,
+                                   on_change=on_change, poll_seconds=0.05)
 
     def tearDown(self):
         self.review.stop()
@@ -172,6 +205,54 @@ class MemoryReviewTests(unittest.TestCase):
         self.review.tool_committed("memory_remember", "not json")
         self.assertEqual(self.chips, [("remember", "- Tudor lives in Sibiu."), ("forget", "- x")])
 
+
+    def test_start_sends_the_setting(self):
+        self.client.auto = True
+        self.review.start()
+        self.wait(lambda: self.settings)
+        self.assertEqual(self.settings, [True])
+
+    def test_auto_commits_become_chips_and_notes(self):
+        self.review.start()
+        self.wait(lambda: self.lists)
+        self.client.auto_items = [{"commit": "bbb", "slug": "bench", "summary": "PSU is a Korad"}]
+        self.wait(lambda: self.chips)
+        self.assertEqual(self.chips, [("auto", "PSU is a Korad")])
+        self.assertEqual(self.notes, ["saved to bench: PSU is a Korad"])
+        time.sleep(0.2)  # later polls ask after "bbb": no repeats
+        self.assertEqual(len(self.chips), 1)
+
+    def test_head_is_taken_at_start_so_old_auto_commits_are_not_replayed(self):
+        self.client.head = "zzz"  # commits before "zzz" are history
+        self.client.auto_items = [{"commit": "bbb", "slug": "bench", "summary": "old"}]
+        self.review.start()
+        self.wait(lambda: self.lists)
+        time.sleep(0.2)
+        self.assertEqual(self.chips, [])
+
+    def test_accept_edit_undo_reach_on_change(self):
+        self.review.start()
+        self.review.decide("bench", "accept", None)
+        self.wait(lambda: self.notes)
+        self.client.items = [dict(ITEM)]
+        self.review.decide("bench", "edit", "# Bench\n- x\n")
+        self.wait(lambda: len(self.notes) >= 2)
+        self.review.undo()
+        self.wait(lambda: len(self.notes) >= 3)
+        self.assertEqual(self.notes, ["saved to bench: Replaced the PSU.",
+                                      "saved Tudor's edit to bench: Replaced the PSU.",
+                                      "undid Replaced the PSU. [approved]"])
+
+    def test_set_auto_approve_emits_the_macs_value(self):
+        self.review.start()
+        self.wait(lambda: self.settings)
+        self.review.set_auto_approve(True)
+        self.wait(lambda: len(self.settings) >= 2)
+        self.assertEqual(self.settings[-1], True)
+        self.client.set_result = {"error": "long-term memory is unreachable right now"}
+        self.review.set_auto_approve(False)
+        self.wait(lambda: len(self.settings) >= 3)
+        self.assertEqual(self.settings[-1], True)  # the Mac still says on
 
 if __name__ == "__main__":
     unittest.main()

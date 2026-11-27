@@ -90,6 +90,7 @@ pub fn chip_text(kind: MemoryKind, summary: &str) -> String {
         MemoryKind::Forget => format!("Forgot: {fact}"),
         MemoryKind::Approved => format!("Saved: {fact}"),
         MemoryKind::Edited => format!("Saved your edit: {fact}"),
+        MemoryKind::Auto => format!("Auto-saved: {fact}"),
         MemoryKind::Undo => format!("Undid: {}", fact.strip_prefix("memory: ").unwrap_or(fact)),
         MemoryKind::Other => format!("Memory: {fact}"),
     }
@@ -232,7 +233,11 @@ impl TrayState {
 /// press goes further back.
 pub fn undo_label(kind: MemoryKind) -> Option<&'static str> {
     match kind {
-        MemoryKind::Remember | MemoryKind::Forget | MemoryKind::Approved | MemoryKind::Edited => {
+        MemoryKind::Remember
+        | MemoryKind::Forget
+        | MemoryKind::Approved
+        | MemoryKind::Edited
+        | MemoryKind::Auto => {
             Some("Undo")
         }
         MemoryKind::Undo => Some("Undo earlier"),
@@ -574,6 +579,7 @@ mod tests {
         assert_eq!(undo_label(MemoryKind::Remember), Some("Undo"));
         assert_eq!(undo_label(MemoryKind::Approved), Some("Undo"));
         assert_eq!(undo_label(MemoryKind::Undo), Some("Undo earlier"));
+        assert_eq!(undo_label(MemoryKind::Auto), Some("Undo"));
         assert_eq!(undo_label(MemoryKind::Other), None);
     }
 
@@ -603,6 +609,7 @@ mod tests {
             "Undid: remember core: x"
         );
         assert_eq!(chip_text(MemoryKind::Other, "x"), "Memory: x");
+        assert_eq!(chip_text(MemoryKind::Auto, "PSU is a Korad"), "Auto-saved: PSU is a Korad");
     }
 }
 

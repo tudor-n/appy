@@ -1,5 +1,6 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
 import json
+import threading
 from pathlib import Path
 from collections import deque
 
@@ -156,6 +157,16 @@ class Agent:
         # never enter the history)
         self.last_usage: int | None = None
         self._usage_messages = 0
+        # Memory changes since the last turn (approved, edited, undone, auto-saved). The
+        # system prompt's memory is built once at startup, so these ride along with the
+        # next user message instead.
+        self._memory_notes: list[str] = []
+        self._memory_lock = threading.Lock()
+
+    def note_memory_change(self, line: str) -> None:
+        """Tell Appy about a memory change on his next turn (any thread)."""
+        with self._memory_lock:
+            self._memory_notes.append(line)
 
     @property
     def recent_tools(self) -> frozenset[str]:
@@ -195,7 +206,11 @@ class Agent:
         picks the arguments, and if it skips the call anyway the agent makes it itself
         with `force.fallback_args` (see tools.forced_call for why)."""
         checkpoint = len(self.messages)
-        self.messages.append({"role": "user", "content": user_text})
+        with self._memory_lock:
+            notes, self._memory_notes = self._memory_notes, []
+        content = (f"[Memory updated since your last reply: {'; '.join(notes)}]\n\n{user_text}"
+                   if notes else user_text)
+        self.messages.append({"role": "user", "content": content})
         self.status.set_phase("thinking")
         try:
             self._run_rounds(effort, speak_aloud, force)
@@ -204,6 +219,8 @@ class Agent:
             # user messages in a row on the next turn, which strict chat templates
             # (e.g. Gemma's) reject, breaking every later request.
             del self.messages[checkpoint:]
+            with self._memory_lock:  # Appy never saw them: keep them for the next turn
+                self._memory_notes[:0] = notes
             print(f"\n[llm error] {type(exc).__name__}: {exc}\n")
             apology = describe_error(exc)
             self.ui.response(apology, "skeptical")

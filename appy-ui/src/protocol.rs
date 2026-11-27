@@ -153,6 +153,8 @@ pub enum MemoryKind {
     Approved,
     Edited,
     Undo,
+    /// Committed by the Mac with auto-approve on.
+    Auto,
     /// A kind newer than this UI: still shown, without an Undo button.
     #[serde(other)]
     Other,

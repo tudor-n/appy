@@ -1,6 +1,7 @@
 """The laptop's side of memory review: keeps the overlay's card in sync with what the
-consolidator proposed, applies Tudor's Accept / Deny / Edit and Undo, and announces every
-memory commit as a chip in the chat.
+consolidator proposed, applies Tudor's Accept / Deny / Edit and Undo, relays the
+auto-approve setting, and announces every memory commit as a chip in the chat (and, via
+`on_change`, to Appy himself on his next turn).
 
 All calls to the memory service happen on this module's own thread, so the WebSocket
 loop and the conversation never wait on the Mac.
@@ -15,10 +16,16 @@ POLL_SECONDS = 60
 
 class MemoryReview:
     def __init__(self, client, emit_proposals: Callable[[list], None],
-                 emit_committed: Callable[[str, str], None], poll_seconds: float = POLL_SECONDS):
+                 emit_committed: Callable[[str, str], None],
+                 emit_settings: Callable[[bool], None] | None = None,
+                 on_change: Callable[[str], None] | None = None,
+                 poll_seconds: float = POLL_SECONDS):
         self.client = client
         self.emit_proposals = emit_proposals
         self.emit_committed = emit_committed
+        self.emit_settings = emit_settings or (lambda on: None)
+        self.on_change = on_change or (lambda line: None)
+        self._head: str | None = None  # auto commits after this one haven't been announced
         self.poll_seconds = poll_seconds
         self._jobs: queue.Queue = queue.Queue()
         self._last: list | None = None  # what the overlay shows now
@@ -27,6 +34,7 @@ class MemoryReview:
 
     def start(self) -> None:
         self._thread.start()
+        self._jobs.put(("settings",))
         self.refresh()
 
     def stop(self) -> None:
@@ -44,6 +52,9 @@ class MemoryReview:
 
     def undo(self) -> None:
         self._jobs.put(("undo",))
+
+    def set_auto_approve(self, on: bool) -> None:
+        self._jobs.put(("auto", bool(on)))
 
     def tool_committed(self, name: str, result: str) -> None:
         """A chip for an explicit remember/forget that actually changed memory."""
@@ -74,6 +85,19 @@ class MemoryReview:
         kind = job[0]
         if kind in ("refresh", "poll"):
             self._sync(force=kind == "refresh")
+            self._announce_auto()
+        elif kind == "settings":
+            self._send_settings()
+        elif kind == "auto":
+            result = self.client.set_settings(job[1])
+            if "auto_approve" in result:
+                print(f"[memory] auto-approve {'on' if result['auto_approve'] else 'off'}")
+                self.emit_settings(bool(result["auto_approve"]))
+            else:
+                print(f"[memory] auto-approve not changed: {result.get('error')}")
+                self._send_settings()  # so the pill shows what the Mac really has
+            self._sync(force=True)
+            self._announce_auto()
         elif kind == "decide":
             _, slug, decision, text, before = job
             self._decide(slug, decision, text, before)
@@ -82,6 +106,7 @@ class MemoryReview:
             if result.get("undone"):
                 print(f"[memory] undid: {result['undone']}")
                 self.emit_committed("undo", str(result["undone"]))
+                self.on_change(f"undid {str(result['undone']).removeprefix('memory: ')}")
             elif result.get("error"):
                 print(f"[memory] undo failed: {result['error']}")
             self._sync(force=True)
@@ -98,9 +123,30 @@ class MemoryReview:
             pass  # nothing was written (denied, stale, or an edit identical to the note)
         elif status == "accepted":
             self.emit_committed("approved", str(result.get("summary", "")))
+            self.on_change(f"saved to {slug}: {result.get('summary', '')}")
         elif status == "edited":
             self.emit_committed("edited", str(result.get("summary", "")))
+            self.on_change(f"saved Tudor's edit to {slug}: {result.get('summary', '')}")
         self._sync(force=True)
+
+    def _send_settings(self) -> None:
+        settings = self.client.settings()
+        if settings is not None:
+            self.emit_settings(bool(settings["auto_approve"]))
+
+    def _announce_auto(self) -> None:
+        """Chips and live notes for commits the Mac auto-approved since the last check.
+        The first check only takes the current head: older commits are history."""
+        data = self.client.changes(self._head or "")
+        if data is None:
+            return
+        if self._head is not None:
+            for item in data["items"]:
+                print(f"[memory] auto-saved {item['slug']}: {item['summary']}")
+                self.emit_committed("auto", item["summary"])
+                self.on_change(f"saved to {item['slug']}: {item['summary']}")
+        if data["head"]:
+            self._head = data["head"]
 
     def _sync(self, force: bool) -> None:
         """Send the card's list to the overlay if it changed (or `force`: e.g. so buttons

@@ -94,5 +94,30 @@ class UiBridgeTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+    def test_memory_settings_event_and_replay(self):
+        bridge = UiBridge()
+        sent = []
+        bridge.emit = sent.append
+        bridge.memory_settings(True)
+        self.assertEqual(sent, [{"type": "memory_settings", "auto_approve": True}])
+        del bridge.emit
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            self.assertEqual(receive(ws), {"type": "memory_settings", "auto_approve": True})
+
+    def test_memory_auto_approve_inbound(self):
+        calls = []
+        bridge = UiBridge(on_memory_auto_approve=calls.append)
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            ws.send_json({"type": "memory_auto_approve", "on": True})
+            ws.send_json({"type": "memory_auto_approve", "on": "yes"})
+            ws.send_json({"type": "memory_auto_approve"})
+            ws.send_json({"type": "memory_auto_approve", "on": False})
+            ws.send_json({"type": "user_text", "text": "  "})
+        self.assertEqual(calls, [True, False])
+
+    def test_memory_committed_auto_kind(self):
+        from ui_bridge import MEMORY_KINDS
+        self.assertIn("auto", MEMORY_KINDS)
+
 if __name__ == "__main__":
     unittest.main()

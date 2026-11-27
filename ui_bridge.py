@@ -9,7 +9,7 @@ import uvicorn
 
 VALID_EFFORTS = ("none", "low", "medium", "high")
 MEMORY_DECISIONS = ("accept", "deny", "edit")
-MEMORY_KINDS = ("remember", "forget", "approved", "edited", "undo")
+MEMORY_KINDS = ("remember", "forget", "approved", "edited", "undo", "auto")
 
 
 class UiBridge:
@@ -21,6 +21,7 @@ class UiBridge:
         on_compact: Optional[Callable[[], None]] = None,
         on_memory_decision: Optional[Callable[[str, str, Optional[str], Optional[str]], None]] = None,
         on_memory_undo: Optional[Callable[[], None]] = None,
+        on_memory_auto_approve: Optional[Callable[[bool], None]] = None,
     ):
         self.app = FastAPI()
         self.clients: set[WebSocket] = set()
@@ -31,6 +32,9 @@ class UiBridge:
         self.on_compact = on_compact
         self.on_memory_decision = on_memory_decision
         self.on_memory_undo = on_memory_undo
+        self.on_memory_auto_approve = on_memory_auto_approve
+        # The auto-approve setting, replayed too (the panel pill's menu shows it)
+        self.last_settings: Optional[dict] = None
         # The review card's list, replayed (like the status) to clients that connect later
         self.last_proposals: Optional[dict] = None
         # The last status sent, replayed to clients that connect later. The overlay is
@@ -50,6 +54,8 @@ class UiBridge:
                     await ws.send_json(self.last_status)
                 if self.last_proposals:
                     await ws.send_json(self.last_proposals)
+                if self.last_settings:
+                    await ws.send_json(self.last_settings)
                 while True:
                     raw = await ws.receive_text()
                     try:
@@ -80,6 +86,9 @@ class UiBridge:
                                                 text if decision == "edit" else None, before)
                     elif kind == "memory_undo" and self.on_memory_undo:
                         self.on_memory_undo()
+                    elif kind == "memory_auto_approve" and self.on_memory_auto_approve:
+                        if isinstance(data.get("on"), bool):
+                            self.on_memory_auto_approve(data["on"])
                     elif kind == "set_effort" and self.on_set_effort:
                         value = data.get("effort")
                         if value in VALID_EFFORTS:
@@ -135,6 +144,10 @@ class UiBridge:
         """The whole review list (empty = nothing to review); see PROTOCOL.md."""
         self.last_proposals = {"type": "memory_proposals", "items": items}
         self.emit(self.last_proposals)
+
+    def memory_settings(self, auto_approve: bool):
+        self.last_settings = {"type": "memory_settings", "auto_approve": bool(auto_approve)}
+        self.emit(self.last_settings)
 
     def memory_committed(self, kind: str, summary: str):
         self.emit({"type": "memory_committed", "kind": kind, "summary": summary})
