@@ -31,6 +31,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env            # point BASE_URL/MODEL at your LLM server
 $EDITOR prompt.txt              # system prompt (gitignored)
 # kokoro-v1.0.onnx and voices-v1.0.bin go in the repo root (see kokoro-onnx docs)
+# kokoro-onnx pulls in the CPU-only onnxruntime, which overwrites onnxruntime-gpu
+# (same package folder). Put the GPU build back after every install:
+.venv/bin/pip install --force-reinstall --no-deps onnxruntime-gpu
 .venv/bin/python main.py
 
 # Overlay

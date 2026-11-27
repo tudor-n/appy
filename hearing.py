@@ -260,6 +260,9 @@ class Ear:
                                 )
                                 should_finish = True
                         elif silence_chunks >= max_silence_chunks:
+                            # Smart Turn said "not yet" at 200ms; if this shows up often
+                            # for finished sentences, the 2s wait is worth tuning
+                            print("[turn: no end detected, 2s fallback] ", end="", flush=True)
                             should_finish = True
 
                         if should_finish:

@@ -7,8 +7,8 @@ import re
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 CLAUSE_END = re.compile(r"(?<=[.!?,;:—])\s+")
 # The first chunk may end at a clause boundary so speech starts sooner, but only once
-# it's long enough to sound natural.
-MIN_FIRST_CLAUSE = 24
+# it's long enough to sound natural ("It's going fine," yes; "Let me check," no).
+MIN_FIRST_CLAUSE = 16
 
 TAG_RE = re.compile(r"^\s*\[([a-zA-Z]+)\]\s*(.*)$", re.DOTALL)
 VALID_EXPRESSIONS = frozenset({

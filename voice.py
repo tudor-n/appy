@@ -9,6 +9,21 @@ from kokoro_onnx import Kokoro
 from status import SpeechActivity
 
 
+def provider_warning(requested: str | None, active: list[str]) -> str | None:
+    """A message if Kokoro asked for an ONNX provider but onnxruntime fell back.
+
+    onnxruntime falls back to the CPU silently (we turn its logging down), which made
+    every sentence 4x slower to synthesise without anyone noticing.
+    """
+    if not requested or requested in active:
+        return None
+    return (
+        f"[voice] WARNING: ONNX_PROVIDER={requested} but Kokoro is running on {active}. "
+        "The CPU-only onnxruntime has probably overwritten onnxruntime-gpu; fix with: "
+        ".venv/bin/pip install --force-reinstall --no-deps onnxruntime-gpu"
+    )
+
+
 class Speaker:
     def __init__(self, on_audio=None):
         """on_audio(state) reports "queued", "playing" (the audio has actually started)
@@ -24,6 +39,9 @@ class Speaker:
         self.speed = float(os.getenv("SPEED", "1.08"))
 
         self.kokoro = Kokoro(model, voices)
+        warning = provider_warning(os.getenv("ONNX_PROVIDER"), self.kokoro.sess.get_providers())
+        if warning:
+            print(warning, flush=True)
         self.speech_queue = queue.Queue()
         self.audio_queue = queue.Queue()
 

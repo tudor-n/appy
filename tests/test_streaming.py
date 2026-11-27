@@ -16,6 +16,19 @@ class PopReadyChunkTests(unittest.TestCase):
         # "Hi," is a clause but too short to be spoken on its own
         self.assertEqual(pop_ready_chunk("Hi, there", True), (None, "Hi, there"))
 
+    def test_first_chunk_can_be_a_short_clause(self):
+        # Speaking "It's going fine," right away beats waiting for the next comma
+        self.assertEqual(
+            pop_ready_chunk("It's going fine, though Dummy is", True),
+            ("It's going fine,", "though Dummy is"),
+        )
+
+    def test_first_chunk_keeps_a_short_lead_in_together(self):
+        # Splitting "Let me check," off would leave "sir." dangling on its own
+        self.assertEqual(
+            pop_ready_chunk("Let me check, sir. It's", True), ("Let me check, sir.", "It's")
+        )
+
     def test_first_chunk_merges_short_clauses(self):
         chunk, rest = pop_ready_chunk("Well, that is a great question, honestly. More", True)
         self.assertEqual(chunk, "Well, that is a great question,")
