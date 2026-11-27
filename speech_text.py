@@ -11,6 +11,23 @@ final decimal rule ("$5.5 million" -> "5.5 million dollars" -> "5 point 5 ...").
 """
 import re
 
+# Words Kokoro's phonemizer guesses wrong, respelled so they come out right. Matched as
+# whole words, case-insensitive, with an optional plural "s" ("drivetrains"); a
+# possessive "'s" is untouched. Check a new entry with
+# kokoro.tokenizer.phonemize(word, "en-us") before adding it.
+PRONUNCIATIONS = {
+    "drivetrain": "drive-train",  # was "driv-i-train"
+    "ESP32": "E S P 32",          # was "esp thirty-two"
+    "ONNX": "onyx",               # was "ongnks"
+    "Sibiu": "Seebeeoo",          # SEE-bee-oo, not SIB-ee-oo
+    "Tudor": "Toodor",            # TOO-dor, not the English TYOO-der
+    "Fifi": "Feefee",             # FEE-fee, not FIFF-ee
+}
+PRONUNCIATION = re.compile(
+    r"\b(" + "|".join(map(re.escape, PRONUNCIATIONS)) + r")(s?)\b", re.IGNORECASE
+)
+_RESPELL = {word.lower(): spoken for word, spoken in PRONUNCIATIONS.items()}
+
 NUMBER = r"\d+(?:\.\d+)?"
 # Not glued to another number, word or dotted/hyphenated run (2.0.1, 2026-11-27, 4x4)
 START = r"(?<![\w.\-–/:])"
@@ -130,7 +147,8 @@ def _century_decade(m: re.Match) -> str:
 
 
 def speakable(text: str) -> str:
-    """Rewrite numbers so Kokoro says them right ("5.5" -> "5 point 5")."""
+    """Rewrite text so Kokoro says it right: known words first, then numbers."""
+    text = PRONUNCIATION.sub(lambda m: _RESPELL[m.group(1).lower()] + m.group(2), text)
     text = text.replace("−", "-")  # Unicode minus
     text = THOUSANDS_COMMA.sub("", text)
 

@@ -123,6 +123,36 @@ class SpeakableTests(unittest.TestCase):
                 self.assertEqual(speakable(text), text)
 
 
+class PronunciationTests(unittest.TestCase):
+    """Words Kokoro's phonemizer guesses wrong, respelled for the audio only."""
+
+    def check(self, cases):
+        for text, spoken in cases:
+            with self.subTest(text=text):
+                self.assertEqual(speakable(text), spoken)
+
+    def test_words_kokoro_gets_wrong(self):
+        self.check([
+            # Regression: "drivetrain" came out as "driv-i-train"
+            ("Fifi's drivetrain is offline.", "Feefee's drive-train is offline."),
+            ("Two Drivetrains", "Two drive-trains"),
+            ("Flash the ESP32 first", "Flash the E S P 32 first"),
+            ("an ONNX model", "an onyx model"),
+            ("Sibiu is cold", "Seebeeoo is cold"),
+            ("Morning, Tudor.", "Morning, Toodor."),
+        ])
+
+    def test_only_whole_words(self):
+        self.check([
+            ("Tudorescu", "Tudorescu"),
+            ("drivetrainless", "drivetrainless"),
+            ("No names here.", "No names here."),
+        ])
+
+    def test_respellings_keep_numbers_working(self):
+        self.check([("ESP32 at 3.3 volts", "E S P 32 at 3 point 3 volts")])
+
+
 class SayYearTests(unittest.TestCase):
     def test_say_year(self):
         self.assertEqual(say_year(2026), "20 26")
