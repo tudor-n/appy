@@ -41,6 +41,8 @@ class UiBridge:
         # usually still reconnecting when "booting" goes out, and would otherwise sit
         # looking idle through the whole model load.
         self.last_status: Optional[dict] = None
+        # How full the context is (the input pill's compact ring), replayed the same way
+        self.last_context: Optional[dict] = None
 
         @self.app.websocket("/ws")
         async def ws_endpoint(ws: WebSocket):
@@ -56,6 +58,8 @@ class UiBridge:
                     await ws.send_json(self.last_proposals)
                 if self.last_settings:
                     await ws.send_json(self.last_settings)
+                if self.last_context:
+                    await ws.send_json(self.last_context)
                 while True:
                     raw = await ws.receive_text()
                     try:
@@ -142,6 +146,13 @@ class UiBridge:
 
     def response(self, text: str, expression: str = "neutral"):
         self.emit({"type": "response", "text": text, "expression": expression})
+
+    def context(self, tokens: int, limit: int):
+        """How much of the context the conversation uses: `limit` is where it gets
+        compacted automatically. The input pill's compact ring fills up towards it."""
+        self.last_context = {"type": "context", "tokens": max(0, int(tokens)),
+                             "limit": max(1, int(limit))}
+        self.emit(self.last_context)
 
     def effort(self, value: str):
         self.emit({"type": "effort", "value": value})

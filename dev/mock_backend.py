@@ -6,6 +6,8 @@ Run: .venv/bin/python dev/mock_backend.py [--memory] [--busy]
 `--memory` also sends three sample memory proposals and the auto-approve setting, and
 answers the review panel's buttons and the pill's auto-approve toggle.
 `--busy` holds the "thinking" status, which keeps the chat (and the memory panel) open.
+`--demo` replays a short made-up conversation on connect (bubbles, status pills, a
+weather card, a memory pill and a part-filled compact ring), for looking at the UI.
 MOCK_PORT picks the port (default 8001); pair it with the overlay's APPY_WS_URL.
 """
 import asyncio
@@ -162,12 +164,66 @@ async def memory_demo(ws: WebSocket, data: dict, items: list) -> None:
     await ws.send_json({"type": "memory_proposals", "items": items})
 
 
+# The compact ring: a made-up context size that grows with the history, against the
+# real backend's default auto-compact point
+MOCK_COMPACT_AT = 9500
+
+
+def context_event(history: List[Dict[str, str]]) -> dict:
+    tokens = 3200 + sum(450 + len(m["content"]) for m in history)
+    return {"type": "context", "tokens": tokens, "limit": MOCK_COMPACT_AT}
+
+
+# --demo: (user text, events Appy answers with, reply text, expression)
+DEMO_TURNS = [
+    ("hey appy, what's the weather like in Sibiu tomorrow?",
+     [{"type": "widget", "widget": "weather", "city": "Sibiu", "temp_c": 9.0, "low_c": 2.0,
+       "when": "Sat", "condition": "light rain", "icon": "rain"}],
+     "Rainy and cold tomorrow: 9 degrees at best, 2 overnight. Bring the good jacket.",
+     "focused"),
+    ("ugh. ok, remind me what PSU I have on the bench?", [],
+     "A Riden RD6024: 60 volts, 24 amps, the one you control over USB.", "happy"),
+    ("I swapped it for a Korad KA3005P last week",
+     [{"type": "memory_committed", "kind": "remember",
+       "summary": "- The bench PSU is a Korad KA3005P.",
+       "facts": ["The bench PSU is a Korad KA3005P."],
+       "dropped": ["The PSU is a Riden RD6024."]}],
+     "Nice upgrade! Noted: the bench PSU is now the Korad KA3005P.", "excited"),
+    ("also, do you think the watering bot pump can run straight off the ESP32 if I use a "
+     "small MOSFET, or should I just put a proper motor driver in there and stop worrying?", [],
+     "A logic-level MOSFET with a flyback diode is plenty for a 12 V peristaltic pump, "
+     "and you already have that in the design. A motor driver only earns its place if you "
+     "want to reverse the pump. Do you?", "curious"),
+]
+DEMO_STEP = 0.25  # seconds between events, so every entrance animation plays
+
+
+async def play_demo(ws: WebSocket, history: List[Dict[str, str]]) -> None:
+    async def send(event: dict, pause: float = DEMO_STEP) -> None:
+        await ws.send_json(event)
+        await asyncio.sleep(pause)
+
+    await asyncio.sleep(0.6)  # let the overlay finish popping out
+    for user, extras, reply, expression in DEMO_TURNS:
+        await send({"type": "transcript", "text": user, "is_final": True})
+        await send({"type": "status", "state": "thinking", "label": "thinking"}, 1.2)
+        for extra in extras:
+            await send(extra)
+        await send({"type": "response", "text": reply, "expression": expression})
+        await send({"type": "status", "state": "idle", "label": "idle"})
+        history += [{"role": "user", "content": user}, {"role": "assistant", "content": reply}]
+        await send(context_event(history))
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     # The overlay starts out showing "booting"; tell it the (instant) mock is ready
     await ws.send_json({"type": "status", "state": "idle", "label": "idle"})
     history: List[Dict[str, str]] = []
+    await ws.send_json(context_event(history))
+    if "--demo" in sys.argv:
+        await play_demo(ws, history)
     proposals = [dict(p) for p in SAMPLE_PROPOSALS] if MEMORY_DEMO else []
     if "--busy" in sys.argv:
         await ws.send_json({"type": "status", "state": "thinking", "label": "thinking"})
@@ -192,6 +248,7 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_json({"type": "status", "state": "compacting", "label": "compacting"})
                 await asyncio.sleep(3.0)
                 history = history[-2:]
+                await ws.send_json(context_event(history))
                 await ws.send_json({"type": "status", "state": "idle", "label": "idle"})
                 continue
 
@@ -207,6 +264,7 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "status", "state": "compacting", "label": "compacting"})
                     await asyncio.sleep(1.8)
                     history = history[-8:]
+                    await ws.send_json(context_event(history))
 
                 await ws.send_json({"type": "status", "state": "thinking", "label": "thinking"})
 
@@ -223,6 +281,7 @@ async def websocket_endpoint(ws: WebSocket):
                     result = fallback_reply(user_text)
 
                 history.append({"role": "assistant", "content": result["text"]})
+                await ws.send_json(context_event(history))
                 await ws.send_json(
                     {
                         "type": "response",
