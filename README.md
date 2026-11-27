@@ -100,8 +100,8 @@ reads it in the background: it cuts the transcript into ~5k-token windows, asks 
 notes each window adds durable facts to (project details, decisions, preferences; never small
 talk), and rewrites those notes with the new facts folded in. Code checks every rewrite (title and
 gist kept, bullets only, under the size cap, actually changed). The result waits as a proposal in
-`~/appy-data/pending/<note>.json`, one per note, for you to accept in the overlay; nothing reaches
-memory without that. While you're talking to Appy the consolidator waits (the laptop pings
+`~/appy-data/pending/<note>.json`, one per note, for you to approve in the overlay; nothing reaches
+memory without that (unless auto-approve is on, below). While you're talking to Appy the consolidator waits (the laptop pings
 `/activity` at each turn), so it never competes with live chat for the model.
 
 Mac `~/appy-memory/.env` additions: `BASE_URL=http://100.103.162.57:1234/v1` (LM Studio listens on
@@ -113,22 +113,40 @@ the Tailscale IP only), `MODEL=google/gemma-4-26b-a4b`, optionally `CONSOLIDATOR
 ```sh
 ssh macmini grep consolidator appy-memory/service.log    # one line per session processed
 curl -H "Authorization: Bearer $MEMORY_TOKEN" $MEMORY_URL/proposals   # what's waiting for review
+curl -H "Authorization: Bearer $MEMORY_TOKEN" $MEMORY_URL/settings    # {"auto_approve": …}
 .venv/bin/python dev/check_consolidator.py 2             # live check on 7 fixture sessions
 ```
 
 ### Reviewing what Appy learned
 
-Proposals show up in the overlay as a collapsed card above the input ("2 memory updates"). Click
-it to see each note's changes (removed lines struck through, new ones in white) with **Accept**,
-**Deny** and **Edit** (Edit opens the whole note as text; Save checks it keeps the title, the
-description line and "- " bullets). If the note changed since the proposal was written, Accept
-shows "updating…" while the Mac redoes it against the current note; review it again when it
-comes back. Every change to memory (a remember, a forget, an accepted or edited proposal) adds a
-chip to the chat, like "Saved: Added the helmet HUD hardware", with **Undo**, which reverts the
-newest change (only the newest chip's Undo is live); the "Undid" chip that follows offers "Undo
-earlier" to go further back. Undoing an accepted proposal puts it back on the card. While a
-proposal is being redone ("updating…") it can still be denied or edited. The card refreshes when Appy starts, after
-each decision, and every minute.
+Proposals show up in a memory panel that floats above the chat while the chat is open (below
+it when Appy sits near the top of the screen). It shows one note at a time: the title, what
+changed (removed lines struck through, new ones in white) and **Approve**, **Deny** and **Edit**
+(Edit opens the whole note as text; Save checks it keeps the title, the description line and
+"- " bullets). Scroll over the panel, or use ▲ ▼, for the next one ("2 of 3"). **Approve all**
+approves every note that isn't being edited or redone; **Later** hides the panel until something
+new arrives (or the next launch), without deciding anything. If the note changed since the
+proposal was written, Approve shows "updating…" while the Mac redoes it against the current
+note; review it again when it comes back. While a proposal is being redone it can still be
+denied or edited. The panel refreshes when Appy starts, after each decision, and every minute.
 
-`dev/mock_backend.py --memory` sends two sample proposals, for working on the card without the
-Mac.
+Every change to memory (a remember, a forget, an approved, edited or auto-approved proposal)
+adds a chip to the chat, like "Saved: Added the helmet HUD hardware", with **Undo**, which
+reverts the newest change (only the newest chip's Undo is live); the "Undid" chip that follows
+offers "Undo earlier" to go further back. Undoing an approved proposal puts it back in the
+panel; undoing an auto-approved one just reverts it.
+
+Appy knows about every change right away: his memory in the system prompt is built once at
+startup (so the prompt stays cached), and changes made during the session ride along with your
+next message as a short `[Memory updated since your last reply: …]` note.
+
+**Auto-approve.** Right-click the panel pill → **Auto-approve memories** (shown while Appy runs).
+With it on, nothing waits for review: what the consolidator learns is committed straight away
+(still through the same checks) as `memory: … [auto]`, and an "Auto-saved: …" chip with Undo
+shows up if Appy is running. Turning it on also approves what's already waiting. The setting
+lives on the Mac (`~/appy-data/settings.json`), so it holds across launches and covers sessions
+processed while the laptop is off.
+
+`dev/mock_backend.py --memory --busy` sends three sample proposals and answers the panel and
+the auto-approve toggle, for working on the panel without the Mac (`--busy` keeps the chat
+open; `MOCK_PORT` and the overlay's `APPY_WS_URL` / `APPY_PILL_ADDR` run it beside a real Appy).
