@@ -12,12 +12,22 @@ use gtk4::{
 
 use crate::memory::MemoryBurst;
 use crate::protocol::MemoryKind;
+use crate::state::{FRAME_SECS, per_frame};
 
 /// Oldest entries are dropped beyond this many, to bound memory and layout cost.
 const MAX_ENTRIES: usize = 500;
 const LOG_WIDTH: i32 = 290;
-const LOG_MAX_HEIGHT: i32 = 360;
+/// How tall the log grows while you're reading back through the history (it's as tall
+/// as the mascot column otherwise).
+const LOG_EXPANDED_HEIGHT: f64 = 440.0;
+/// Per-frame easing of that growing and shrinking.
+const LOG_GROW_EASE: f64 = 0.2;
 const PILL_UNFOLD_MS: u32 = 220;
+/// Per-frame easing of a wheel/keyboard scroll toward its target.
+const SCROLL_EASE: f64 = 0.22;
+/// How much of a touchpad fling's speed is kept per frame, and when it stops.
+const FLING_FRICTION: f64 = 0.94;
+const FLING_STOP: f64 = 0.15;
 
 /// The newest memory pill, while changes can still join it.
 struct MemoryPill {
@@ -34,6 +44,12 @@ pub struct ChatLog {
     /// Where a manual smooth scroll is heading; advanced each frame by `step_scroll`.
     /// Cells (not SharedState) so appending never contends for that RefCell.
     scroll_target: Cell<Option<f64>>,
+    /// A touchpad fling still coasting, in pixels per 60 Hz frame.
+    fling: Cell<f64>,
+    /// How much taller than its resting height the log is right now (scrolled up into
+    /// the history), and that resting height.
+    grown: Cell<f64>,
+    rest_height: Cell<f64>,
     /// Stick to the bottom: every frame eases toward the *current* bottom, so newly
     /// added entries come into view once GTK has laid them out (their height isn't
     /// known when they're appended). Scrolling up unpins; reaching the bottom re-pins.
@@ -53,8 +69,11 @@ impl ChatLog {
             .hscrollbar_policy(PolicyType::Never)
             .vscrollbar_policy(PolicyType::External)
             .propagate_natural_height(true)
-            .max_content_height(LOG_MAX_HEIGHT)
+            .max_content_height(LOG_EXPANDED_HEIGHT as i32)
             .width_request(LOG_WIDTH)
+            // All scrolling goes through scroll_by / scroll_direct (see controls.rs), so
+            // the log's own kinetic scrolling can't fight the stick-to-bottom easing
+            .kinetic_scrolling(false)
             .child(&entries)
             .build();
 
@@ -62,6 +81,9 @@ impl ChatLog {
             scrolled,
             entries,
             scroll_target: Cell::new(None),
+            fling: Cell::new(0.0),
+            grown: Cell::new(0.0),
+            rest_height: Cell::new(0.0),
             pinned: Cell::new(true),
             undo_buttons: RefCell::new(Vec::new()),
             memory: RefCell::new(None),
@@ -228,6 +250,7 @@ impl ChatLog {
         // Every new message (yours or Appy's) brings the log back to the bottom
         self.pinned.set(true);
         self.scroll_target.set(None);
+        self.fling.set(0.0);
     }
 
     fn trim(&self) {
@@ -249,8 +272,10 @@ impl ChatLog {
         (adj.upper() - adj.page_size()).max(0.0)
     }
 
-    /// Smoothly scroll by `delta` pixels, accumulating onto any scroll in progress.
+    /// Smoothly scroll by `delta` pixels, accumulating onto any scroll in progress
+    /// (mouse wheel, keyboard).
     pub fn scroll_by(&self, delta: f64) {
+        self.fling.set(0.0);
         let max = self.max_scroll();
         let base = match (self.pinned.get(), self.scroll_target.get()) {
             (true, _) => max,
@@ -262,9 +287,87 @@ impl ChatLog {
         self.scroll_target.set(Some(target));
     }
 
-    /// Advance smooth scrolling by one frame.
-    pub fn step_scroll(&self) {
+    /// Follow a touchpad exactly: move by `delta` pixels right away, no easing.
+    pub fn scroll_direct(&self, delta: f64) {
+        self.fling.set(0.0);
         let max = self.max_scroll();
+        let base = match (self.pinned.get(), self.scroll_target.get()) {
+            (true, _) => max,
+            (false, Some(target)) => target,
+            (false, None) => self.scrolled.vadjustment().value(),
+        };
+        let value = (base + delta).clamp(0.0, max);
+        self.scrolled.vadjustment().set_value(value);
+        self.pinned.set(is_at_bottom(value, max));
+        self.scroll_target.set(None);
+    }
+
+    /// The fingers left the touchpad mid-swipe: keep coasting at `velocity` px/s.
+    pub fn fling(&self, velocity: f64) {
+        self.fling.set(velocity * FRAME_SECS);
+    }
+
+    /// Back to the newest message (and the compact size), e.g. when the chat is put away.
+    pub fn pin_to_bottom(&self) {
+        self.pinned.set(true);
+        self.scroll_target.set(None);
+        self.fling.set(0.0);
+    }
+
+    /// Grow the log while you're scrolled up into the history, so more of it shows, and
+    /// shrink it back once you're at the newest message again. It grows upward (the
+    /// newest end stays put) to at most `room` pixels tall. Advanced every frame.
+    pub fn step_height(&self, frames: f64, room: f64) {
+        let grown = self.grown.get();
+        if grown == 0.0 {
+            let h = self.scrolled.height() as f64;
+            if h > 0.0 {
+                self.rest_height.set(h);
+            }
+        }
+        let rest = self.rest_height.get();
+        let target = if self.pinned.get() || rest <= 0.0 {
+            0.0
+        } else {
+            let content = self.scrolled.vadjustment().upper();
+            (LOG_EXPANDED_HEIGHT.min(room).min(content) - rest).max(0.0)
+        };
+        if grown == target {
+            return;
+        }
+        let next = grown + (target - grown) * per_frame(LOG_GROW_EASE, frames);
+        let next = if (target - next).abs() < 0.5 { target } else { next };
+        self.grown.set(next);
+
+        // Growing at the top: scroll up by as much, so what's on screen stays put and
+        // the extra room shows older messages
+        let step = next - grown;
+        let adj = self.scrolled.vadjustment();
+        adj.set_value((adj.value() - step).max(0.0));
+        if let Some(t) = self.scroll_target.get() {
+            self.scroll_target.set(Some((t - step).max(0.0)));
+        }
+        self.scrolled.set_min_content_height(if next > 0.0 {
+            (rest + next).round() as i32
+        } else {
+            -1
+        });
+    }
+
+    /// Advance smooth scrolling by `frames` 60 Hz frames.
+    pub fn step_scroll(&self, frames: f64) {
+        let max = self.max_scroll();
+        let speed = self.fling.get();
+        if speed != 0.0 {
+            let adj = self.scrolled.vadjustment();
+            let value = (adj.value() + speed * frames).clamp(0.0, max);
+            adj.set_value(value);
+            self.pinned.set(is_at_bottom(value, max));
+            let speed = speed * FLING_FRICTION.powf(frames);
+            let stopped = speed.abs() < FLING_STOP || value <= 0.0 || value >= max;
+            self.fling.set(if stopped { 0.0 } else { speed });
+            return;
+        }
         let target = if self.pinned.get() {
             max
         } else if let Some(target) = self.scroll_target.get() {
@@ -273,7 +376,7 @@ impl ChatLog {
             return;
         };
         let adj = self.scrolled.vadjustment();
-        let (value, done) = ease_toward(adj.value(), target);
+        let (value, done) = ease_toward(adj.value(), target, per_frame(SCROLL_EASE, frames));
         if value != adj.value() {
             adj.set_value(value);
         }
@@ -290,13 +393,13 @@ fn is_at_bottom(value: f64, max: f64) -> bool {
     value >= max - 1.0
 }
 
-/// One frame of exponential easing. Returns (new value, arrived).
-fn ease_toward(current: f64, target: f64) -> (f64, bool) {
+/// One step of exponential easing. Returns (new value, arrived).
+fn ease_toward(current: f64, target: f64, rate: f64) -> (f64, bool) {
     let diff = target - current;
     if diff.abs() < 0.6 {
         (target, true)
     } else {
-        (current + diff * 0.22, false)
+        (current + diff * rate, false)
     }
 }
 
@@ -327,7 +430,7 @@ mod tests {
         let (mut v, mut done) = (0.0, false);
         let mut frames = 0;
         while !done {
-            (v, done) = ease_toward(v, 300.0);
+            (v, done) = ease_toward(v, 300.0, SCROLL_EASE);
             frames += 1;
             assert!(frames < 100);
         }

@@ -1,7 +1,11 @@
-//! The ~60fps frame loop: layout following, input region, animations, chat visibility.
+//! The frame loop: layout following, input region, animations, chat visibility. It runs
+//! on the window's frame clock, so it's in step with the screen (144 Hz on the laptop)
+//! and its changes land in the frame being drawn. Animations are tuned in 60 Hz frames
+//! and scaled by the time that actually passed.
 
+use std::cell::Cell;
 use std::f64::consts::TAU;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -12,43 +16,56 @@ use crate::input::set_class;
 use crate::layout::{self, Rect};
 use crate::mascot::BUSY_PHASE_WRAP;
 use crate::protocol::{AppyState, Expression};
-use crate::state::SharedState;
+use crate::state::{FRAME_SECS, SharedState, per_frame};
 use crate::weather::CARD_SIZE;
 
-const FRAME: Duration = Duration::from_millis(16);
+/// After a stall (or the window coming back from hidden), catch up at most this many
+/// 60 Hz frames, so nothing leaps.
+const MAX_FRAMES: f64 = 4.0;
 /// Live status pills cycle "." -> ".." -> "..." at this pace.
 const DOTS_STEP_MS: u128 = 400;
 /// Per-frame easing of the weather card toward its spot (and back into Appy).
 const CARD_EASE: f64 = 0.2;
 const CARD_EASE_LEAVING: f64 = 0.3;
+/// Per-frame easing of the memory panel toward a new slot.
+const MEMORY_EASE: f64 = 0.2;
 
 pub fn start(app: &'static App) {
-    glib::timeout_add_local(FRAME, move || {
-        app.tick();
+    // Ticks only while the window is shown; a hidden Appy costs nothing
+    let last_frame = Cell::new(None::<i64>);
+    app.ui.window.add_tick_callback(move |_, clock| {
+        let t = clock.frame_time(); // µs
+        let frames = last_frame.replace(Some(t)).map_or(1.0, |prev| {
+            ((t - prev) as f64 / 1e6 / FRAME_SECS).clamp(0.0, MAX_FRAMES)
+        });
+        app.tick(frames);
         glib::ControlFlow::Continue
     });
 }
 
 impl App {
-    fn tick(&self) {
+    /// One frame; `frames` is how many 60 Hz frames' worth of time it covers.
+    fn tick(&self, frames: f64) {
         let now = Instant::now();
         let mut s = self.state.borrow_mut();
 
         self.layout_shell(&mut s);
-        self.place_memory(&mut s, now);
-        let card_gone = self.step_card(&mut s, now);
+        self.place_memory(&mut s, now, frames);
+        let card_gone = self.step_card(&mut s, now, frames);
         self.sync_input_region(&mut s);
 
-        let wobbling = s.wobble.step();
+        let wobbling = s.wobble.step(frames);
         self.apply_wobble_css(&mut s, wobbling);
-        self.ui.chat.step_scroll();
+        self.ui.chat.step_height(frames, self.ui.log_room());
+        self.ui.chat.step_scroll(frames);
+        self.ui.input.compact.step(frames, now);
         self.animate_status_pill(&s);
 
         let blink_enabled = !s.is_busy() && s.state != AppyState::Listening;
         let mut redraw = wobbling;
         redraw |= s.blink.step(now, blink_enabled);
         redraw |= self.update_chat_visibility(&mut s, now);
-        redraw |= self.advance_face(&mut s, now);
+        redraw |= self.advance_face(&mut s, now, frames);
 
         if redraw {
             self.ui.mascot.queue_draw();
@@ -71,7 +88,18 @@ impl App {
         if win.0 <= 0.0 || win.1 <= 0.0 {
             return;
         }
-        let Some(shell) = ui.measure_shell(s.placement.side) else {
+        // Moving to another monitor: hold still until the window is the new one, so the
+        // new position isn't clamped to the old screen
+        if let Some(mv) = s.monitor_move {
+            if !mv.arrived(win, Instant::now()) {
+                return;
+            }
+            s.placement.anchor = mv.anchor;
+            s.monitor_move = None;
+            s.last_input_region = None;
+            s.landing = true;
+        }
+        let Some(shell) = ui.measure_shell() else {
             return;
         };
         let body = ui.body_in_mascot();
@@ -83,10 +111,24 @@ impl App {
 
         // Pick the chat's side freely while it's hidden; while it's open, keep it put
         // (so new messages can't make it jump) unless Appy is being dragged.
-        if (!s.chat_open || s.drag.active) && s.placement.choose_side(win, &shell, s.chat_open) {
+        if (!s.chat_open || s.is_moving()) && s.placement.choose_side(win, &shell, s.chat_open) {
             ui.apply_side(s.placement.side, s.chat_open);
         }
         ui.move_shell(s.placement.shell_origin(&shell));
+
+        if s.landing {
+            s.landing = false;
+            // Everything that floats beside him starts out in place, not flying in from
+            // where it was on the other monitor; then fade in, with a little hop
+            s.memory_pos = None;
+            let slot = self.card_slot(s);
+            if let Some(card) = s.card.as_mut() {
+                card.pos = slot;
+                ui.move_card(slot);
+            }
+            s.wobble.kick(0.0, -9.0);
+            ui.stage.remove_css_class("moving");
+        }
     }
 
     /// The mascot body in window coordinates.
@@ -122,7 +164,7 @@ impl App {
 
     /// Show the memory panel while the chat is open and there's something to review,
     /// and keep it above the chat (or below it, when there's no room above).
-    fn place_memory(&self, s: &mut SharedState, now: Instant) {
+    fn place_memory(&self, s: &mut SharedState, now: Instant, frames: f64) {
         let ui = &self.ui;
         let shown = s.chat_open && ui.memory.is_wanted();
         if shown != ui.memory.is_shown() {
@@ -138,22 +180,31 @@ impl App {
         let Some(chat) = ui.memory_anchor(s.locked) else {
             return;
         };
-        let (pos, side) = layout::memory_slot(
+        let (slot, side) = layout::memory_slot(
             chat,
             ui.memory_size(),
             ui.window_size(),
             s.placement.side,
             s.memory_side,
-            s.drag.active,
+            s.is_moving(),
         );
         s.memory_side = side;
+        // Glide to a new slot (glass mode on or off, flipping above/below); stick to it
+        // while Appy is being moved, and while hidden, so it reappears in place
+        let pos = match s.memory_pos {
+            Some(current) if shown && !s.is_moving() => {
+                layout::ease_point(current, slot, per_frame(MEMORY_EASE, frames)).0
+            }
+            _ => slot,
+        };
+        s.memory_pos = shown.then_some(pos);
         ui.move_memory(pos);
     }
 
     /// Ease the weather card toward its spot beside Appy, or back into him when it's
     /// leaving. Returns true once the exit animation is done and the card should be
     /// hidden (by the caller, after releasing the state).
-    fn step_card(&self, s: &mut SharedState, now: Instant) -> bool {
+    fn step_card(&self, s: &mut SharedState, now: Instant, frames: f64) -> bool {
         let body = self.body_on_screen(s);
         let slot = self.card_slot(s);
         let Some(card) = s.card.as_mut() else {
@@ -177,7 +228,7 @@ impl App {
         } else {
             (slot, CARD_EASE)
         };
-        let (pos, _) = layout::ease_point(card.pos, target, rate);
+        let (pos, _) = layout::ease_point(card.pos, target, per_frame(rate, frames));
         card.pos = pos;
         self.ui.move_card(pos);
         false
@@ -188,7 +239,7 @@ impl App {
         if !self.ui.window.is_visible() {
             return;
         }
-        let desired = self.ui.input_rects(s.chat_open, s.locked, s.drag.active);
+        let desired = self.ui.input_rects(s.chat_open, s.locked, s.is_moving());
         if !desired.is_empty() && s.last_input_region.as_ref() != Some(&desired) {
             self.ui.set_input_region(&desired);
             s.last_input_region = Some(desired);
@@ -261,6 +312,8 @@ impl App {
 
         s.hover.panel = false;
         ui.input.effort.collapse();
+        // Put away scrolled up: it comes back showing the newest messages, at its usual size
+        ui.chat.pin_to_bottom();
         // Relax back to the neutral face once the conversation is put away
         if s.state == AppyState::Idle && s.expression != Expression::Neutral {
             s.expression = Expression::Neutral;
@@ -271,16 +324,16 @@ impl App {
     }
 
     /// Advance the busy-dots / talking animations. Returns true if the mascot needs a redraw.
-    fn advance_face(&self, s: &mut SharedState, now: Instant) -> bool {
+    fn advance_face(&self, s: &mut SharedState, now: Instant, frames: f64) -> bool {
         if s.is_busy() {
-            s.phase = (s.phase + 0.14) % BUSY_PHASE_WRAP;
+            s.phase = (s.phase + 0.14 * frames) % BUSY_PHASE_WRAP;
             return true;
         }
         if s.state != AppyState::Speaking {
             return false;
         }
         if s.speaking_until.is_some_and(|until| now < until) {
-            s.talk_phase = (s.talk_phase + 0.28) % (TAU * 10.0);
+            s.talk_phase = (s.talk_phase + 0.28 * frames) % (TAU * 10.0);
         } else {
             s.state = AppyState::Idle;
             s.speaking_until = None;

@@ -261,6 +261,13 @@ pub fn memory_slot(
     ((x, y), vside)
 }
 
+/// Which of `monitors` (global logical rects) holds `point` (global), if any.
+pub fn monitor_at(point: Point, monitors: &[Rect]) -> Option<usize> {
+    monitors.iter().position(|m| {
+        point.0 >= m.x && point.0 < m.x + m.w && point.1 >= m.y && point.1 < m.y + m.h
+    })
+}
+
 /// One frame of easing toward a target point. Returns (new point, arrived).
 pub fn ease_point(current: Point, target: Point, rate: f64) -> (Point, bool) {
     let (dx, dy) = (target.0 - current.0, target.1 - current.1);
@@ -517,5 +524,17 @@ mod tests {
         }
         assert!(done);
         assert_eq!(p, (300.0, -120.0));
+    }
+
+    #[test]
+    fn finds_the_monitor_under_a_point() {
+        // The laptop at 0,216 (1536x864) beside a 1920x1080 screen at 1536,0
+        let laptop = Rect { x: 0.0, y: 216.0, w: 1536.0, h: 864.0 };
+        let hdmi = Rect { x: 1536.0, y: 0.0, w: 1920.0, h: 1080.0 };
+        let both = [laptop, hdmi];
+        assert_eq!(monitor_at((100.0, 500.0), &both), Some(0));
+        assert_eq!(monitor_at((1536.0, 100.0), &both), Some(1)); // the shared edge
+        assert_eq!(monitor_at((100.0, 100.0), &both), None); // above the laptop: no screen
+        assert_eq!(monitor_at((4000.0, 100.0), &both), None);
     }
 }

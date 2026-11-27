@@ -13,6 +13,8 @@ const SIZE: f64 = 96.0;
 const BOTTOM_PAD: f64 = 12.0;
 
 const INK: (f64, f64, f64) = (20.0 / 255.0, 20.0 / 255.0, 24.0 / 255.0);
+/// Appy's body: a warm off-white (r, g, b, a). The compact ring fills in it too.
+pub const BODY: (f64, f64, f64, f64) = (218.0 / 255.0, 216.0 / 255.0, 208.0 / 255.0, 0.94);
 
 /// The busy phase wraps here: two dot-wave cycles, one coaster loop (about 1.5 s).
 pub const BUSY_PHASE_WRAP: f64 = TAU * 2.0;
@@ -104,7 +106,7 @@ pub fn draw(cr: &Context, canvas_w: f64, canvas_h: f64, pose: &Pose) {
 fn draw_body(cr: &Context, w: f64, h: f64) {
     // Squircle body
     rounded_rect(cr, w * 0.10, h * 0.22, w * 0.80, h * 0.72, w * 0.24);
-    cr.set_source_rgba(218.0 / 255.0, 216.0 / 255.0, 208.0 / 255.0, 0.94);
+    cr.set_source_rgba(BODY.0, BODY.1, BODY.2, BODY.3);
     let _ = cr.fill();
 
     // Blush-white leaf

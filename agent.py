@@ -196,6 +196,14 @@ class Agent:
             return self.last_usage + estimate_tokens(self.messages[self._usage_messages:])
         return estimate_tokens(self.messages) + estimate_tokens(self.tools)
 
+    def report_context(self):
+        """Tell the UI how close the conversation is to being compacted (the ring on the
+        input pill fills up towards `compact_at`)."""
+        try:
+            self.ui.context(self.context_tokens(), self.compact_at)
+        except Exception as exc:  # a progress ring must never break a turn
+            print(f"[ui] couldn't report context: {type(exc).__name__}: {exc}")
+
     def run_turn(
         self,
         user_text: str,
@@ -249,6 +257,7 @@ class Agent:
             ))
             drop_stale_tool_exchanges(self.messages, checkpoint, self.stale_tools)
             prune_old_tool_outputs(self.messages)
+            self.report_context()
 
     def maybe_compact(self, force: bool = False) -> bool:
         """Between turns: if the conversation has grown past `compact_at` tokens, fold the
@@ -281,6 +290,7 @@ class Agent:
                 self.log.compaction(summary=summary)
             self.last_usage = None  # the server's count is for the old, longer history
         finally:
+            self.report_context()
             self.status.set_phase("idle")
         return True
 

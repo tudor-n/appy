@@ -1,7 +1,8 @@
 //! Pointer and keyboard handling.
 //!
 //! - Hover the mascot body to peek at the chat; hovering the chat keeps it open.
-//! - Drag the mascot to move the overlay (it wobbles when let go).
+//! - Drag the mascot to move the overlay (it wobbles when let go). Let go past the edge
+//!   of the screen, over another monitor, and he moves to that monitor.
 //! - Double left-click the mascot to hide the overlay (the panel pill brings it back).
 //! - Double right-click to toggle glass mode (pinned open, dark backdrop); Esc leaves it.
 //! - Enter sends, Shift+Enter inserts a newline.
@@ -9,7 +10,7 @@
 
 use std::time::Instant;
 
-use gtk4::gdk::{Key, ModifierType};
+use gtk4::gdk::{Key, ModifierType, ScrollUnit};
 use gtk4::prelude::*;
 use gtk4::{
     EventControllerKey, EventControllerMotion, EventControllerScroll, EventControllerScrollFlags,
@@ -41,29 +42,37 @@ fn connect_map(app: &'static App) {
         let mut s = app.state.borrow_mut();
         s.last_input_region = None;
         app.ui
-            .update_input_region(s.chat_open, s.locked, s.drag.active);
+            .update_input_region(s.chat_open, s.locked, s.is_moving());
     });
 }
 
 fn connect_scrolling(app: &'static App) {
-    let wheel = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
-    wheel.connect_scroll(move |_, _dx, dy| {
-        let s = app.state.borrow();
-        if s.locked || s.chat_open {
-            app.ui.chat.scroll_by(dy * WHEEL_STEP);
-            return glib::Propagation::Stop;
-        }
-        glib::Propagation::Proceed
-    });
-    app.ui.chat_panel.add_controller(wheel);
+    // Over the message log, capture the scroll before the log's own ScrolledWindow sees
+    // it: every scroll goes through ChatLog, so nothing fights its stick-to-bottom
+    // easing. Elsewhere on the panel (the input pill), whatever isn't used by the input
+    // itself bubbles up and scrolls the log too.
+    app.ui
+        .chat
+        .scrolled
+        .add_controller(log_scroller(app, PropagationPhase::Capture));
+    app.ui
+        .chat_panel
+        .add_controller(log_scroller(app, PropagationPhase::Bubble));
 
-    // Keyboard scrolling (and Esc) only in glass mode
+    // Keyboard scrolling and Esc-to-leave only in glass mode; outside it, Esc in the
+    // message field just lets go of the keyboard
     let keys = EventControllerKey::new();
     keys.connect_key_pressed(move |_, keyval, _, _| {
-        let mut s = app.state.borrow_mut();
-        if !s.locked {
+        if !app.state.borrow().locked {
+            // Done typing: let go of the keyboard so the chat can close again. (Not while
+            // borrowing the state: moving the focus emits signals right away.)
+            if keyval == Key::Escape && app.ui.input.focus.contains_focus() {
+                GtkWindowExt::set_focus(&app.ui.window, None::<&gtk4::Widget>);
+                return glib::Propagation::Stop;
+            }
             return glib::Propagation::Proceed;
         }
+        let mut s = app.state.borrow_mut();
         let delta = match keyval {
             Key::Up => -ARROW_STEP,
             Key::Down => ARROW_STEP,
@@ -80,6 +89,34 @@ fn connect_scrolling(app: &'static App) {
         glib::Propagation::Stop
     });
     app.ui.window.add_controller(keys);
+}
+
+/// Scrolls the message log while it's open: a touchpad moves it 1:1 and keeps coasting
+/// when the fingers lift; a mouse wheel and the keyboard ease in steps.
+fn log_scroller(app: &'static App, phase: PropagationPhase) -> EventControllerScroll {
+    let scroll = EventControllerScroll::new(
+        EventControllerScrollFlags::VERTICAL | EventControllerScrollFlags::KINETIC,
+    );
+    scroll.set_propagation_phase(phase);
+    scroll.connect_scroll(move |controller, _dx, dy| {
+        let s = app.state.borrow();
+        if !(s.locked || s.chat_open) {
+            return glib::Propagation::Proceed;
+        }
+        if controller.unit() == ScrollUnit::Surface {
+            app.ui.chat.scroll_direct(dy);
+        } else {
+            app.ui.chat.scroll_by(dy * WHEEL_STEP);
+        }
+        glib::Propagation::Stop
+    });
+    scroll.connect_decelerate(move |_, _vx, vy| {
+        let s = app.state.borrow();
+        if s.locked || s.chat_open {
+            app.ui.chat.fling(vy);
+        }
+    });
+    scroll
 }
 
 /// Only the mascot body pushes the messages out. Once they're out, hovering the message
@@ -156,16 +193,21 @@ fn connect_drag(app: &'static App) {
             s.drag.active = false;
             return;
         }
-        s.drag.begin(s.placement.anchor);
+        s.drag.begin(s.placement.anchor, (start_x, start_y));
         s.last_input_region = None;
         app.ui.update_input_region(s.chat_open, s.locked, true);
     });
 
-    drag.connect_drag_update(move |_, dx, dy| {
+    drag.connect_drag_update(move |gesture, dx, dy| {
         let mut s = app.state.borrow_mut();
         if !s.drag.active {
             return;
         }
+        // Past the edge over another monitor: he waits at the edge, and letting go
+        // there moves him across (see drag_end)
+        let pointer = gesture.start_point().map(|(x, y)| (x + dx, y + dy));
+        s.drag.over_other_monitor = pointer.and_then(|p| app.ui.monitor_across(p)).is_some();
+        set_class(&app.ui.root, "leaving", s.drag.over_other_monitor);
         // Only the mascot itself has to stay on screen; the shell rearranges around it
         let ui = &app.ui;
         s.placement.anchor =
@@ -176,12 +218,24 @@ fn connect_drag(app: &'static App) {
         s.wobble.kick(step_dx, step_dy);
     });
 
-    drag.connect_drag_end(move |_, _, _| {
+    drag.connect_drag_end(move |gesture, dx, dy| {
         let mut s = app.state.borrow_mut();
         if s.drag.active {
             s.drag.active = false;
             s.last_input_region = None;
             app.ui.update_input_region(s.chat_open, s.locked, false);
+
+            // Let go over another monitor: move there once the drag is fully over (doing
+            // it mid-drag, while the compositor holds the button for this window, could
+            // leave the overlay unmapped)
+            let pointer = gesture.start_point().map(|(x, y)| (x + dx, y + dy));
+            let target = pointer.and_then(|p| app.ui.monitor_across(p));
+            if let Some((monitor, at, size)) = target.filter(|_| s.drag.over_other_monitor) {
+                let grab = s.drag.grab;
+                glib::idle_add_local_once(move || app.move_to_monitor(&monitor, at, size, grab));
+            }
+            s.drag.over_other_monitor = false;
+            app.ui.root.remove_css_class("leaving");
         }
     });
 
@@ -204,7 +258,7 @@ fn connect_input(app: &'static App) {
 
     let compact_click = GestureClick::new();
     compact_click.connect_released(move |_, _, _, _| app.compact());
-    app.ui.input.compact.add_controller(compact_click);
+    app.ui.input.compact.area.add_controller(compact_click);
 
     for (effort, button) in &app.ui.input.effort.options {
         let effort = *effort;

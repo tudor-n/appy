@@ -466,6 +466,20 @@ class MaybeCompactTests(unittest.TestCase):
         self.assertIsNone(agent.last_usage)
         self.assertEqual(agent.messages[1]["content"], compaction.SUMMARY_PREFIX + "FACTS: x")
 
+    def test_context_is_reported_after_each_turn_and_compaction(self):
+        agent, _, _, ui = make_agent(
+            [[text_chunk("Okay."), usage_chunk(9600, 10)], completion("FACTS: x")],
+            compact_at=9500,
+        )
+        prefill(agent, 12)
+        run_quietly(agent, "hi")
+        self.assertEqual(ui.contexts[-1], (9600 + estimate_tokens(agent.messages[-1:]), 9500))
+        with contextlib.redirect_stdout(io.StringIO()):
+            agent.maybe_compact()
+        tokens, limit = ui.contexts[-1]
+        self.assertEqual(limit, 9500)
+        self.assertLess(tokens, 9500)  # the ring drops once the history is folded
+
     def test_failed_summary_keeps_history_under_the_limit(self):
         agent, _, _, _ = make_agent(
             [[text_chunk("Okay."), usage_chunk(9600, 10)], ConnectionError("down")],

@@ -178,6 +178,7 @@ def main():
     threading.Thread(target=agent.preheat, daemon=True).start()
     tools.prefetch()
 
+    agent.report_context()  # the compact ring starts at the system prompt + tools
     status.publish(force=True)  # clears "booting"
     print("Appy ready (voice + UI). Say 'quit' or press Ctrl+C to exit.\n")
 
@@ -187,6 +188,7 @@ def main():
             source, user_input = turn_queue.get()
             if source == "compact":  # the UI's compact button; runs between turns
                 agent.maybe_compact(force=True)
+                agent.report_context()  # also when there was nothing to fold
                 continue
             if source == "quit" or user_input.lower().strip(".!?") in QUIT_WORDS:
                 print("\nExiting...")

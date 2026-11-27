@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gtk4::cairo::{RectangleInt, Region};
-use gtk4::gdk::{Display, Rectangle};
+use gtk4::gdk::{Display, Monitor, Rectangle};
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, DrawingArea, Label,
@@ -16,7 +16,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use crate::chat::ChatLog;
 use crate::memory::MemoryPanel;
 use crate::input::{ChatInput, set_class};
-use crate::layout::{HSide, Rect, Shell};
+use crate::layout::{self, HSide, Rect, Shell};
 use crate::mascot;
 use crate::weather::WeatherCard;
 
@@ -43,6 +43,9 @@ pub struct Ui {
     pub input: ChatInput,
     pub card: WeatherCard,
     shell_pos: Rc<Cell<(i32, i32)>>,
+    /// The shell's rect (x, y, w, h) in the last layout. Widget bounds on the stage are
+    /// from that layout, which lags `shell_pos` by a frame while the shell moves.
+    shell_laid_out: Rc<Cell<(i32, i32, i32, i32)>>,
     card_pos: Rc<Cell<(i32, i32)>>,
     memory_pos: Rc<Cell<(i32, i32)>>,
     /// Rewritten every frame while wobbling; layered above the static stylesheet.
@@ -104,12 +107,14 @@ impl Ui {
         filler.set_can_target(false);
 
         let stage = Overlay::new();
+        stage.add_css_class("stage");
         stage.set_child(Some(&filler));
         stage.add_overlay(&root);
         stage.add_overlay(&card.root);
         stage.add_overlay(&memory.root);
 
         let shell_pos = Rc::new(Cell::new((0, 0)));
+        let shell_laid_out = Rc::new(Cell::new((0, 0, 0, 0)));
         let card_pos = Rc::new(Cell::new((0, 0)));
         let memory_pos = Rc::new(Cell::new((0, 0)));
         stage.connect_get_child_position({
@@ -117,6 +122,7 @@ impl Ui {
                 (root.clone(), card.root.clone(), memory.root.clone());
             let (shell_pos, card_pos, memory_pos) =
                 (shell_pos.clone(), card_pos.clone(), memory_pos.clone());
+            let shell_laid_out = shell_laid_out.clone();
             move |_, child| {
                 let (x, y) = if child == root.upcast_ref::<gtk4::Widget>() {
                     shell_pos.get()
@@ -134,6 +140,9 @@ impl Ui {
                 // Minimum size, like the GtkFixed this replaced: it keeps the message
                 // list as tall as the mascot column instead of its full 360px
                 let (minimum, _) = child.preferred_size();
+                if child == root.upcast_ref::<gtk4::Widget>() {
+                    shell_laid_out.set((x, y, minimum.width(), minimum.height()));
+                }
                 Some(Rectangle::new(x, y, minimum.width(), minimum.height()))
             }
         });
@@ -151,6 +160,7 @@ impl Ui {
             input,
             card,
             shell_pos,
+            shell_laid_out,
             card_pos,
             memory_pos,
             wobble_css,
@@ -191,20 +201,78 @@ impl Ui {
     /// What the memory panel lines up with: the chat panel, or the whole glass panel in
     /// glass mode. (While the chat slides in, the panel rides along with it.)
     pub fn memory_anchor(&self, locked: bool) -> Option<Rect> {
-        let widget: &gtk4::Widget = if locked {
-            self.root.upcast_ref()
+        if locked {
+            self.shell_bounds()
         } else {
-            self.chat_panel.upcast_ref()
-        };
-        widget
+            self.in_shell(self.chat_panel.upcast_ref())
+        }
+    }
+
+    /// Where `widget` (inside the shell) is on the stage, going by where the shell has
+    /// just been put rather than where it was last laid out. While dragging, the stage's
+    /// own layout is a frame behind, and anything placed from it trails and shakes.
+    fn in_shell(&self, widget: &gtk4::Widget) -> Option<Rect> {
+        let b = widget
             .compute_bounds(&self.stage)
-            .filter(|b| b.width() > 0.0)
-            .map(|b| Rect {
-                x: b.x() as f64,
-                y: b.y() as f64,
-                w: b.width() as f64,
-                h: b.height() as f64,
+            .filter(|b| b.width() > 0.0)?;
+        let (dx, dy) = self.shell_moved();
+        Some(Rect {
+            x: b.x() as f64 + dx,
+            y: b.y() as f64 + dy,
+            w: b.width() as f64,
+            h: b.height() as f64,
+        })
+    }
+
+    /// How far the shell has been moved since it was last laid out.
+    fn shell_moved(&self) -> (f64, f64) {
+        let (px, py) = self.shell_pos.get();
+        let (lx, ly, _, _) = self.shell_laid_out.get();
+        ((px - lx) as f64, (py - ly) as f64)
+    }
+
+    /// When `pointer` (window coordinates) has left this window onto another monitor:
+    /// that monitor, the pointer's position on it, and its size.
+    pub fn monitor_across(&self, pointer: (f64, f64)) -> Option<(Monitor, (f64, f64), (f64, f64))> {
+        let (w, h) = self.window_size();
+        if pointer.0 >= 0.0 && pointer.0 < w && pointer.1 >= 0.0 && pointer.1 < h {
+            return None;
+        }
+        let surface = self.window.surface()?;
+        let display = surface.display();
+        let here = display.monitor_at_surface(&surface)?.geometry();
+        // The window starts at its monitor's top-left (a top panel would offset it a bit)
+        let global = (here.x() as f64 + pointer.0, here.y() as f64 + pointer.1);
+
+        let monitors: Vec<Monitor> = display
+            .monitors()
+            .iter::<Monitor>()
+            .filter_map(Result::ok)
+            .collect();
+        let rects: Vec<Rect> = monitors
+            .iter()
+            .map(|m| {
+                let g = m.geometry();
+                Rect {
+                    x: g.x() as f64,
+                    y: g.y() as f64,
+                    w: g.width() as f64,
+                    h: g.height() as f64,
+                }
             })
+            .collect();
+        let i = layout::monitor_at(global, &rects)?;
+        let r = rects[i];
+        let same = r.x == here.x() as f64 && r.y == here.y() as f64;
+        (!same).then(|| (monitors[i].clone(), (global.0 - r.x, global.1 - r.y), (r.w, r.h)))
+    }
+
+    /// How tall the message log may grow: up to near the top of the screen, from where
+    /// its bottom is now.
+    pub fn log_room(&self) -> f64 {
+        const TOP_GAP: f64 = 24.0;
+        self.in_shell(self.chat.scrolled.upcast_ref())
+            .map_or(0.0, |log| log.y + log.h - TOP_GAP)
     }
 
     /// The memory panel's rect, while it's shown.
@@ -224,12 +292,7 @@ impl Ui {
 
     /// The shell's visible rect (margins excluded): the glass panel in glass mode.
     pub fn shell_bounds(&self) -> Option<Rect> {
-        self.root.compute_bounds(&self.stage).map(|b| Rect {
-            x: b.x() as f64,
-            y: b.y() as f64,
-            w: b.width() as f64,
-            h: b.height() as f64,
-        })
+        self.in_shell(self.root.upcast_ref())
     }
 
     /// The mascot body relative to the mascot's own drawing area.
@@ -241,25 +304,39 @@ impl Ui {
 
     /// Measure the shell, predicting where the mascot would sit with the chat on the
     /// other side (mirrored). None until the first layout.
-    pub fn measure_shell(&self, side: HSide) -> Option<Shell> {
+    ///
+    /// The shell's size is asked for fresh, but the mascot's place in it comes from the
+    /// last layout, which can be a frame old (the shell just moved, flipped sides or grew).
+    /// So it's measured inside the shell, where moving changes nothing; the side is read
+    /// off that same layout; and the height from the bottom, where the mascot sits.
+    pub fn measure_shell(&self) -> Option<Shell> {
         let (minimum, _) = self.root.preferred_size();
         let size = (minimum.width() as f64, minimum.height() as f64);
         let mascot = self.mascot.compute_bounds(&self.stage)?;
-        if size.0 <= 0.0 || mascot.width() <= 0.0 {
+        let chat = self.chat_panel.compute_bounds(&self.stage)?;
+        let (lx, ly, _, lh) = self.shell_laid_out.get();
+        if size.0 <= 0.0 || mascot.width() <= 0.0 || lh <= 0 {
             return None;
         }
 
-        let (px, py) = self.shell_pos.get();
-        let ox = mascot.x() as f64 - px as f64;
+        // Offsets inside the shell as it was laid out (bounds and rect from one layout)
+        let ox = mascot.x() as f64 - lx as f64;
         let mirrored = size.0 - ox - mascot.width() as f64;
-        let mascot_x = match side {
+        let laid_out_side = if mascot.x() < chat.x() {
+            HSide::Right
+        } else {
+            HSide::Left
+        };
+        let mascot_x = match laid_out_side {
             HSide::Right => [ox, mirrored],
             HSide::Left => [mirrored, ox],
         };
+        // The mascot sits at the bottom, so its distance from the bottom carries over
+        let below = lh as f64 - (mascot.y() as f64 - ly as f64) - mascot.height() as f64;
         Some(Shell {
             size,
             mascot_x,
-            mascot_y: mascot.y() as f64 - py as f64,
+            mascot_y: size.1 - below - mascot.height() as f64,
         })
     }
 

@@ -55,12 +55,16 @@ class FakeSpeaker:
 class FakeUi:
     def __init__(self):
         self.events: list[tuple] = []
+        self.contexts: list[tuple[int, int]] = []  # kept apart: tests check event order
 
     def status(self, state: str, label: str = ""):
         self.events.append(("status", state))
 
     def response(self, text: str, expression: str = "neutral"):
         self.events.append(("response", text, expression))
+
+    def context(self, tokens: int, limit: int):
+        self.contexts.append((tokens, limit))
 
 
 class RecordingLogger:
