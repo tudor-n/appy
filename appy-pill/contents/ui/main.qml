@@ -22,6 +22,7 @@ PlasmoidItem {
             onTriggered: {
                 var xhr = new XMLHttpRequest();
                 xhr.open("POST", "http://127.0.0.1:8002/auto-approve");
+                xhr.setRequestHeader("X-Appy-Pill", "1");  // the bridge refuses POSTs without it
                 xhr.send();
             }
         },
@@ -32,6 +33,7 @@ PlasmoidItem {
             onTriggered: {
                 var xhr = new XMLHttpRequest();
                 xhr.open("POST", "http://127.0.0.1:8002/quit");
+                xhr.setRequestHeader("X-Appy-Pill", "1");  // the bridge refuses POSTs without it
                 xhr.send();
             }
         }
@@ -397,6 +399,7 @@ PlasmoidItem {
                     if (root.connected) {
                         var xhr = new XMLHttpRequest();
                         xhr.open("POST", "http://127.0.0.1:8002/toggle");
+                        xhr.setRequestHeader("X-Appy-Pill", "1");  // the bridge refuses POSTs without it
                         xhr.send();
                     } else if (!root.launching) {
                         root.launch();

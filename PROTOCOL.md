@@ -57,6 +57,8 @@ that connects mid-boot still shows "loading…" and the mascot's loading bar.
 
 Served by the overlay (`appy-ui/src/net/pill_bridge.rs`) for the Plasma applet.
 
+The POST routes need an `X-Appy-Pill: 1` header and answer `{"ok": false}` without it, so a web page can't use them (a cross-origin request with a custom header needs a CORS preflight, which the bridge never approves).
+
 | Request        | Response |
 |----------------|----------|
 | `GET /state`   | `{"state": …, "expression": …, "msg_count": n, "minimized": bool, "auto_approve": bool \| null}`; the pill polls this every 200ms. `auto_approve` is null until the backend sends `memory_settings` (or with memory off), which hides the pill's toggle |
