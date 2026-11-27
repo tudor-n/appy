@@ -14,7 +14,8 @@ import re
 from pathlib import Path
 
 from .llm import LLM, BadRequest, EmptyOutput, LLMError
-from .vault import _SLUG, CORE, CORE_CAP, NOTE_CAP, NoteFormatError, _gist, check_lines, estimate_tokens
+from .vault import (_SLUG, CORE, CORE_CAP, NOTE_CAP, NoteFormatError, VaultError, _gist,
+                    check_lines, check_note, estimate_tokens)
 
 MAX_ROUTED = 3
 MAX_REFRESHES = 3  # redos in a row for a proposal whose note keeps changing
@@ -310,13 +311,16 @@ class Consolidator:
     def refresh(self, slug: str) -> str:
         """Redo a stale proposal (its note changed before it was reviewed): fold its source
         windows into the note as it is now. Returns "updated", "deleted" (nothing new left)
-        or "missing"."""
+        or "missing". A proposal without sources (put back by an Undo) is carried over in
+        code instead; "failed" if that isn't possible."""
         from .transcript import load_log, render_turns, windows
 
         with self.lock:
             item = self.vault.proposal(slug)
             if item is None:
                 return "missing"
+            if not item.get("sources"):
+                return self._carry_over(slug, item)
             current = self.vault.note_text(slug)
             seen = self.vault.note_hash(slug)
             forgotten = self.vault.forgotten_lines()
@@ -356,6 +360,28 @@ class Consolidator:
                                         item.get("sessions", []), item.get("sources", []))
             self._auto_commit(slug)
         print(f"[consolidator] refresh {slug}: redone against the current note", flush=True)
+        return "updated"
+
+    def _carry_over(self, slug: str, item: dict) -> str:
+        """Redo a proposal with no source windows (e.g. Tudor's own edit, put back by an
+        Undo) by merging its changes into the note as it is now. The caller holds the lock."""
+        current = self.vault.note_text(slug)
+        try:
+            text = check_note(slug, self.vault.onto_current(
+                slug, item.get("base_hash", ""), item.get("new_text", "")), current)
+        except (VaultError, NoteFormatError) as exc:
+            reason = exc.message if isinstance(exc, VaultError) else exc.reason
+            print(f"[consolidator] refresh {slug}: can't carry it over ({reason})", flush=True)
+            return "failed"
+        if text == (current or ""):
+            self.vault.delete_proposal(slug)
+            print(f"[consolidator] refresh {slug}: already in the note, proposal dropped",
+                  flush=True)
+            return "deleted"
+        self.vault.replace_proposal(slug, item.get("title") or slug, text,
+                                    item.get("summary", ""), item.get("sessions", []), [])
+        self._auto_commit(slug)
+        print(f"[consolidator] refresh {slug}: carried over to the current note", flush=True)
         return "updated"
 
     def _auto_commit(self, slug: str) -> None:

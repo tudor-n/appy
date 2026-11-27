@@ -677,6 +677,24 @@ class RefreshTests(RunBase):
             self.assertEqual(self.consolidator().refresh("mark-i-suit"), "missing")
         self.assertIsNone(self.vault.proposal("mark-i-suit"))
 
+    def test_refresh_of_a_proposal_put_back_by_undo_keeps_it(self):
+        # Undo of an approval puts the proposal back without sources (no window to redo)
+        self.vault.save_proposal("mark-i-suit", "Mark i suit", HUD, "added the HUD", S1, 0)
+        self.vault.apply_note("mark-i-suit", HUD, "memory: added the HUD [approved]",
+                              f"sessions={S1}")
+        self.vault.undo()
+        self.assertEqual(self.vault.proposal("mark-i-suit")["sources"], [])
+        self.vault.remember("The suit has a 6S LiPo.", "mark-i-suit", "live")
+        self.vault.mark_stale("mark-i-suit")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self.consolidator().refresh("mark-i-suit"), "updated")
+        self.assertEqual(self.llm.calls, [])  # merged in code, not rewritten
+        item = self.vault.proposal("mark-i-suit")
+        self.assertEqual(item["new_text"], HUD + "- The suit has a 6S LiPo.\n")
+        self.assertEqual((item["summary"], item["sessions"]), ("added the HUD", [S1]))
+        self.assertFalse(item.get("stale"))
+        self.assertEqual(item["base_hash"], self.vault.note_hash("mark-i-suit"))
+
     def test_stale_slugs_lists_stale_proposals(self):
         self.stale_proposal()
         self.assertEqual(self.consolidator().stale_slugs(), ["mark-i-suit"])
