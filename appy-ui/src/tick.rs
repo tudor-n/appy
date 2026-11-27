@@ -115,6 +115,7 @@ impl App {
             self.ui.window_size(),
             s.placement.side,
             s.chat_open,
+            None,
         )
     }
 

@@ -109,7 +109,7 @@ pub enum Action {
 impl Action {
     fn label(self) -> &'static str {
         match self {
-            Action::Accept => "Accept",
+            Action::Accept => "Approve",
             Action::Deny => "Deny",
             Action::Edit => "Edit",
             Action::Save => "Save",
@@ -137,14 +137,19 @@ pub struct Outgoing {
     pub before: Option<String>,
 }
 
-/// Everything the tray shows, as plain data (the widget only draws it).
+/// Everything the panel shows, as plain data (the widget only draws it).
 #[derive(Debug, Default)]
 pub struct TrayState {
     pub items: Vec<Proposal>,
     pub expanded: bool,
     pub editing: Option<Editing>,
+    /// The proposal on screen (one per page).
+    pub page: usize,
     /// Proposals a decision was sent for; their buttons wait for the next list.
     pending: Vec<String>,
+    /// Set by Later: the (slug, after) pairs on screen then. The panel stays hidden
+    /// until the list holds something not in here.
+    later: Option<Vec<(String, String)>>,
 }
 
 impl TrayState {
@@ -159,7 +164,74 @@ impl TrayState {
             self.editing = None;
         }
         self.pending.clear();
+        if let Some(seen) = &self.later {
+            let new = items
+                .iter()
+                .any(|i| !seen.iter().any(|(slug, after)| *slug == i.slug && *after == i.after));
+            if new {
+                self.later = None;
+            }
+        }
         self.items = items;
+        self.page = self.page.min(self.items.len().saturating_sub(1));
+    }
+
+    pub fn next_page(&mut self) {
+        if self.page + 1 < self.items.len() {
+            self.page += 1;
+        }
+    }
+
+    pub fn prev_page(&mut self) {
+        self.page = self.page.saturating_sub(1);
+    }
+
+    /// "2 of 3" ("" with nothing to review).
+    pub fn page_label(&self) -> String {
+        if self.items.is_empty() {
+            String::new()
+        } else {
+            format!("{} of {}", self.page + 1, self.items.len())
+        }
+    }
+
+    /// Hide the panel without deciding anything, until something new arrives.
+    pub fn later(&mut self) {
+        self.later = Some(
+            self.items
+                .iter()
+                .map(|i| (i.slug.clone(), i.after.clone()))
+                .collect(),
+        );
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.later.is_some()
+    }
+
+    fn approvable(&self, item: &Proposal) -> bool {
+        !item.stale
+            && !self.is_busy(&item.slug)
+            && !self.editing.as_ref().is_some_and(|e| e.slug == item.slug)
+    }
+
+    pub fn can_approve_all(&self) -> bool {
+        self.items.iter().any(|i| self.approvable(i))
+    }
+
+    /// Approve every proposal that can be approved right now (not being redone, not
+    /// waiting on a decision, not open in Edit).
+    pub fn approve_all(&mut self) -> Vec<Outgoing> {
+        let slugs: Vec<String> = self
+            .items
+            .iter()
+            .filter(|i| self.approvable(i))
+            .map(|i| i.slug.clone())
+            .collect();
+        slugs
+            .iter()
+            .filter_map(|slug| self.press(slug, Action::Accept))
+            .collect()
     }
 
     pub fn start_edit(&mut self, slug: &str) {
@@ -572,6 +644,75 @@ mod tests {
         t.start_edit("bench");
         assert!(t.press("bench", Action::Cancel).is_none());
         assert!(t.editing.is_none());
+    }
+
+    fn items(slugs: &[&str]) -> Vec<Proposal> {
+        slugs.iter().map(|s| item(s, false)).collect()
+    }
+
+    #[test]
+    fn pages_follow_the_list() {
+        let mut t = TrayState::default();
+        assert_eq!(t.page_label(), "");
+        t.set_items(items(&["a", "b", "c"]));
+        assert_eq!(t.page_label(), "1 of 3");
+        t.prev_page();
+        assert_eq!(t.page, 0);
+        t.next_page();
+        t.next_page();
+        t.next_page();
+        assert_eq!(t.page_label(), "3 of 3");
+        // the last one is approved: the list shrinks and the page follows
+        t.set_items(items(&["a", "b"]));
+        assert_eq!(t.page_label(), "2 of 2");
+        // approving the one on screen shows the next in its place
+        t.prev_page();
+        t.set_items(items(&["b"]));
+        assert_eq!((t.page, t.page_label().as_str()), (0, "1 of 1"));
+        t.set_items(vec![]);
+        assert_eq!((t.page, t.page_label().as_str()), (0, ""));
+    }
+
+    #[test]
+    fn later_hides_until_something_new() {
+        let mut t = TrayState::default();
+        t.set_items(items(&["a", "b"]));
+        assert!(!t.is_hidden());
+        t.later();
+        assert!(t.is_hidden());
+        t.set_items(items(&["a", "b"])); // the 60s poll, nothing new
+        assert!(t.is_hidden());
+        t.set_items(items(&["a"])); // one approved elsewhere
+        assert!(t.is_hidden());
+        let mut changed = item("a", false);
+        changed.after = "# B\n- newer\n".into();
+        t.set_items(vec![changed.clone()]);
+        assert!(!t.is_hidden());
+        t.later();
+        t.set_items(vec![changed, item("c", false)]); // a new note
+        assert!(!t.is_hidden());
+    }
+
+    #[test]
+    fn approve_all_skips_stale_busy_and_editing() {
+        let mut t = TrayState::default();
+        t.set_items(vec![item("a", true), item("b", false), item("c", false), item("d", false)]);
+        t.start_edit("b");
+        t.press("c", Action::Deny).unwrap();
+        assert!(t.can_approve_all());
+        let sent = t.approve_all();
+        assert_eq!(
+            sent.iter().map(|o| (o.slug.as_str(), o.decision)).collect::<Vec<_>>(),
+            vec![("d", Decision::Accept)]
+        );
+        assert!(t.is_busy("d"));
+        assert!(!t.can_approve_all());
+        assert!(t.approve_all().is_empty());
+    }
+
+    #[test]
+    fn accept_button_reads_approve() {
+        assert_eq!(Action::Accept.label(), "Approve");
     }
 
     #[test]
