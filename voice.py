@@ -7,6 +7,7 @@ import sounddevice as sd
 from kokoro_onnx import Kokoro
 
 from status import SpeechActivity
+from speech_text import speakable
 
 
 def provider_warning(requested: str | None, active: list[str]) -> str | None:
@@ -88,7 +89,7 @@ class Speaker:
                     self._activity.done()
 
     def speak(self, text: str):
-        clean = text.strip()
+        clean = speakable(text.strip())
         if clean:
             self._activity.add()
             self.speech_queue.put(clean)
