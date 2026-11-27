@@ -41,12 +41,26 @@ reach him right away.
    the change is prepended to the next user message. The system prompt stays as built
    at startup, so the KV cache isn't rebuilt.
 
+3. **Auto-approve toggle** (added by Tudor): a checkable "Auto-approve memories" item in
+   the panel pill's right-click menu. When it's on, nothing waits for review: what the
+   consolidator learns is committed straight away (still through the same line checks),
+   Appy hears about it via the live update, and a chip with Undo appears in the chat if
+   Appy is running. Likely the default once Tudor trusts the memory.
+   - The setting lives on the Mac service (`settings.json` in the vault, gitignored), so
+     it holds across launches and also covers sessions consolidated while the laptop's
+     Appy is off. Default off.
+   - Turning it on also approves what is already waiting.
+   - Auto commits are marked `[auto]` in the vault's git log (vs `[approved]`), so they
+     can be told apart and undone the usual way.
+   - The menu item shows only while Appy is running (like "Quit Appy"), since the pill
+     reaches the service through the overlay and the brain.
+
 ## Non-goals
 
 - No "deny all" (one misclick would throw everything away).
 - Chips (`memory_committed` + Undo) stay in the chat log as they are.
-- No change to the service, the consolidator, or the protocol between brain and overlay
-  beyond what Approve all needs (it can be sent as one decision per proposal).
+- No other change to the service or the consolidator than auto-approve, and no protocol
+  change beyond auto-approve and what Approve all needs (one decision per proposal).
 - Not rebuilding the system prompt mid-session.
 
 ## Approaches considered
