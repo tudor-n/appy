@@ -6,7 +6,10 @@ from pathlib import Path
 
 import agent as agent_mod
 
-from compaction import SUMMARY_ACK, SUMMARY_PREFIX, compact, estimate_tokens, render, split
+import tools
+from compaction import (
+    SUMMARY_ACK, SUMMARY_PREFIX, SUMMARY_TEMPLATE, compact, estimate_tokens, render, split,
+)
 from tests.fakes import FakeClient, completion
 
 SYSTEM = {"role": "system", "content": "sys"}
@@ -126,6 +129,43 @@ class RenderTests(unittest.TestCase):
         note = agent_mod.ALREADY_SAID_NOTE.format(said="Let me check.")
         text = render([{"role": "tool", "tool_call_id": "c1", "content": '{"temp_c":3}' + note}])
         self.assertEqual(text, 'Tool: {"temp_c":3}')
+
+
+class ModeLeftOutTests(unittest.TestCase):
+    """The mode lives in tools; a summary that mentions it goes stale after a switch."""
+
+    def tearDown(self):
+        tools.reset_mode()
+
+    def test_render_strips_the_turn_stamp(self):
+        for mode in tools.VALID_MODES:
+            tools.set_mode(mode)
+            stamp = tools.turn_stamp("10:32 PM")
+            text = render([{"role": "user", "content": f"{stamp} lock in, servo jitter"}])
+            self.assertEqual(text, "User: lock in, servo jitter")
+
+    def test_render_keeps_other_brackets(self):
+        text = render([{"role": "user", "content": "[Memory changed since your last reply: a]\n\nhi"}])
+        self.assertIn("[Memory changed", text)
+
+    def test_render_leaves_out_set_mode(self):
+        text = render([
+            {"role": "user", "content": "lock in and what's the weather"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "set_mode", "arguments": '{"mode":"focus"}'}},
+                {"id": "c2", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": '{"mode": "focus", "note": "Mode is now FOCUS."}'},
+            {"role": "tool", "tool_call_id": "c2", "content": '{"temp_c":3}'},
+            {"role": "assistant", "content": "Three degrees."},
+        ])
+        self.assertNotIn("set_mode", text)
+        self.assertNotIn("FOCUS", text)
+        self.assertIn("Appy called get_weather({})", text)
+        self.assertIn('Tool: {"temp_c":3}', text)
+
+    def test_template_says_to_leave_out_the_mode(self):
+        self.assertIn("Appy's mode", SUMMARY_TEMPLATE)
 
 
 class CompactTests(unittest.TestCase):
