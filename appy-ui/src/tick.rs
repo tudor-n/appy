@@ -56,6 +56,7 @@ impl App {
 
         let wobbling = s.wobble.step(frames);
         self.apply_wobble_css(&mut s, wobbling);
+        self.ui.input.fit_height();
         self.ui.chat.step_height(frames, self.ui.log_room());
         self.ui.chat.step_scroll(frames);
         self.ui.input.compact.step(frames, now);

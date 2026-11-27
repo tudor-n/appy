@@ -18,12 +18,17 @@ use crate::mascot;
 use crate::protocol::Effort;
 use crate::state::per_frame;
 
-/// The input grows with its text up to this height, then scrolls.
-const INPUT_MAX_HEIGHT: i32 = 132;
+/// The text area grows with its text from one line up to this height, then scrolls.
+/// (The field is 4px taller at the top and bottom: the margins sit outside the scroller,
+/// so scrolled text lines up with its top edge instead of leaving a sliver of a line.)
+const INPUT_MIN_HEIGHT: i32 = 18;
+const INPUT_MAX_HEIGHT: i32 = 124;
+const INPUT_MARGIN: i32 = 4;
 
 pub struct ChatInput {
     pub container: GtkBox,
     pub view: TextView,
+    scroll: ScrolledWindow,
     pub buffer: TextBuffer,
     pub focus: EventControllerFocus,
     pub compact: ContextRing,
@@ -37,8 +42,6 @@ impl ChatInput {
             .wrap_mode(WrapMode::WordChar)
             .accepts_tab(false)
             .hexpand(true)
-            .top_margin(4)
-            .bottom_margin(4)
             .left_margin(0)
             .right_margin(0)
             .build();
@@ -51,8 +54,10 @@ impl ChatInput {
             // which made the pill ~20px taller than one line and pushed the text off-centre.
             .vscrollbar_policy(PolicyType::External)
             .propagate_natural_height(true)
-            .min_content_height(26)
+            .min_content_height(INPUT_MIN_HEIGHT)
             .max_content_height(INPUT_MAX_HEIGHT)
+            .margin_top(INPUT_MARGIN)
+            .margin_bottom(INPUT_MARGIN)
             .hexpand(true)
             .child(&view)
             .build();
@@ -84,11 +89,20 @@ impl ChatInput {
 
         let effort = EffortPicker::new();
 
+        // The ring and the chip stay together at the bottom of the pill, the ring centred
+        // on the chip, however many lines the message has. margin_bottom centres the
+        // pair on a single line of text.
+        let tail = GtkBox::new(Orientation::Horizontal, 8);
+        tail.set_valign(Align::End);
+        tail.set_margin_bottom(3);
+        compact.area.set_valign(Align::Center);
+        tail.append(&compact.area);
+        tail.append(&effort.chip);
+
         let row = GtkBox::new(Orientation::Horizontal, 8);
         row.set_hexpand(true);
         row.append(&overlay);
-        row.append(&compact.area);
-        row.append(&effort.chip);
+        row.append(&tail);
 
         let container = GtkBox::new(Orientation::Vertical, 0);
         container.add_css_class("input-bubble");
@@ -100,10 +114,51 @@ impl ChatInput {
         Self {
             container,
             view,
+            scroll,
             buffer,
             focus,
             compact,
             effort,
+        }
+    }
+
+    /// Keep the field as tall as its text (one line to about INPUT_MAX_HEIGHT). It has to be
+    /// its minimum height, not just its natural one: the overlay lays the panel out at
+    /// its minimum size, so with messages in the log a taller natural height got no
+    /// room, and the text scrolled with its first line cut off. Called every frame
+    /// (the text view measures its lines lazily, so the height settles over a frame).
+    pub fn fit_height(&self) {
+        let width = self.view.width();
+        if width <= 0 {
+            return;
+        }
+        let (_, natural, _, _) = self.view.measure(Orientation::Vertical, width);
+        // The cap is a whole number of lines, so a message past it scrolls by whole lines
+        // instead of leaving a sliver of one at the top
+        let (_, line) = self.view.line_yrange(&self.buffer.start_iter());
+        let max = whole_lines_cap(INPUT_MAX_HEIGHT, line).max(INPUT_MIN_HEIGHT);
+        if self.scroll.max_content_height() != max {
+            if self.scroll.min_content_height() > max {
+                self.scroll.set_min_content_height(INPUT_MIN_HEIGHT);
+            }
+            self.scroll.set_max_content_height(max);
+        }
+        let want = natural.clamp(INPUT_MIN_HEIGHT, max);
+        if self.scroll.min_content_height() != want {
+            self.scroll.set_min_content_height(want);
+        }
+        // A TextView refreshes its scroll page when its text changes, not when it's
+        // resized: grown to fit a new line, it would keep scrolling as if it were the old
+        // height until the next keystroke. Keep the page at the height it's being given.
+        if let Some(adj) = self.view.vadjustment() {
+            let page = want as f64;
+            if (adj.page_size() - page).abs() > 0.5 {
+                adj.set_page_size(page);
+            }
+            let max = (adj.upper() - page).max(0.0);
+            if adj.value() > max {
+                adj.set_value(max);
+            }
         }
     }
 
@@ -113,6 +168,14 @@ impl ChatInput {
         let text = self.buffer.text(&start, &end, false).trim().to_string();
         (!text.is_empty()).then_some(text)
     }
+}
+
+/// The tallest height up to `cap` that holds whole `line`-high lines.
+fn whole_lines_cap(cap: i32, line: i32) -> i32 {
+    if line <= 0 {
+        return cap;
+    }
+    cap / line * line
 }
 
 /// A chip at the bottom-right of the input pill that expands a row of effort options.
@@ -126,8 +189,7 @@ impl EffortPicker {
     fn new() -> Self {
         let chip = Button::builder()
             .label(Effort::Off.short())
-            .valign(Align::End)
-            .margin_bottom(3) // centres the chip on a single line, stays bottom-aligned when it grows
+            .valign(Align::Center)
             .focus_on_click(false)
             .build();
         chip.add_css_class("effort-chip");
@@ -361,6 +423,13 @@ mod tests {
         assert!(cy - r - RING_LINE / 2.0 >= 0.0 && cy + r + RING_LINE / 2.0 <= size);
         // The hit box grew; the ring itself didn't
         assert_eq!(r, (14.0 - RING_LINE) * 0.5 - 0.5);
+    }
+
+    #[test]
+    fn input_cap_holds_whole_lines() {
+        // 16px lines: 7 fit in 124
+        assert_eq!(whole_lines_cap(124, 16), 112);
+        assert_eq!(whole_lines_cap(124, 0), 124); // no line measured yet
     }
 
     #[test]
