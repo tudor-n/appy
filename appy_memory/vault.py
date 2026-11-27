@@ -405,7 +405,38 @@ class Vault:
             self._rebuild_index()
         if restore:
             self._restore_proposal(*restore)
-        return {"undone": subject, "commit": new}
+        self._unforget(subject)
+        return {"undone": subject, "commit": new, **self._facts_changed(new)}
+
+    def _facts_changed(self, sha: str) -> dict:
+        """The note a commit changed and the facts it added and removed (for Appy)."""
+        try:
+            _, files = self.git.commit_info(sha)
+        except GitError:
+            return {}
+        notes = [f for f in files if f.startswith("memory/") and f.endswith(".md")]
+        if len(notes) != 1:
+            return {}
+        old = self._bullets(self.git.file_at(f"{sha}^", notes[0]) or "")
+        new = self._bullets(self.git.file_at(sha, notes[0]) or "")
+        return {"slug": notes[0][len("memory/"):-3],
+                "added": [b[2:] for b in new if b not in old],
+                "removed": [b[2:] for b in old if b not in new]}
+
+    def _unforget(self, subject: str) -> None:
+        """An undone forget takes its line off the forgotten list (the fact is back)."""
+        prefix = "memory: forget "
+        if not subject.startswith(prefix):
+            return
+        slug, _, text = subject[len(prefix):].partition(": ")
+        state = self._state()
+        forgotten = state.get("forgotten", [])
+        for i in range(len(forgotten) - 1, -1, -1):
+            f = forgotten[i]
+            if f.get("slug") == slug and str(f.get("line", ""))[2:62].rstrip() == text.rstrip():
+                del forgotten[i]
+                self._save_state(state)
+                return
 
     def _reviewed_change(self, sha: str, subject: str):
         """For an accepted or edited proposal about to be undone: what to put back up for

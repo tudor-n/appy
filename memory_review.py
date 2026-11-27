@@ -159,7 +159,12 @@ class MemoryReview:
             what = str(result["undone"]).removeprefix("memory: ")
             for tag in (" [approved]", " [edited]", " [auto]"):
                 what = what.removesuffix(tag)
-            self.on_change(f"undone, no longer true: {what}")
+            if result.get("slug"):  # the facts the undo put back and took out
+                self.on_change("undone: " + describe_change(
+                    str(result["slug"]), list(result.get("added") or []),
+                    list(result.get("removed") or []), what))
+            else:
+                self.on_change(f"undone, no longer true: {what}")
             return True
         if result.get("error"):
             print(f"[memory] undo failed: {result['error']}")

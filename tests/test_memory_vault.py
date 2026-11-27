@@ -298,6 +298,24 @@ class VaultTests(unittest.TestCase):
         self.assertTrue(self.vault.undo(second)["undone"].endswith(": b"))
         self.assertTrue(self.vault.undo(first)["undone"].endswith(": a"))
 
+    def test_undo_of_a_forget_takes_it_off_the_forgotten_list(self):
+        self.vault.remember("The PSU is a Korad.", "bench", "s1")
+        self.vault.remember("The scope is a Rigol.", "bench", "s1")
+        self.vault.forget("bench", "rigol", "s1")
+        self.vault.forget("bench", "korad", "s1")
+        self.assertEqual(len(self.vault.forgotten_lines()), 2)
+        result = self.vault.undo()
+        self.assertEqual(self.vault.forgotten_lines(), ["- The scope is a Rigol."])
+        # what the undo changed, so Appy can be told the fact is back
+        self.assertEqual((result["slug"], result["added"], result["removed"]),
+                         ("bench", ["The PSU is a Korad."], []))
+
+    def test_undo_of_a_remember_reports_the_fact_removed(self):
+        self.vault.remember("Tudor lives in Sibiu.", None, "s1")
+        result = self.vault.undo()
+        self.assertEqual((result["slug"], result["added"], result["removed"]),
+                         ("core", [], ["Tudor lives in Sibiu."]))
+
     def test_undo_sequence(self):
         core = self.mem / "core.md"
         self.vault.remember("a", None, "s1")

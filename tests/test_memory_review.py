@@ -23,6 +23,7 @@ class FakeClient:
         self.auto_items = []
         self.undo_calls = []
         self.refuse = set()
+        self.undo_extra = {}
 
     def settings(self):
         return None if self.down else {"auto_approve": self.auto}
@@ -62,7 +63,9 @@ class FakeClient:
             return {"error": "memory changed since: undo the newer change first"}
         if self.down:
             return {"error": "long-term memory is unreachable right now"}
-        return {"undone": self.undone, "commit": "f00"} if self.undone else {"undone": None, "commit": None}
+        if not self.undone:
+            return {"undone": None, "commit": None}
+        return {"undone": self.undone, "commit": "f00", **self.undo_extra}
 
 
 class MemoryReviewTests(unittest.TestCase):
@@ -318,6 +321,15 @@ class MemoryReviewTests(unittest.TestCase):
         self.assertEqual(self.notes, ["note 'bench' now also says: Korad",
                                       "note 'bench' now also says: x",
                                       "undone, no longer true: Replaced the PSU."])
+
+    def test_undo_note_says_what_the_undo_changed(self):
+        self.client.undone = "memory: forget bench: The PSU is a Korad."
+        self.client.undo_extra = {"slug": "bench", "added": ["The PSU is a Korad."],
+                                  "removed": []}
+        self.review.start()
+        self.review.undo()
+        self.wait(lambda: self.notes)
+        self.assertEqual(self.notes, ["undone: note 'bench' now also says: The PSU is a Korad."])
 
     def test_note_describes_removed_facts_and_falls_back_to_the_summary(self):
         self.client.items = [dict(ITEM, before="# Bench\n- Riden\n- Rigol\n",
