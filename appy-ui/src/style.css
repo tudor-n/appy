@@ -396,6 +396,8 @@ textview.memory-edit {
 }
 /* A memory pill: one per burst of memory changes, centred; unfolds into the facts on hover */
 .status-pill.memory-pill {
+    /* darker than the thinking/status pills (#626262), lighter than the glass panel */
+    background-color: #3a3a3c;
     border-radius: 13px;
     padding: 4px 12px;
 }
