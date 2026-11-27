@@ -1,6 +1,6 @@
 import unittest
 
-from streaming import ExpressionTagParser, SpeechChunker, pop_ready_chunk, speakable
+from streaming import ExpressionTagParser, SpeechChunker, pop_ready_chunk
 
 
 def feed_all(parser: ExpressionTagParser, pieces: list[str]) -> str:
@@ -50,25 +50,6 @@ class SpeechChunkerTests(unittest.TestCase):
         c = SpeechChunker()
         c.feed("   ")
         self.assertEqual(c.flush(), "")
-
-
-class SpeakableNumbersTests(unittest.TestCase):
-    """Kokoro reads "5.5" as "five five" and "1,500" as "one, five hundred"."""
-
-    def test_decimals_say_point_and_digits(self):
-        self.assertEqual(speakable("It's 5.5 degrees."), "It's 5 point 5 degrees.")
-        self.assertEqual(speakable("Pi is 3.14."), "Pi is 3 point 1 4.")
-        self.assertEqual(speakable("It's 10.05 km"), "It's 10 point 0 5 km")
-        self.assertEqual(speakable("It's -2.5 or 5.5%"), "It's -2 point 5 or 5 point 5%")
-
-    def test_thousands_separators_are_dropped(self):
-        self.assertEqual(speakable("That's 1,500 people."), "That's 1500 people.")
-        self.assertEqual(speakable("1,234,567.89"), "1234567 point 8 9")
-
-    def test_leaves_other_dots_and_commas_alone(self):
-        for text in ["Version 2.0.1 is out", "Ping 192.168.1.1", "It's 5. Then 6.",
-                     "Days 1, 2, and 3", "Between 1,2 and 3", "No numbers here."]:
-            self.assertEqual(speakable(text), text)
 
 
 class ExpressionTagParserTests(unittest.TestCase):

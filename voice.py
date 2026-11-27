@@ -7,7 +7,7 @@ import sounddevice as sd
 from kokoro_onnx import Kokoro
 
 from status import SpeechActivity
-from streaming import speakable
+from speech_text import speakable
 
 
 def provider_warning(requested: str | None, active: list[str]) -> str | None:
