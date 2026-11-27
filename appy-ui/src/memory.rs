@@ -16,7 +16,6 @@ use crate::protocol::{Decision, MemoryKind, Proposal};
 
 const EDIT_MIN_HEIGHT: i32 = 140;
 
-
 /// One line of a note diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffLine {
@@ -81,19 +80,6 @@ pub fn diff_lines(before: &str, after: &str) -> Vec<DiffLine> {
         }
     }
     out
-}
-
-pub fn chip_text(kind: MemoryKind, summary: &str) -> String {
-    let fact = summary.strip_prefix("- ").unwrap_or(summary);
-    match kind {
-        MemoryKind::Remember => format!("Remembered: {fact}"),
-        MemoryKind::Forget => format!("Forgot: {fact}"),
-        MemoryKind::Approved => format!("Saved: {fact}"),
-        MemoryKind::Edited => format!("Saved your edit: {fact}"),
-        MemoryKind::Auto => format!("Auto-saved: {fact}"),
-        MemoryKind::Undo => format!("Undid: {}", fact.strip_prefix("memory: ").unwrap_or(fact)),
-        MemoryKind::Other => format!("Memory: {fact}"),
-    }
 }
 
 /// A button on a proposal row.
@@ -363,6 +349,11 @@ impl MemoryBurst {
                 .fold(text, |t, tag| t.strip_suffix(tag).unwrap_or(t))
                 .trim();
             let text = text.strip_prefix("- ").unwrap_or(text);
+            // An explicit remember/forget commit: "remember <note>: <fact>"
+            let text = ["remember ", "forget "]
+                .iter()
+                .find_map(|verb| text.strip_prefix(verb)?.split_once(": ").map(|(_, f)| f))
+                .unwrap_or(text);
             if !self.undo {
                 self.remembered += 1;
             }
@@ -412,22 +403,6 @@ impl MemoryBurst {
         } else {
             Some("Undo")
         }
-    }
-}
-
-/// The chip's Undo button label: every change can be undone; after an undo, the next
-/// press goes further back.
-pub fn undo_label(kind: MemoryKind) -> Option<&'static str> {
-    match kind {
-        MemoryKind::Remember
-        | MemoryKind::Forget
-        | MemoryKind::Approved
-        | MemoryKind::Edited
-        | MemoryKind::Auto => {
-            Some("Undo")
-        }
-        MemoryKind::Undo => Some("Undo earlier"),
-        MemoryKind::Other => None,
     }
 }
 
@@ -1010,6 +985,9 @@ mod tests {
         assert_eq!(b.lines(), vec![("Retitled the note".into(), false)]);
         let u = MemoryBurst::new(MemoryKind::Undo, "memory: Added the HUD [approved]", vec![], vec![], t0);
         assert_eq!(u.lines(), vec![("Added the HUD".into(), false)]);
+        // explicit remember/forget commits read "remember <note>: <fact>"
+        let u = MemoryBurst::new(MemoryKind::Undo, "memory: remember core: Tudor owns a '94 W124.", vec![], vec![], t0);
+        assert_eq!(u.lines(), vec![("Tudor owns a '94 W124.".into(), false)]);
     }
 
     #[test]
@@ -1025,38 +1003,5 @@ mod tests {
         let o = MemoryBurst::new(MemoryKind::Other, "x", vec![], vec![], t0);
         assert_eq!(o.undo_label(), None);
     }
-
-    #[test]
-    fn undo_labels() {
-        assert_eq!(undo_label(MemoryKind::Remember), Some("Undo"));
-        assert_eq!(undo_label(MemoryKind::Approved), Some("Undo"));
-        assert_eq!(undo_label(MemoryKind::Undo), Some("Undo earlier"));
-        assert_eq!(undo_label(MemoryKind::Auto), Some("Undo"));
-        assert_eq!(undo_label(MemoryKind::Other), None);
-    }
-
-    #[test]
-    fn chip_text_by_kind() {
-        assert_eq!(
-            chip_text(MemoryKind::Remember, "- Tudor lives in Sibiu."),
-            "Remembered: Tudor lives in Sibiu."
-        );
-        assert_eq!(
-            chip_text(MemoryKind::Forget, "- The PSU is a Riden."),
-            "Forgot: The PSU is a Riden."
-        );
-        assert_eq!(chip_text(MemoryKind::Approved, "added the HUD"), "Saved: added the HUD");
-        assert_eq!(
-            chip_text(MemoryKind::Edited, "added the HUD"),
-            "Saved your edit: added the HUD"
-        );
-        assert_eq!(
-            chip_text(MemoryKind::Undo, "memory: remember core: x"),
-            "Undid: remember core: x"
-        );
-        assert_eq!(chip_text(MemoryKind::Other, "x"), "Memory: x");
-        assert_eq!(chip_text(MemoryKind::Auto, "PSU is a Korad"), "Auto-saved: PSU is a Korad");
-    }
 }
-
 

@@ -125,6 +125,13 @@ SAMPLE_PROPOSALS = [
 AUTO_APPROVE = [False]
 
 
+def facts(item: dict) -> dict:
+    """What a change added and removed, as the real backend sends it."""
+    old = [l[2:] for l in item["before"].splitlines() if l.startswith("- ")]
+    new = [l[2:] for l in item["after"].splitlines() if l.startswith("- ")]
+    return {"facts": [l for l in new if l not in old], "dropped": [l for l in old if l not in new]}
+
+
 async def memory_demo(ws: WebSocket, data: dict, items: list) -> None:
     """Answer the review card like the real backend would (without a memory service)."""
     if data.get("type") == "memory_auto_approve":
@@ -133,7 +140,8 @@ async def memory_demo(ws: WebSocket, data: dict, items: list) -> None:
         if AUTO_APPROVE[0]:  # like the Mac: what's waiting is approved too
             for item in list(items):
                 items.remove(item)
-                await ws.send_json({"type": "memory_committed", "kind": "auto", "summary": item["summary"]})
+                await ws.send_json({"type": "memory_committed", "kind": "auto",
+                                    "summary": item["summary"], **facts(item)})
             await ws.send_json({"type": "memory_proposals", "items": items})
         return
     if data.get("type") == "memory_undo":
@@ -149,7 +157,8 @@ async def memory_demo(ws: WebSocket, data: dict, items: list) -> None:
         items.remove(item)
         if decision in ("accept", "edit"):
             kind = "approved" if decision == "accept" else "edited"
-            await ws.send_json({"type": "memory_committed", "kind": kind, "summary": item["summary"]})
+            await ws.send_json({"type": "memory_committed", "kind": kind,
+                                "summary": item["summary"], **facts(item)})
     await ws.send_json({"type": "memory_proposals", "items": items})
 
 
@@ -166,7 +175,8 @@ async def websocket_endpoint(ws: WebSocket):
         await ws.send_json({"type": "memory_settings", "auto_approve": AUTO_APPROVE[0]})
         await ws.send_json({"type": "memory_proposals", "items": proposals})
         await ws.send_json({"type": "memory_committed", "kind": "remember",
-                            "summary": "- Tudor's bench PSU is a Riden RD6024."})
+                            "summary": "- Tudor's bench PSU is a Riden RD6024.",
+                            "facts": ["Tudor's bench PSU is a Riden RD6024."]})
 
     try:
         while True:

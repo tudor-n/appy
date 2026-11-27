@@ -1,14 +1,32 @@
 //! The scrolling message log: chat bubbles, status pills and smooth scrolling.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Instant;
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, PolicyType, ScrolledWindow, glib};
+use gtk4::{
+    Align, Box as GtkBox, Button, EventControllerMotion, Label, Orientation, PolicyType,
+    Revealer, RevealerTransitionType, ScrolledWindow, glib,
+};
+
+use crate::memory::MemoryBurst;
+use crate::protocol::MemoryKind;
 
 /// Oldest entries are dropped beyond this many, to bound memory and layout cost.
 const MAX_ENTRIES: usize = 500;
 const LOG_WIDTH: i32 = 290;
 const LOG_MAX_HEIGHT: i32 = 360;
+const PILL_UNFOLD_MS: u32 = 220;
+
+/// The newest memory pill, while changes can still join it.
+struct MemoryPill {
+    burst: MemoryBurst,
+    title: Label,
+    list: GtkBox,
+    /// How many changes the pill's Undo takes back (grows with the burst).
+    undo_count: Rc<Cell<usize>>,
+}
 
 pub struct ChatLog {
     pub scrolled: ScrolledWindow,
@@ -20,8 +38,10 @@ pub struct ChatLog {
     /// added entries come into view once GTK has laid them out (their height isn't
     /// known when they're appended). Scrolling up unpins; reaching the bottom re-pins.
     pinned: Cell<bool>,
-    /// Undo buttons on memory chips; only the newest one stays enabled.
+    /// Undo buttons on memory pills; only the newest one stays enabled.
     undo_buttons: RefCell<Vec<Button>>,
+    /// The pill the next memory change may join (any other entry ends it).
+    memory: RefCell<Option<MemoryPill>>,
 }
 
 impl ChatLog {
@@ -44,6 +64,7 @@ impl ChatLog {
             scroll_target: Cell::new(None),
             pinned: Cell::new(true),
             undo_buttons: RefCell::new(Vec::new()),
+            memory: RefCell::new(None),
         }
     }
 
@@ -95,42 +116,88 @@ impl ChatLog {
         label
     }
 
-    /// A memory commit ("Remembered: ...") with an optional undo button `(label, action)`.
-    /// Undo always reverts the newest change, so only the newest chip's button is live,
-    /// and each works once: an older chip can't undo something newer by surprise.
-    pub fn push_chip(&self, text: &str, undo: Option<(&str, Box<dyn Fn()>)>) {
+    /// A memory change. Changes in a burst share one centred pill ("Remembered 3 facts")
+    /// that unfolds into the facts on hover. Its Undo takes back the whole pill; Undo
+    /// always reverts the newest change, so only the newest pill's button is live, and
+    /// each works once.
+    pub fn push_memory(
+        &self,
+        kind: MemoryKind,
+        summary: &str,
+        facts: Vec<String>,
+        dropped: Vec<String>,
+        undo: Rc<dyn Fn()>,
+    ) {
+        let now = Instant::now();
+        {
+            let mut current = self.memory.borrow_mut();
+            if let Some(pill) = current.as_mut().filter(|p| p.burst.accepts(kind, now)) {
+                pill.burst.add(kind, summary, facts, dropped, now);
+                pill.title.set_label(&pill.burst.title());
+                fill_facts(&pill.list, &pill.burst);
+                pill.undo_count.set(pill.burst.undo_count());
+                return;
+            }
+        }
         for old in self.undo_buttons.take() {
             old.set_sensitive(false);
         }
-        let chip = GtkBox::new(Orientation::Horizontal, 6);
-        chip.add_css_class("status-pill");
-        chip.add_css_class("memory-chip");
-        chip.set_halign(Align::Start);
+        let burst = MemoryBurst::new(kind, summary, facts, dropped, now);
 
-        let label = Label::builder()
-            .label(text)
-            .xalign(0.0)
-            .ellipsize(gtk4::pango::EllipsizeMode::End)
-            .max_width_chars(32)
-            .tooltip_text(text)
-            .build();
-        label.add_css_class("status-pill-text");
-        chip.append(&label);
-        if let Some((label, undo)) = undo {
+        let pill = GtkBox::new(Orientation::Vertical, 0);
+        pill.add_css_class("status-pill");
+        pill.add_css_class("memory-pill");
+        pill.set_halign(Align::Center);
+        let title = Label::new(Some(&burst.title()));
+        title.add_css_class("status-pill-text");
+        pill.append(&title);
+
+        let body = GtkBox::new(Orientation::Vertical, 3);
+        body.add_css_class("memory-facts");
+        let list = GtkBox::new(Orientation::Vertical, 3);
+        fill_facts(&list, &burst);
+        body.append(&list);
+        let undo_count = Rc::new(Cell::new(burst.undo_count()));
+        if let Some(label) = burst.undo_label() {
             let button = Button::with_label(label);
             button.add_css_class("memory-undo");
             button.set_focus_on_click(false);
+            button.set_halign(Align::End);
+            let count = undo_count.clone();
             button.connect_clicked(move |b| {
                 b.set_sensitive(false);
-                undo();
+                for _ in 0..count.get() {
+                    undo();
+                }
             });
-            chip.append(&button);
+            body.append(&button);
             self.undo_buttons.borrow_mut().push(button);
         }
-        self.push(&chip);
+        let revealer = Revealer::builder()
+            .transition_type(RevealerTransitionType::SlideDown)
+            .transition_duration(PILL_UNFOLD_MS)
+            .child(&body)
+            .build();
+        pill.append(&revealer);
+
+        let motion = EventControllerMotion::new();
+        let r = revealer.clone();
+        motion.connect_enter(move |_, _, _| r.set_reveal_child(true));
+        let r = revealer.clone();
+        motion.connect_leave(move |_| r.set_reveal_child(false));
+        pill.add_controller(motion);
+
+        self.push(&pill);
+        *self.memory.borrow_mut() = Some(MemoryPill {
+            burst,
+            title,
+            list,
+            undo_count,
+        });
     }
 
     fn push(&self, entry: &GtkBox) {
+        self.memory.replace(None); // anything new in the chat ends a memory burst
         self.trim();
         self.entries.append(entry);
 
@@ -264,3 +331,25 @@ mod tests {
         );
     }
 }
+
+/// One wrapped line per fact; removed ones struck through.
+fn fill_facts(list: &GtkBox, burst: &MemoryBurst) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+    for (text, removed) in burst.lines() {
+        let label = Label::builder()
+            .label(&text)
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
+            .max_width_chars(34)
+            .build();
+        label.add_css_class("memory-fact");
+        if removed {
+            label.add_css_class("dropped");
+        }
+        list.append(&label);
+    }
+}
+

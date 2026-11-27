@@ -1,5 +1,6 @@
 //! How each backend event changes the state and the chat log.
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gtk4::glib;
@@ -7,7 +8,6 @@ use gtk4::prelude::*;
 
 use crate::app::App;
 use crate::chat::format_live_dots;
-use crate::memory::{chip_text, undo_label};
 use crate::protocol::{AppyState, BackendEvent, ClientEvent, Widget};
 use crate::state::{ActiveStatus, Card, SharedState};
 use crate::weather::CARD_SIZE;
@@ -70,15 +70,17 @@ impl App {
                 self.show_card(&mut s, now);
             }
             BackendEvent::MemoryProposals { items } => self.ui.memory.set_items(&items),
-            BackendEvent::MemoryCommitted { kind, summary, .. } => {
-                let undo = undo_label(kind).map(|label| {
-                    let tx = self.sender();
-                    let undo: Box<dyn Fn()> = Box::new(move || {
-                        let _ = tx.send(ClientEvent::MemoryUndo);
-                    });
-                    (label, undo)
+            BackendEvent::MemoryCommitted {
+                kind,
+                summary,
+                facts,
+                dropped,
+            } => {
+                let tx = self.sender();
+                let undo: Rc<dyn Fn()> = Rc::new(move || {
+                    let _ = tx.send(ClientEvent::MemoryUndo);
                 });
-                self.ui.chat.push_chip(&chip_text(kind, &summary), undo);
+                self.ui.chat.push_memory(kind, &summary, facts, dropped, undo);
             }
             BackendEvent::MemorySettings { auto_approve } => s.auto_approve = Some(auto_approve),
         }
