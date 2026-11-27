@@ -1,7 +1,8 @@
 # Appy
 
 A voice-first desktop assistant for KDE Plasma (Wayland). A small mascot lives on
-your screen, listens, talks back, and can check the weather.
+your screen, listens, talks back, and can check the weather. Ask him to "lock in" and he
+stays in terse focus mode until you tell him to relax.
 
 ```
  mic ─▶ hearing.py ─┐                                  ┌─▶ appy-ui   mascot + chat overlay (Rust, GTK4 layer-shell)

@@ -8,6 +8,7 @@ compaction edits the previous summary instead of summarising a summary.
 """
 import json
 import math
+import re
 from pathlib import Path
 
 COMPACT_AT = 9500
@@ -24,6 +25,14 @@ PRUNED_TOOL_OUTPUT = "[pruned]"
 # summariser doesn't need it (tests keep the two in sync)
 ALREADY_SAID_START = "\n\n(You already told the user"
 
+# The tag main.py puts at the start of each user message (tools.turn_stamp), e.g.
+# "[10:32 PM · FOCUS] ". Appy's mode lives in tools and every message carries the
+# current one, so the summariser never sees it: a summary saying "Appy is in focus mode"
+# would go stale after a switch (tests keep this in sync with turn_stamp).
+TURN_STAMP = re.compile(r"^\[\d{1,2}:\d{2} [AP]M(?: \u00b7 [A-Z]+)?\] ")
+# Tools whose calls and results stay out of the summary for the same reason
+MODE_TOOLS = frozenset({"set_mode"})
+
 SUMMARY_PREFIX = "[Earlier in this session — summary]\n"
 SUMMARY_ACK = "Got it."
 SUMMARY_TEMPLATE = """\
@@ -34,6 +43,7 @@ FACTS: things the user stated that matter later (names, numbers, preferences). L
 OPEN: unresolved questions / pending tasks
 PROMISES: anything Appy said it would do
 STATE: where we left off
+Leave out Appy's mode (focus or banter): every message already says which one is current.
 Previous summary:
 {previous}
 New conversation to fold in:
@@ -92,16 +102,22 @@ def render(messages: list[dict]) -> str:
     """Plain-text transcript for the summariser, with tool output cut short and
     placeholders for pruned tool output left out."""
     lines = []
+    hidden_calls = set()  # ids of MODE_TOOLS calls, so their results are skipped too
     for msg in messages:
         role, content = msg.get("role"), msg.get("content")
         if role == "user" and content:
-            lines.append(f"User: {content}")
+            lines.append(f"User: {TURN_STAMP.sub('', str(content), count=1)}")
         elif role == "assistant":
             if content:
                 lines.append(f"Appy: {content}")
             for call in msg.get("tool_calls") or ():
                 fn = call["function"]
+                if fn["name"] in MODE_TOOLS:
+                    hidden_calls.add(call.get("id"))
+                    continue
                 lines.append(f"Appy called {fn['name']}({fn['arguments']})")
+        elif role == "tool" and msg.get("tool_call_id") in hidden_calls:
+            continue
         elif role == "tool" and content and content != PRUNED_TOOL_OUTPUT:
             result = content.split(ALREADY_SAID_START, 1)[0]
             lines.append("Tool: " + " ".join(result.split())[:TOOL_RESULT_CHARS])
