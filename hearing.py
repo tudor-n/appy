@@ -1,4 +1,5 @@
 import collections
+import math
 import os
 import queue
 import subprocess
@@ -17,6 +18,10 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 512  # 32ms at 16kHz
 SMART_TURN_SAMPLES = SAMPLE_RATE * 8  # 8-second window
+# Without an explicit latency, parec (on PipeWire) buffers ~2s before handing audio
+# over. The ear would then still be reading the tail of Appy's own reply after it
+# resumes, and transcribe it as the user.
+PAREC_LATENCY_MS = 30
 
 JUNK_PHRASES = {
     "thank you", "thank you.", "thanks for watching", "thanks for watching.",
@@ -80,6 +85,19 @@ def filter_transcript(text: str) -> str | None:
     return text
 
 
+def parec_cmd(mic_device: str | None) -> list[str]:
+    cmd = [
+        "parec",
+        f"--rate={SAMPLE_RATE}",
+        "--channels=1",
+        "--format=float32le",
+        f"--latency-msec={PAREC_LATENCY_MS}",
+    ]
+    if mic_device:
+        cmd.extend(["-d", mic_device])
+    return cmd
+
+
 class Ear:
     def __init__(self, on_speech_start=None, on_speech_discarded=None):
         """on_speech_start fires when speech begins; on_speech_discarded fires if that
@@ -103,7 +121,7 @@ class Ear:
         # can tell that the user has started talking again
         self._utterance = 0
         self.running = False
-        self.paused = False
+        self._deaf_until = 0.0  # monotonic time; mic audio before it is thrown away
         self._proc = None
         self._bt_card = None
 
@@ -148,10 +166,15 @@ class Ear:
             )
 
     def pause(self):
-        self.paused = True
+        self._deaf_until = math.inf
 
-    def resume(self):
-        self.paused = False
+    def resume(self, grace: float = 0.0, now: float | None = None):
+        """Start listening again, after `grace` seconds (lets the speakers' last
+        sound and the room's echo die away first)."""
+        self._deaf_until = (time.monotonic() if now is None else now) + grace
+
+    def is_deaf(self, now: float | None = None) -> bool:
+        return (time.monotonic() if now is None else now) < self._deaf_until
 
     def _vad_loop(self):
         ring_buffer = collections.deque(maxlen=15)  # ~480ms pre-roll
@@ -165,12 +188,6 @@ class Ear:
         smart_turn_chunks = int((SAMPLE_RATE / CHUNK_SIZE) * 0.20)
         max_silence_chunks = int((SAMPLE_RATE / CHUNK_SIZE) * 2.0)
 
-        cmd = [
-            "parec",
-            f"--rate={SAMPLE_RATE}",
-            "--channels=1",
-            "--format=float32le",
-        ]
         mic_device = os.getenv("MIC_DEVICE") or self._find_bt_source()
         if mic_device:
             print(f"[hearing] Using mic: {mic_device}", flush=True)
@@ -178,9 +195,8 @@ class Ear:
                 ["pactl", "set-source-mute", mic_device, "0"],
                 stderr=subprocess.DEVNULL,
             )
-            cmd.extend(["-d", mic_device])
 
-        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        self._proc = subprocess.Popen(parec_cmd(mic_device), stdout=subprocess.PIPE)
         if mic_device and "bluez_input." in mic_device:
             self._bt_card = self._set_bt_profile("headset-head-unit")
 
@@ -191,7 +207,8 @@ class Ear:
                 raw = self._proc.stdout.read(chunk_bytes)
                 if len(raw) < chunk_bytes:
                     break
-                if self.paused:
+                if self.is_deaf():
+                    ring_buffer.clear()  # no pre-roll from before the pause
                     is_speaking = False
                     speech_chunks = 0
                     silence_chunks = 0

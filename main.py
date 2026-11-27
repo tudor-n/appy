@@ -20,6 +20,8 @@ from status import StatusTracker
 from voice import Speaker
 from ui_bridge import UiBridge, VALID_EFFORTS
 
+# Keep the mic shut this long after Appy's last sound: speaker latency + room echo
+ECHO_GRACE_S = 0.3
 QUIT_WORDS = {"quit", "exit", "shutdown"}
 
 
@@ -215,7 +217,7 @@ def main():
                 )
                 speaker.wait()
             finally:
-                ear.resume()
+                ear.resume(grace=ECHO_GRACE_S)
             # Between turns, once Appy has finished speaking; anything said meanwhile is
             # queued in turn_queue, not lost
             agent.maybe_compact()
