@@ -111,6 +111,13 @@ impl SharedState {
         }
     }
 
+    /// The memory panel went away (last proposal decided, or Later) while it may have been
+    /// under the pointer, which then never gets a `leave`: let go of its hover with the
+    /// usual grace, so the chat (and the chip that just landed) doesn't snap shut.
+    pub fn memory_panel_hidden(&mut self, now: Instant) {
+        self.set_memory_hover(false, now);
+    }
+
     fn after_hover_change(&mut self, now: Instant) {
         if self.hover.mascot || self.hover.panel || self.hover.memory {
             self.hover.grace_until = None;
@@ -425,6 +432,19 @@ mod tests {
         assert!(s.should_show_chat(false, t0 + ms(5000)));
         s.set_memory_hover(false, t0 + ms(5000));
         assert!(!s.should_show_chat(false, t0 + ms(5400)));
+    }
+
+    #[test]
+    fn deciding_the_last_proposal_keeps_the_chat_open_briefly() {
+        // The panel goes away under the pointer: the usual grace, not an instant close
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.state = AppyState::Idle; // booted
+        s.set_memory_hover(true, t0);
+        s.memory_panel_hidden(t0);
+        assert!(!s.hover.memory);
+        assert!(s.should_show_chat(false, t0 + ms(100)));
+        assert!(!s.should_show_chat(false, t0 + ms(400)));
     }
 
     #[test]

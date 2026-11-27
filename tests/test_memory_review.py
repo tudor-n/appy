@@ -259,6 +259,32 @@ class MemoryReviewTests(unittest.TestCase):
         self.wait(lambda: len(self.notes) >= 2)
         self.assertEqual(self.notes[1], "note 'bench' changed: Replaced the PSU.")
 
+    def test_setting_is_fetched_again_until_the_mac_answers(self):
+        self.client.down = True  # e.g. booted before the VPN was up
+        self.review.start()
+        time.sleep(0.15)
+        self.assertEqual(self.settings, [])
+        self.client.down = False
+        self.wait(lambda: self.settings)
+        self.assertEqual(self.settings, [False])
+        time.sleep(0.2)
+        self.assertEqual(self.settings, [False])  # once known, not resent every poll
+
+    def test_undo_announces_pending_auto_commits_first(self):
+        self.review.stop()
+        self.review = MemoryReview(self.client, lambda items: None,
+                                   lambda k, s: self.chips.append((k, s)),
+                                   on_change=self.notes.append, poll_seconds=60)
+        self.review.start()
+        self.review.refresh()  # takes the head
+        time.sleep(0.1)
+        self.client.auto_items = [{"commit": "bbb", "slug": "bench", "summary": "PSU is a Korad"}]
+        self.review.undo()
+        deadline = time.time() + 2
+        while len(self.chips) < 2 and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual([k for k, _ in self.chips], ["auto", "undo"])
+
     def test_set_auto_approve_emits_the_macs_value(self):
         self.review.start()
         self.wait(lambda: self.settings)

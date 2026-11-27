@@ -464,7 +464,7 @@ impl MemoryPanel {
 
     /// Keyboard focus is in the panel (the Edit box): keep the chat open while typing.
     pub fn contains_focus(&self) -> bool {
-        self.root.focus_child().is_some()
+        self.is_shown() && self.root.focus_child().is_some()
     }
 
     fn send(&self, out: Vec<Outgoing>) {

@@ -35,7 +35,7 @@ impl App {
         let mut s = self.state.borrow_mut();
 
         self.layout_shell(&mut s);
-        self.place_memory(&mut s);
+        self.place_memory(&mut s, now);
         let card_gone = self.step_card(&mut s, now);
         self.sync_input_region(&mut s);
 
@@ -122,13 +122,17 @@ impl App {
 
     /// Show the memory panel while the chat is open and there's something to review,
     /// and keep it above the chat (or below it, when there's no room above).
-    fn place_memory(&self, s: &mut SharedState) {
+    fn place_memory(&self, s: &mut SharedState, now: Instant) {
         let ui = &self.ui;
         let shown = s.chat_open && ui.memory.is_wanted();
         if shown != ui.memory.is_shown() {
+            if !shown && ui.memory.root.focus_child().is_some() {
+                // Edit was open: don't leave the keyboard in a hidden text box
+                GtkWindowExt::set_focus(&ui.window, None::<&gtk4::Widget>);
+            }
             ui.memory.set_shown(shown);
             if !shown {
-                s.hover.memory = false; // hiding it under the pointer may never send `leave`
+                s.memory_panel_hidden(now);
             }
         }
         let Some(chat) = ui.memory_anchor(s.locked) else {

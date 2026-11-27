@@ -47,6 +47,7 @@ class MemoryReview:
         self.emit_settings = emit_settings or (lambda on: None)
         self.on_change = on_change or (lambda line: None)
         self._head: str | None = None  # auto commits after this one haven't been announced
+        self._settings_known = False  # until the Mac answers once, ask again on every poll
         self.poll_seconds = poll_seconds
         self._jobs: queue.Queue = queue.Queue()
         self._last: list | None = None  # what the overlay shows now
@@ -107,12 +108,15 @@ class MemoryReview:
         if kind in ("refresh", "poll"):
             self._sync(force=kind == "refresh")
             self._announce_auto()
+            if not self._settings_known:
+                self._send_settings()
         elif kind == "settings":
             self._send_settings()
         elif kind == "auto":
             result = self.client.set_settings(job[1])
             if "auto_approve" in result:
                 print(f"[memory] auto-approve {'on' if result['auto_approve'] else 'off'}")
+                self._settings_known = True
                 self.emit_settings(bool(result["auto_approve"]))
             else:
                 print(f"[memory] auto-approve not changed: {result.get('error')}")
@@ -123,6 +127,9 @@ class MemoryReview:
             _, slug, decision, text, before = job
             self._decide(slug, decision, text, before)
         elif kind == "undo":
+            # Show any auto commit first: Undo reverts the newest change, which should be
+            # the newest chip Tudor can see
+            self._announce_auto()
             result = self.client.undo()
             if result.get("undone"):
                 print(f"[memory] undid: {result['undone']}")
@@ -161,6 +168,7 @@ class MemoryReview:
     def _send_settings(self) -> None:
         settings = self.client.settings()
         if settings is not None:
+            self._settings_known = True
             self.emit_settings(bool(settings["auto_approve"]))
 
     def _announce_auto(self) -> None:

@@ -324,9 +324,8 @@ class MemoryNoteTests(unittest.TestCase):
         agent.note_memory_change(self.NOTE)
         run_quietly(agent, "what's my first KPI?")
         self.assertEqual(self.user_contents(client)[0],
-                         "[Memory update: saved to your long-term memory since your last reply, "
-                         "treat as known: saved to lumen-project: first KPI is MRR]"
-                         "\n\nwhat's my first KPI?")
+                         "[Memory changed since your last reply: saved to lumen-project: "
+                         "first KPI is MRR]\n\nwhat's my first KPI?")
         run_quietly(agent, "thanks")  # used once
         self.assertEqual(self.user_contents(client)[1], "thanks")
 
@@ -336,8 +335,7 @@ class MemoryNoteTests(unittest.TestCase):
         agent.note_memory_change("b")
         run_quietly(agent, "hi")
         self.assertEqual(self.user_contents(client)[0],
-                         "[Memory update: saved to your long-term memory since your last reply, "
-                         "treat as known: a | b]\n\nhi")
+                         "[Memory changed since your last reply: a | b]\n\nhi")
 
     def test_memory_notes_survive_a_failed_turn(self):
         agent, client, _, _ = make_agent([ConnectionError("down"), [text_chunk("ok")]])
@@ -346,8 +344,7 @@ class MemoryNoteTests(unittest.TestCase):
         agent.note_memory_change("b")
         run_quietly(agent, "again")
         self.assertEqual(self.user_contents(client)[1],
-                         "[Memory update: saved to your long-term memory since your last reply, "
-                         "treat as known: a | b]\n\nagain")
+                         "[Memory changed since your last reply: a | b]\n\nagain")
 
 class ContextSizeTests(unittest.TestCase):
     def test_usage_chunk_sets_context_tokens(self):

@@ -208,8 +208,7 @@ class Agent:
         checkpoint = len(self.messages)
         with self._memory_lock:
             notes, self._memory_notes = self._memory_notes, []
-        content = (f"[Memory update: saved to your long-term memory since your last reply, "
-                   f"treat as known: {' | '.join(notes)}]\n\n{user_text}"
+        content = (f"[Memory changed since your last reply: {' | '.join(notes)}]\n\n{user_text}"
                    if notes else user_text)
         self.messages.append({"role": "user", "content": content})
         self.status.set_phase("thinking")
