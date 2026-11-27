@@ -256,5 +256,41 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual((self.root / "memory" / "bench.md").read_text(), NOTE)
 
 
+    def test_settings_endpoints(self):
+        self.assertEqual(self.http.get("/settings").json(), {"auto_approve": False})
+        self.assertEqual(self.http.put("/settings", json={"auto_approve": "x"}).status_code, 422)
+        r = self.http.put("/settings", json={"auto_approve": False})
+        self.assertEqual(r.json(), {"auto_approve": False, "accepted": [], "stale": []})
+        self.assertIsNotNone(self.vault.proposal("bench"))  # off -> nothing accepted
+
+    def test_auto_approve_on_accepts_waiting_proposals(self):
+        self.vault.save_proposal("lumen", "Lumen", "# Lumen\n> BI app\n- Uses DuckDB.\n", "New note.", SID, 0)
+        r = self.http.put("/settings", json={"auto_approve": True})
+        self.assertEqual(r.json(), {"auto_approve": True, "accepted": ["bench", "lumen"], "stale": []})
+        self.assertEqual(self.vault.proposals(), [])
+        self.assertEqual((self.root / "memory" / "bench.md").read_text(), NEW)
+        subjects = self.git("log", "-2", "--format=%s").splitlines()
+        self.assertTrue(all(s.endswith(" [auto]") for s in subjects), subjects)
+        self.assertEqual(self.http.get("/settings").json(), {"auto_approve": True})
+
+    def test_auto_approve_on_redoes_a_moved_note(self):
+        self.vault.remember("The DMM is a Fluke 87V.", "bench", "live")
+        before = (self.root / "memory" / "bench.md").read_text()
+        r = self.http.put("/settings", json={"auto_approve": True})
+        self.assertEqual(r.json(), {"auto_approve": True, "accepted": [], "stale": ["bench"]})
+        self.assertEqual((self.root / "memory" / "bench.md").read_text(), before)
+        self.assertTrue(self.vault.proposal("bench")["stale"])
+        self.assertEqual(self.refreshed, ["bench"])
+
+    def test_changes_endpoint(self):
+        head = self.vault.git.head()
+        self.assertEqual(self.http.get("/changes", params={"after": head}).json(),
+                         {"head": head, "items": []})
+        self.http.put("/settings", json={"auto_approve": True})
+        r = self.http.get("/changes", params={"after": head}).json()
+        self.assertEqual([(i["slug"], i["summary"]) for i in r["items"]],
+                         [("bench", "Replaced the PSU.")])
+        self.assertEqual(self.http.get("/changes").json()["items"], [])
+
 if __name__ == "__main__":
     unittest.main()

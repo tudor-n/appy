@@ -63,6 +63,24 @@ class GitRepo:
             return short, subject
         return None
 
+    def head(self) -> str:
+        """The current commit's short sha ("" before the first commit)."""
+        try:
+            return self._git("rev-parse", "--short", "HEAD").strip()
+        except GitError:
+            return ""
+
+    def log_after(self, sha: str) -> list[tuple[str, str]]:
+        """Commits after `sha` up to HEAD as (short sha, subject), oldest first. Empty for
+        an empty or unknown sha."""
+        if not sha:
+            return []
+        try:
+            out = self._git("log", "--reverse", "--format=%h%x1f%s", f"{sha}..HEAD")
+        except GitError:
+            return []
+        return [tuple(line.split("\x1f", 1)) for line in out.splitlines() if "\x1f" in line]
+
     def commit_info(self, sha: str) -> tuple[str, list[str]]:
         """A commit's message body and the files it changed."""
         out = self._git("show", "--name-only", "--format=%b%x1e", sha)

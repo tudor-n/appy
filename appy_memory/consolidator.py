@@ -352,8 +352,15 @@ class Consolidator:
                 return "deleted"
             self.vault.replace_proposal(slug, title, text, "; ".join(summaries),
                                         item.get("sessions", []), item.get("sources", []))
+            self._auto_commit(slug)
         print(f"[consolidator] refresh {slug}: redone against the current note", flush=True)
         return "updated"
+
+    def _auto_commit(self, slug: str) -> None:
+        """With auto-approve on, commit what was just proposed (caller holds the lock)."""
+        sha = self.vault.auto_commit(slug)
+        if sha:
+            print(f"[consolidator] auto-saved {slug} -> {sha}", flush=True)
 
     def stale_slugs(self) -> list[str]:
         with self.lock:
@@ -429,6 +436,7 @@ class Consolidator:
                 if now == seen:
                     self.vault.save_proposal(slug, title, text, summary, sid, k)
                     stats["proposals"] += 1
+                    self._auto_commit(slug)
                     return
             # the note or its proposal changed while the model was writing: redo it once
         stats["rejected"].append(f"{slug}: kept changing during the rewrite")

@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from starlette.concurrency import run_in_threadpool
 
 from .consolidator import Consolidator, Worker
@@ -36,6 +36,10 @@ class RememberBody(BaseModel):
     text: str
     slug: Optional[str] = None
     session: str = ""
+
+
+class SettingsBody(BaseModel):
+    auto_approve: StrictBool
 
 
 class DecisionBody(BaseModel):
@@ -164,19 +168,55 @@ def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
                 sha = vault.apply_note(slug, text, f"memory: {summary[:60]} [edited]", sessions)
                 _say(f"proposal {slug}: edited -> {sha}")
                 return {"status": "edited", "commit": sha, "summary": summary}
-            if vault.note_hash(slug) != item.get("base_hash"):
-                # The note changed since this was written: redo it against the new note
-                if app.state.worker is None:
-                    raise VaultError(409, f"'{slug}' changed since this update was written, "
-                                          "and the consolidator is off: deny or edit it")
-                vault.mark_stale(slug)
-                app.state.worker.refresh(slug)
-                _say(f"proposal {slug}: stale, redoing it")
-                return {"status": "stale"}
-            sha = vault.apply_note(slug, item["new_text"], f"memory: {summary[:60]} [approved]",
-                                   sessions)
-            _say(f"proposal {slug}: accepted -> {sha}")
-            return {"status": "accepted", "commit": sha, "summary": summary}
+            return accept(slug, item, "approved")
+
+    def accept(slug: str, item: dict, tag: str) -> dict:
+        """Commit a proposal built on the note as it is now; otherwise mark it stale and
+        have the consolidator redo it. The caller holds the lock."""
+        summary = item.get("summary", "")
+        sessions = f"sessions={','.join(item.get('sessions', []))}"
+        if vault.note_hash(slug) != item.get("base_hash"):
+            # The note changed since this was written: redo it against the new note
+            if app.state.worker is None:
+                raise VaultError(409, f"'{slug}' changed since this update was written, "
+                                      "and the consolidator is off: deny or edit it")
+            vault.mark_stale(slug)
+            app.state.worker.refresh(slug)
+            _say(f"proposal {slug}: stale, redoing it")
+            return {"status": "stale"}
+        sha = vault.apply_note(slug, item["new_text"], f"memory: {summary[:60]} [{tag}]",
+                               sessions)
+        _say(f"proposal {slug}: {tag} -> {sha}")
+        return {"status": "accepted", "commit": sha, "summary": summary}
+
+    @app.get("/settings", dependencies=guarded)
+    def get_settings():
+        return locked(vault.settings)
+
+    @app.put("/settings", dependencies=guarded)
+    def put_settings(body: SettingsBody):
+        """Auto-approve on/off. Turning it on also approves what's waiting (proposals whose
+        note moved on are redone first, then committed by the consolidator)."""
+        accepted, stale = [], []
+        with lock:
+            settings = vault.set_settings(body.auto_approve)
+            _say(f"auto-approve {'on' if body.auto_approve else 'off'}")
+            if body.auto_approve:
+                for item in vault.proposals():
+                    if item.get("stale"):
+                        stale.append(item["slug"])
+                        continue
+                    try:
+                        status = accept(item["slug"], item, "auto")["status"]
+                    except VaultError as exc:  # consolidator off and the note moved on
+                        _say(f"proposal {item['slug']}: left waiting ({exc.message})")
+                        continue
+                    (accepted if status == "accepted" else stale).append(item["slug"])
+        return {**settings, "accepted": accepted, "stale": stale}
+
+    @app.get("/changes", dependencies=guarded)
+    def changes(after: str = ""):
+        return locked(vault.changes, after)
 
     return app
 

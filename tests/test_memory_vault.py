@@ -102,7 +102,7 @@ class VaultTests(unittest.TestCase):
         Vault(self.root).open()
         self.assertEqual((self.mem / "core.md").read_text(), "")
         self.assertEqual((self.root / ".gitignore").read_text().split(),
-                         ["logs/", "pending/", "state.json", "memory/_index.md", "dumps/"])
+                         ["logs/", "pending/", "state.json", "settings.json", "memory/_index.md", "dumps/"])
         for d in ("logs", "pending"):
             self.assertTrue((self.root / d).is_dir())
         self.assertEqual(commit_count(self.root), 1)
@@ -306,6 +306,81 @@ class VaultTests(unittest.TestCase):
 SID = "2026-11-26_153012"
 LOG = ('{"v":1,"seq":1,"type":"session_start"}\n\n'
        '{"v":1,"seq":2,"type":"user","text":"Bună ziua"}\n').encode()
+
+
+class AutoApproveTests(unittest.TestCase):
+    NEW = "# Bench\n> gear\n- PSU is a Korad.\n"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "appy-data"
+        self.vault = Vault(self.root).open()
+        self.vault.remember("PSU is a Riden.", "bench", "s0")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def propose(self, text=None, summary="PSU is a Korad"):
+        self.vault.save_proposal("bench", "Bench", text or self.NEW, summary, "s1", 0)
+
+    def test_settings_default_and_persist(self):
+        self.assertEqual(self.vault.settings(), {"auto_approve": False})
+        self.assertEqual(self.vault.set_settings(auto_approve=True), {"auto_approve": True})
+        self.assertEqual(Vault(self.root).open().settings(), {"auto_approve": True})
+        self.assertIn("settings.json", (self.root / ".gitignore").read_text())
+        self.assertNotIn("settings.json", git_out(self.root, "status", "--porcelain"))
+
+    def test_auto_commit_only_when_on_and_base_current(self):
+        self.propose()
+        self.assertIsNone(self.vault.auto_commit("bench"))  # off: stays pending
+        self.assertIsNotNone(self.vault.proposal("bench"))
+        self.vault.set_settings(auto_approve=True)
+        head = self.vault.git.head()
+        sha = self.vault.auto_commit("bench")
+        self.assertTrue(sha)
+        self.assertIsNone(self.vault.proposal("bench"))
+        self.assertEqual(self.vault.note_text("bench"), self.NEW)
+        self.assertEqual(git_out(self.root, "log", "-1", "--format=%s").strip(),
+                         "memory: PSU is a Korad [auto]")
+        self.assertIn("sessions=s1", git_out(self.root, "log", "-1", "--format=%b"))
+        self.assertEqual(self.vault.changes(head),
+                         {"head": sha, "items": [{"commit": sha, "slug": "bench",
+                                                  "summary": "PSU is a Korad"}]})
+        self.assertEqual(self.vault.changes(sha), {"head": sha, "items": []})
+
+    def test_auto_commit_skips_a_moved_note(self):
+        self.propose()
+        self.vault.remember("Scope is a Rigol.", "bench", "live")  # the note moved on
+        self.vault.set_settings(auto_approve=True)
+        self.assertIsNone(self.vault.auto_commit("bench"))
+        self.assertIsNotNone(self.vault.proposal("bench"))
+        self.assertIn("Scope is a Rigol.", self.vault.note_text("bench"))
+
+    def test_auto_commit_skips_stale(self):
+        self.propose()
+        self.vault.mark_stale("bench")
+        self.vault.set_settings(auto_approve=True)
+        self.assertIsNone(self.vault.auto_commit("bench"))
+
+    def test_undo_of_auto_commit_does_not_restore_a_proposal(self):
+        before = self.vault.note_text("bench")
+        self.propose()
+        self.vault.set_settings(auto_approve=True)
+        self.vault.auto_commit("bench")
+        self.assertEqual(self.vault.undo()["undone"], "memory: PSU is a Korad [auto]")
+        self.assertEqual(self.vault.note_text("bench"), before)
+        self.assertIsNone(self.vault.proposal("bench"))
+
+    def test_changes_ignores_other_commits_and_unknown_sha(self):
+        head = self.vault.git.head()
+        self.vault.remember("Scope is a Rigol.", "bench", "live")
+        self.propose(self.vault.note_text("bench") + "- DMM is a Fluke.\n", "DMM")
+        self.vault.apply_note("bench", self.vault.proposal("bench")["new_text"],
+                              "memory: DMM [approved]", "sessions=s1")
+        self.assertEqual(self.vault.changes(head)["items"], [])
+        self.assertEqual(self.vault.changes("deadbeef"), {"head": self.vault.git.head(), "items": []})
+        self.assertEqual(self.vault.changes("")["items"], [])
+        self.assertEqual(self.vault.git.log_after(""), [])
 
 
 class LogStoreTests(unittest.TestCase):

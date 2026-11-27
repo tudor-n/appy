@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import subprocess
 import json
 import threading
 from contextlib import redirect_stdout
@@ -179,9 +180,9 @@ class VaultProposalTests(unittest.TestCase):
         (self.root / ".gitignore").write_text("logs/\npending/\n")
         Vault(self.root).open()
         lines = (self.root / ".gitignore").read_text().split()
-        for entry in ("logs/", "pending/", "state.json", "memory/_index.md", "dumps/"):
+        for entry in ("logs/", "pending/", "state.json", "settings.json", "memory/_index.md", "dumps/"):
             self.assertIn(entry, lines)
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(len(lines), 6)
 
 
 class FakeLLM:
@@ -735,6 +736,32 @@ class RefreshTests(RunBase):
             worker.stop()
         self.assertIn("refresh bench crashed", out.getvalue())
 
+
+class AutoApproveRunTests(RunBase):
+    def test_auto_approve_commits_new_proposals(self):
+        self.vault.set_settings(auto_approve=True)
+        self.vault.store_log(S1, log_bytes(("the helmet HUD will run on a Pi Zero 2 W", "Nice.")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "HUD")), HUD + "SUMMARY: added the HUD"]
+        self.run_quietly()
+        self.assertEqual(self.vault.proposals(), [])
+        self.assertEqual(self.vault.note_text("mark-i-suit"), HUD)
+        log = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=self.root,
+                             capture_output=True, text=True).stdout.strip()
+        self.assertEqual(log, "memory: added the HUD [auto]")
+
+    def test_auto_approve_commits_a_refreshed_proposal(self):
+        self.vault.store_log(S1, log_bytes(("the helmet HUD will run on a Pi Zero 2 W", "ok")))
+        self.llm.responses = [routed(("mark-i-suit", False, "", "")), HUD + "SUMMARY: a"]
+        self.run_quietly()
+        self.vault.remember("The suit has a 6S LiPo.", "mark-i-suit", "live")
+        self.vault.mark_stale("mark-i-suit")
+        self.vault.set_settings(auto_approve=True)
+        redone = self.vault.note_text("mark-i-suit") + "- The HUD runs on a Pi Zero 2 W.\n"
+        self.llm.responses = [redone + "SUMMARY: added the HUD again"]
+        with redirect_stdout(io.StringIO()):
+            self.consolidator().refresh("mark-i-suit")
+        self.assertIsNone(self.vault.proposal("mark-i-suit"))
+        self.assertEqual(self.vault.note_text("mark-i-suit"), redone)
 
 if __name__ == "__main__":
     unittest.main()

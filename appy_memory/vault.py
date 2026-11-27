@@ -30,7 +30,8 @@ MAX_FORGOTTEN = 20
 MAX_FACT_CHARS = 300
 GIST_CHARS = 120
 CORE = "core"
-GITIGNORE = "logs/\npending/\nstate.json\nmemory/_index.md\ndumps/\n"
+GITIGNORE = "logs/\npending/\nstate.json\nsettings.json\nmemory/_index.md\ndumps/\n"
+AUTO_TAG = " [auto]"
 _SLUG = re.compile(r"^[a-z0-9-]{1,64}$")
 _SESSION_ID = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}$")
 MAX_LOG_BYTES = 20 * 1024 * 1024
@@ -461,6 +462,48 @@ class Vault:
     def _rebuild_index(self) -> None:
         lines = self._index_lines()
         _write_atomic(self.memory / "_index.md", "".join(l + "\n" for l in lines))
+
+    # -- settings and auto-approve ----------------------------------------------------
+
+    def settings(self) -> dict:
+        try:
+            data = json.loads((self.root / "settings.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        return {"auto_approve": isinstance(data, dict) and data.get("auto_approve") is True}
+
+    def set_settings(self, auto_approve: bool) -> dict:
+        settings = {**self.settings(), "auto_approve": bool(auto_approve)}
+        _write_atomic(self.root / "settings.json", json.dumps(settings, indent=1))
+        return settings
+
+    def auto_commit(self, slug: str) -> str | None:
+        """With auto-approve on, commit a waiting proposal that was built on the note as it
+        is now. Returns the commit, or None (off, stale, the note moved on, or no change)."""
+        if not self.settings()["auto_approve"]:
+            return None
+        item = self.proposal(slug)
+        if item is None or item.get("stale") or item.get("base_hash") != self.note_hash(slug):
+            return None
+        summary = item.get("summary", "")
+        sessions = f"sessions={','.join(item.get('sessions', []))}"
+        return self.apply_note(slug, item["new_text"], f"memory: {summary[:60]}{AUTO_TAG}",
+                               sessions)
+
+    def changes(self, after: str) -> dict:
+        """Auto-approved commits since `after`, for the laptop's chips and live notes."""
+        items = []
+        for sha, subject in self.git.log_after(after):
+            if not (subject.startswith("memory: ") and subject.endswith(AUTO_TAG)):
+                continue
+            try:
+                _, files = self.git.commit_info(sha)
+            except GitError:
+                continue
+            notes = [f for f in files if f.startswith("memory/") and f.endswith(".md")]
+            items.append({"commit": sha, "slug": notes[0][len("memory/"):-3] if notes else "",
+                          "summary": subject[len("memory: "):-len(AUTO_TAG)]})
+        return {"head": self.git.head(), "items": items}
 
     def _save_state(self, state: dict) -> None:
         _write_atomic(self.root / "state.json", json.dumps(state, ensure_ascii=False, indent=1))
