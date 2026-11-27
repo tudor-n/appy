@@ -208,7 +208,7 @@ def main():
             status.begin_turn(queued=source == "text")
             try:
                 agent.run_turn(
-                    f"[{now}] {user_input}",
+                    tools.stamp_message(user_input, now),
                     effort=effort_state["value"],
                     force=tools.forced_call(user_input, agent.recent_tools),
                 )
