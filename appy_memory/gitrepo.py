@@ -13,6 +13,7 @@ GIT = ["git", "-c", "user.name=Appy", "-c", "user.email=appy@localhost",
 MEMORY_PREFIX = "memory: "
 INIT_SUBJECT = "memory: init"
 _REVERTS = re.compile(r"This reverts commit ([0-9a-f]{40})")
+_SHA = re.compile(r"^[0-9a-f]{4,40}$")
 
 
 class GitError(Exception):
@@ -72,8 +73,8 @@ class GitRepo:
 
     def log_after(self, sha: str) -> list[tuple[str, str]]:
         """Commits after `sha` up to HEAD as (short sha, subject), oldest first. Empty for
-        an empty or unknown sha."""
-        if not sha:
+        an empty or unknown sha (or anything but a sha: it must never reach git as an option)."""
+        if not _SHA.match(sha or ""):
             return []
         try:
             out = self._git("log", "--reverse", "--format=%h%x1f%s", f"{sha}..HEAD")

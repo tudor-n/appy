@@ -71,7 +71,8 @@ def _short(text: str, n: int = 60) -> str:
 def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
     """`worker` (a consolidator Worker, also settable later as app.state.worker) is kicked
     whenever a new session log arrives."""
-    app = FastAPI(title="Appy memory")
+    # no /docs, /redoc or /openapi.json: they would be served without the token
+    app = FastAPI(title="Appy memory", docs_url=None, redoc_url=None, openapi_url=None)
     lock = threading.Lock()
     app.state.vault = vault
     app.state.lock = lock  # the consolidator takes it for its vault reads and writes

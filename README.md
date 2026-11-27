@@ -80,7 +80,9 @@ start. If the Mac is unreachable, Appy starts without long-term memory.
 
 Laptop `.env`: `MEMORY_URL=http://100.103.162.57:8765` and `MEMORY_TOKEN=<shared token>`.
 Mac `~/appy-memory/.env`: `MEMORY_TOKEN=<same token>`, `MEMORY_DIR=~/appy-data`,
-`MEMORY_HOST=0.0.0.0`, `MEMORY_PORT=8765`.
+`MEMORY_HOST=0.0.0.0`, `MEMORY_PORT=8765`. The service is plain HTTP with a bearer token, and
+`0.0.0.0` also exposes it on the LAN; since the laptop only uses Tailscale, binding to the
+Mac's Tailscale IP (`MEMORY_HOST=100.103.162.57`) is safer.
 
 ```sh
 appy_memory/deploy/deploy.sh        # copy to the Mac, run its tests, (re)start under launchd

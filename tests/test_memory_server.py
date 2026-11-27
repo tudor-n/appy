@@ -327,5 +327,16 @@ class DecisionTests(unittest.TestCase):
                          [("bench", "Replaced the PSU.")])
         self.assertEqual(self.http.get("/changes").json()["items"], [])
 
+    def test_changes_after_is_never_a_git_option(self):
+        with tempfile.TemporaryDirectory() as out:
+            r = self.http.get("/changes", params={"after": f"--output={out}/pwned"})
+            self.assertEqual(r.json()["items"], [])
+            self.assertEqual(os.listdir(out), [])
+
+    def test_no_unauthenticated_api_docs(self):
+        anon = TestClient(self.app)
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            self.assertEqual(anon.get(path).status_code, 404, path)
+
 if __name__ == "__main__":
     unittest.main()
