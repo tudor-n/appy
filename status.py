@@ -6,11 +6,16 @@ mascot looked idle while a tool call and a second LLM request were still running
 flicker to idle between sentences. Now the agent reports which phase the turn is in,
 the speaker reports whether it has speech queued or playing, and the UI gets one state
 derived from both.
+
+"speaking" means audible: a reply that is streaming or being synthesised but not yet
+coming out of the speakers shows as "thinking", so the mascot's mouth doesn't move ahead
+of the voice.
 """
 import threading
 from typing import Callable
 
 PHASES = ("idle", "thinking", "replying", "compacting")
+AUDIO_STATES = ("silent", "queued", "playing")
 
 
 class StatusTracker:
@@ -18,7 +23,10 @@ class StatusTracker:
         self._emit = emit
         self._lock = threading.Lock()
         self._phase = "idle"
-        self._speaking = False
+        self._audio = "silent"
+        # Audio has played during the current "replying" phase. Keeps the mascot
+        # talking through a gap between sentences, when the LLM is slower than speech.
+        self._heard_reply = False
         # Typed messages waiting for their turn (sent while Appy was still talking)
         self._queued = 0
         # The mic heard the user start talking and the UI shows "listening" (sent as a
@@ -29,11 +37,11 @@ class StatusTracker:
 
     @property
     def state(self) -> str:
-        if self._speaking or self._phase == "replying":
+        if self._audio == "playing" or (self._phase == "replying" and self._heard_reply):
             return "speaking"
         if self._phase == "compacting":
             return "compacting"
-        if self._phase == "thinking" or self._queued:
+        if self._phase in ("thinking", "replying") or self._audio == "queued" or self._queued:
             return "thinking"
         return "idle"
 
@@ -41,6 +49,8 @@ class StatusTracker:
         if phase not in PHASES:
             raise ValueError(f"unknown phase: {phase}")
         with self._lock:
+            if phase != "replying":
+                self._heard_reply = False
             self._phase = phase
             self._publish_locked(force=False)
 
@@ -59,6 +69,7 @@ class StatusTracker:
                 self._queued = max(0, self._queued - 1)
             self._listening = False
             self._phase = "thinking"
+            self._heard_reply = False
             self._publish_locked(force=False)
 
     def heard_speech(self):
@@ -72,9 +83,14 @@ class StatusTracker:
             self._listening = False
             self._publish_locked(force=True)
 
-    def set_speaking(self, speaking: bool):
+    def set_audio(self, state: str):
+        """The speaker's state: one of AUDIO_STATES (see SpeechActivity)."""
+        if state not in AUDIO_STATES:
+            raise ValueError(f"unknown audio state: {state}")
         with self._lock:
-            self._speaking = speaking
+            self._audio = state
+            if state == "playing" and self._phase == "replying":
+                self._heard_reply = True
             self._publish_locked(force=False)
 
     def announce(self, state: str):
@@ -104,37 +120,49 @@ class StatusTracker:
             self._emit(state)
 
 
-class ActivityCounter:
-    """Counts outstanding work; calls on_start on 0 -> 1 and on_end on 1 -> 0.
+class SpeechActivity:
+    """Tracks the speaker's work and reports it as one of AUDIO_STATES via on_change.
 
-    The speaker uses it so "speaking" covers text from the moment it is queued until
-    its audio has played, or failed to synthesise. Tracking only actual playback left
-    gaps: after the last sentence was queued and before its audio started, and forever
-    if synthesis failed.
+    "queued" from the moment text is queued with nothing else pending, "playing" once
+    its audio actually starts (and through the gaps between sentences of the same
+    burst), "silent" once everything queued has played or failed to synthesise.
+    Covering queued-but-not-audible text keeps the status from flashing "idle" before
+    the last sentence starts, or staying stuck if synthesis fails.
     """
 
-    def __init__(self, on_start: Callable[[], None] | None = None,
-                 on_end: Callable[[], None] | None = None):
-        self._on_start = on_start
-        self._on_end = on_end
+    def __init__(self, on_change: Callable[[str], None] | None = None):
+        self._on_change = on_change
         self._lock = threading.Lock()
         self._count = 0
+        self._state = "silent"
 
     @property
     def active(self) -> bool:
         return self._count > 0
 
     def add(self):
-        # Callbacks run under the lock so start/end can never be delivered out of order
         with self._lock:
             self._count += 1
-            if self._count == 1 and self._on_start:
-                self._on_start()
+            if self._count == 1:
+                self._set_locked("queued")
+
+    def playing(self):
+        """Audio for queued text is about to come out of the speakers."""
+        with self._lock:
+            if self._count > 0:
+                self._set_locked("playing")
 
     def done(self):
         with self._lock:
             if self._count == 0:
                 return
             self._count -= 1
-            if self._count == 0 and self._on_end:
-                self._on_end()
+            if self._count == 0:
+                self._set_locked("silent")
+
+    def _set_locked(self, state: str):
+        # Callbacks run under the lock so changes can never be delivered out of order
+        if state != self._state:
+            self._state = state
+            if self._on_change:
+                self._on_change(state)

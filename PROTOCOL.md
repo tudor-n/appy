@@ -32,7 +32,9 @@ Python and Rust lists of expressions, efforts or states drift apart.
 **States:** `idle`, `listening`, `booting`, `thinking`, `compacting`, `speaking`.
 On the Python side `StatusTracker` (`status.py`) is the only thing that sends
 `thinking`/`speaking`/`idle`. It combines the turn phase from the agent with whether the
-speaker still has text queued or playing. `booting` is sent with `StatusTracker.announce`.
+speaker still has text queued or playing. `speaking` is only sent once the audio is
+actually playing; a reply that's still streaming or being synthesised shows as `thinking`.
+`booting` is sent with `StatusTracker.announce`.
 `compacting` is a tracker phase, set while older turns are summarised between turns.
 After a `wake`, the tracker never sends `idle` until the user's turn starts (or the speech is
 discarded as noise), so a late end-of-audio or end-of-compaction can't cancel "listening".

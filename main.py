@@ -81,10 +81,7 @@ def main():
         api_key=os.getenv("API_KEY", "ollama"),
     )
 
-    speaker = Speaker(
-        on_speak_start=lambda: status.set_speaking(True),
-        on_speak_end=lambda: status.set_speaking(False),
-    )
+    speaker = Speaker(on_audio=status.set_audio)
     # A wake flips the UI to "listening"; if that speech is then discarded as noise,
     # re-send the real state so the mascot doesn't stay stuck listening.
     def on_speech_start():
