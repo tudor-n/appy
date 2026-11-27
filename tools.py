@@ -290,7 +290,7 @@ def memory_forget(slug: str, text: str) -> str:
 
 # How Appy talks: "banter" (default) or "focus". Kept here rather than in the system
 # prompt, which must stay byte-for-byte the same all run (KV cache); every user message
-# carries the mode in its stamp instead (see stamp_message).
+# carries the mode in its stamp instead (see turn_stamp).
 VALID_MODES = ("banter", "focus")
 _mode = {"value": "banter"}
 
@@ -314,9 +314,9 @@ def set_mode(mode: str) -> str:
     return json.dumps({"mode": mode, "note": f"Mode is now {mode.upper()}. Reply in {mode} mode."})
 
 
-def stamp_message(text: str, now: str) -> str:
-    """The user message as the model sees it: `[10:32 PM · FOCUS] text`."""
-    return f"[{now} \u00b7 {current_mode().upper()}] {text}"
+def turn_stamp(now: str) -> str:
+    """The tag that starts every user message: `[10:32 PM · FOCUS]`."""
+    return f"[{now} \u00b7 {current_mode().upper()}]"
 
 
 TOOL_MAP = {

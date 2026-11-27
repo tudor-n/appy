@@ -360,6 +360,32 @@ class MemoryNoteTests(unittest.TestCase):
         run_quietly(agent, "dummy again")  # fails: the note goes back for the next turn
         self.assertEqual(att.released, ["dummy-robot"])
 
+    def test_stamp_comes_first(self):
+        agent, client, _, _ = make_agent([[text_chunk("ok")]])
+        run_quietly(agent, "hi", stamp="[10:32 PM \u00b7 FOCUS]")
+        self.assertEqual(self.user_contents(client)[0], "[10:32 PM \u00b7 FOCUS] hi")
+
+    def test_notes_match_the_message_not_the_stamp(self):
+        # A note keyed "focus" must not attach just because the stamp says FOCUS
+        class Attacher:
+            seen = []
+
+            def attach(self, text):
+                self.seen.append(text)
+                return ("[From your memory, note 'dummy-robot':\n- PCA9685]", ["dummy-robot"])
+
+            def release(self, slugs):
+                pass
+
+        att = Attacher()
+        agent, client, _, _ = make_agent([[text_chunk("ok")]], note_attacher=att)
+        agent.note_memory_change("a")
+        run_quietly(agent, "dummy?", stamp="[10:32 PM \u00b7 FOCUS]")
+        self.assertEqual(att.seen, ["dummy?"])
+        self.assertEqual(self.user_contents(client)[0],
+                         "[10:32 PM \u00b7 FOCUS] [Memory changed since your last reply: a]\n\n"
+                         "[From your memory, note 'dummy-robot':\n- PCA9685]\n\ndummy?")
+
     def test_memory_notes_survive_a_failed_turn(self):
         agent, client, _, _ = make_agent([ConnectionError("down"), [text_chunk("ok")]])
         agent.note_memory_change("a")

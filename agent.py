@@ -210,8 +210,13 @@ class Agent:
         effort: str = "none",
         speak_aloud: bool = True,
         force=None,
+        stamp: str = "",
     ):
         """Run one user turn to completion. Never raises on LLM/network errors.
+
+        `stamp` (e.g. "[10:32 PM · FOCUS]", see tools.turn_stamp) goes at the very start
+        of the message the model sees. Memory notes are matched on `user_text` alone, so
+        the mode word in the stamp can't pull in a note about focus.
 
         `force` (a tools.ForcedCall) makes the first round call that tool: the model
         picks the arguments, and if it skips the call anyway the agent makes it itself
@@ -231,6 +236,8 @@ class Agent:
         if attached_block:
             parts.append(attached_block)
         content = "\n\n".join(parts + [user_text])
+        if stamp:
+            content = f"{stamp} {content}"
         self.messages.append({"role": "user", "content": content})
         self.status.set_phase("thinking")
         try:

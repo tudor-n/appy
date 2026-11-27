@@ -359,7 +359,7 @@ class ModeTests(unittest.TestCase):
     def test_set_mode_persists(self):
         json.loads(tools.run_tool("set_mode", '{"mode": "focus"}'))
         self.assertEqual(tools.current_mode(), "focus")
-        self.assertEqual(tools.stamp_message("next one", "10:32 PM"), "[10:32 PM \u00b7 FOCUS] next one")
+        self.assertEqual(tools.turn_stamp("10:32 PM"), "[10:32 PM \u00b7 FOCUS]")
 
     def test_case_insensitive(self):
         self.assertEqual(json.loads(tools.set_mode("FOCUS"))["mode"], "focus")
@@ -381,7 +381,7 @@ class ModeTests(unittest.TestCase):
         self.assertNotIn("set_mode", tools.STALE_TOOLS)
 
     def test_banter_stamp(self):
-        self.assertEqual(tools.stamp_message("hi", "09:00 AM"), "[09:00 AM \u00b7 BANTER] hi")
+        self.assertEqual(tools.turn_stamp("09:00 AM"), "[09:00 AM \u00b7 BANTER]")
 
 
 if __name__ == "__main__":
