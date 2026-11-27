@@ -151,6 +151,24 @@ class StatusTrackerTests(unittest.TestCase):
         self.assertEqual(self.sent, ["booting", "idle"])
 
 
+class ProviderWarningTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            import voice
+        except ImportError as e:  # sounddevice / kokoro not installed
+            self.skipTest(str(e))
+        self.warn = voice.provider_warning
+
+    def test_warns_when_cuda_silently_fell_back_to_cpu(self):
+        msg = self.warn("CUDAExecutionProvider", ["CPUExecutionProvider"])
+        self.assertIn("CUDAExecutionProvider", msg)
+        self.assertIn("onnxruntime-gpu", msg)
+
+    def test_quiet_when_the_provider_is_active(self):
+        self.assertIsNone(self.warn("CUDAExecutionProvider", ["CUDAExecutionProvider", "CPUExecutionProvider"]))
+        self.assertIsNone(self.warn(None, ["CPUExecutionProvider"]))
+
+
 class SpeechActivityTests(unittest.TestCase):
     def setUp(self):
         self.events = []

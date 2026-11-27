@@ -9,31 +9,40 @@ def feed_all(parser: ExpressionTagParser, pieces: list[str]) -> str:
 
 
 class PopReadyChunkTests(unittest.TestCase):
+    """Kokoro voices each chunk as its own utterance, so a chunk that ends at a comma
+    gets a sentence's falling tone. Chunks are therefore always whole sentences."""
+
     def test_no_boundary_returns_buffer(self):
-        self.assertEqual(pop_ready_chunk("Hello there", True), (None, "Hello there"))
+        self.assertEqual(pop_ready_chunk("Hello there"), (None, "Hello there"))
 
-    def test_first_chunk_waits_for_min_length(self):
-        # "Hi," is a clause but too short to be spoken on its own
-        self.assertEqual(pop_ready_chunk("Hi, there", True), (None, "Hi, there"))
+    def test_never_splits_at_a_comma(self):
+        # Regression: "That sounds like a plan, boss." came out as "...a plan. Boss."
+        self.assertEqual(
+            pop_ready_chunk("That sounds like a plan, boss"), (None, "That sounds like a plan, boss")
+        )
+        self.assertEqual(
+            pop_ready_chunk("That sounds like a plan, boss. Want"),
+            ("That sounds like a plan, boss.", "Want"),
+        )
 
-    def test_first_chunk_merges_short_clauses(self):
-        chunk, rest = pop_ready_chunk("Well, that is a great question, honestly. More", True)
-        self.assertEqual(chunk, "Well, that is a great question,")
-        self.assertEqual(rest, "honestly. More")
+    def test_a_short_opening_sentence_goes_on_its_own(self):
+        # Used to be glued to the next sentence to reach a minimum length
+        self.assertEqual(pop_ready_chunk("Finally. I was"), ("Finally.", "I was"))
 
-    def test_later_chunks_split_on_sentences_only(self):
-        chunk, rest = pop_ready_chunk("Yes, sure. And then", False)
-        self.assertEqual(chunk, "Yes, sure.")
-        self.assertEqual(rest, "And then")
+    def test_sentence_end_needs_following_whitespace(self):
+        # "3." could still become "3.5": wait until the stream moves on
+        self.assertEqual(pop_ready_chunk("It's 3."), (None, "It's 3."))
 
 
 class SpeechChunkerTests(unittest.TestCase):
-    def test_streams_chunks_and_flushes_tail(self):
+    def test_streams_sentences_and_flushes_tail(self):
         c = SpeechChunker()
         self.assertEqual(c.feed("The weather today is "), [])
-        self.assertEqual(c.feed("lovely, warm and sunny"), ["The weather today is lovely,"])
-        # After the first chunk only full sentences are released
-        self.assertEqual(c.feed(". Grab a hat, ok! Bye"), ["warm and sunny.", "Grab a hat, ok!"])
+        self.assertEqual(c.feed("lovely, warm and sunny"), [])
+        self.assertEqual(
+            c.feed(". Grab a hat, ok! Bye"),
+            ["The weather today is lovely, warm and sunny.", "Grab a hat, ok!"],
+        )
         self.assertEqual(c.flush(), "Bye")
         self.assertEqual(c.flush(), "")
 
