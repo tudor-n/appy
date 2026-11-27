@@ -48,6 +48,15 @@ impl App {
             ws_tx,
         }));
 
+        let tx = app.ws_tx.clone();
+        app.ui.memory.set_on_send(move |out| {
+            let _ = tx.send(ClientEvent::MemoryDecision {
+                slug: out.slug,
+                decision: out.decision,
+                text: out.text,
+                before: out.before,
+            });
+        });
         app.connect_draw();
         controls::connect(app);
         tick::start(app);
@@ -106,6 +115,12 @@ impl App {
         match ev {
             UiEvent::ToggleOverlay => self.toggle_overlay(),
             UiEvent::Quit => self.gtk_app.quit(),
+            UiEvent::ToggleAutoApprove => {
+                let current = self.state.borrow().auto_approve;
+                if let Some(on) = current {
+                    let _ = self.ws_tx.send(ClientEvent::MemoryAutoApprove { on: !on });
+                }
+            }
             UiEvent::Backend(ev) => self.on_backend(ev),
         }
     }
@@ -131,6 +146,7 @@ impl App {
                 expression: s.expression,
                 msg_count: s.message_count,
                 minimized: !self.ui.window.is_visible(),
+                auto_approve: s.auto_approve,
             };
         }
     }
@@ -169,6 +185,11 @@ impl App {
         s.state = AppyState::Thinking;
         self.sync_pill(&s);
         self.ui.mascot.queue_draw();
+    }
+
+    /// A handle for sending to the backend from widget callbacks.
+    pub fn sender(&self) -> UnboundedSender<ClientEvent> {
+        self.ws_tx.clone()
     }
 
     /// Ask the backend to compact the conversation now. The UI follows the backend's

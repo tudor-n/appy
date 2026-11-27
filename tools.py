@@ -176,8 +176,103 @@ def get_weather(day: int = 0) -> str:
     }, separators=(",", ":"))
 
 
+# Long-term memory (memory_client.MemoryClient on the Mac's memory service). Only sent
+# to the model when MEMORY_URL is set; every schema costs context on every request.
+MEMORY_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_read",
+            "description": (
+                "Read one long-term memory note. slug must be one listed under "
+                "[Notes you can read]."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_remember",
+            "description": (
+                "Save a fact to long-term memory. Only call this when the user explicitly "
+                "asks you to remember something. Leave out slug for facts about the user "
+                "themselves (core memory); give a slug to file it under a note (a new slug "
+                "creates the note)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "One short, self-contained sentence, e.g. "
+                            "'Tudor's lab printer is a Prusa MK4.'"
+                        ),
+                    },
+                    "slug": {
+                        "type": "string",
+                        "description": "Note slug: lowercase letters, digits and dashes.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_forget",
+            "description": (
+                "Remove a fact from long-term memory. Call this whenever the user asks you to "
+                "forget something; nothing is forgotten unless you call it, so never say you "
+                "forgot without calling it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "'core' or a note slug"},
+                    "text": {
+                        "type": "string",
+                        "description": "The fact to remove, as it appears in memory.",
+                    },
+                },
+                "required": ["slug", "text"],
+            },
+        },
+    },
+]
+
+_memory = None  # a memory_client.MemoryClient, set by main() when memory is on
+_NO_MEMORY = json.dumps({"error": "long-term memory isn't set up"})
+
+
+def set_memory(client) -> None:
+    global _memory
+    _memory = client
+
+
+def memory_read(slug: str) -> str:
+    return _memory.read(slug) if _memory else _NO_MEMORY
+
+
+def memory_remember(text: str, slug: str | None = None) -> str:
+    return _memory.remember(text, slug) if _memory else _NO_MEMORY
+
+
+def memory_forget(slug: str, text: str) -> str:
+    return _memory.forget(slug, text) if _memory else _NO_MEMORY
+
+
 TOOL_MAP = {
     "get_weather": get_weather,
+    "memory_read": memory_read,
+    "memory_remember": memory_remember,
+    "memory_forget": memory_forget,
 }
 
 # Words that make a message unmistakably about the weather. Deliberately excludes
@@ -196,6 +291,23 @@ _TIME_FOLLOW_UP = re.compile(
     re.IGNORECASE,
 )
 
+
+# A clear request to forget something. Gemma answers these with "I've wiped that" and no
+# tool call (live check: 0/9 runs; forced: 9/9), so they force memory_forget. A forced
+# turn has to delete *something*, so this only matches a request addressed to Appy at the
+# start of the message ("forget that ...", "Appy, can you forget my ..."), never a
+# sentence that merely mentions forgetting ("I always forget my keys", "I don't remember
+# the name"), and not "forget it" / "forget about it" / a bare "forget that". The fallback
+# args are only used if the model still skips the call.
+_FORGET = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|so|and|also|hey|well)[,.]?\s+)*(?:appy[,.:]?\s+)?"
+    r"(?:please\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?|"
+    r"i\s+(?:want|need)\s+you\s+to\s+)?"
+    r"(?:forget|stop\s+remembering)\s+(?:that\s+|about\s+)?"
+    r"(?P<what>(?!(?:about\s+)?(?:it|this|that)\b)\w.*)",
+    re.IGNORECASE,
+)
+_FORGET_TRAILER = re.compile(r"(\s+(anymore|any more|please))?[\s.!?]*$", re.IGNORECASE)
 
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "a": 1}
@@ -229,7 +341,8 @@ class ForcedCall:
 
 
 def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | None:
-    """The call the next turn must make, if the message is clearly a weather question.
+    """The call the next turn must make: memory_forget for a clear request to forget
+    something (only while memory is on), get_weather for a clear weather question.
 
     Gemma often answers weather follow-ups from its earlier reply instead of calling the
     tool (no card, and for "in 3 hours" made-up or refused answers), whatever the
@@ -238,6 +351,9 @@ def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | No
     call itself. `recent_tools` is Agent.recent_tools (the last few turns), so a
     "thanks!" in between doesn't break the follow-up.
     """
+    if _memory is not None and (forget := _FORGET.match(user_text.replace("\u2019", "'"))):
+        what = _FORGET_TRAILER.sub("", forget.group("what")).strip()
+        return ForcedCall("memory_forget", {"slug": "core", "text": what})
     weather = bool(_WEATHER_WORDS.search(user_text)) or (
         "get_weather" in recent_tools and bool(_TIME_FOLLOW_UP.search(user_text))
     )

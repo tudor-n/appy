@@ -1,5 +1,6 @@
 //! How each backend event changes the state and the chat log.
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gtk4::glib;
@@ -7,7 +8,7 @@ use gtk4::prelude::*;
 
 use crate::app::App;
 use crate::chat::format_live_dots;
-use crate::protocol::{AppyState, BackendEvent, Widget};
+use crate::protocol::{AppyState, BackendEvent, ClientEvent, Widget};
 use crate::state::{ActiveStatus, Card, SharedState};
 use crate::weather::CARD_SIZE;
 
@@ -68,6 +69,22 @@ impl App {
                 self.ui.card.set(&report);
                 self.show_card(&mut s, now);
             }
+            BackendEvent::MemoryProposals { items } => self.ui.memory.set_items(&items),
+            BackendEvent::MemoryCommitted {
+                kind,
+                summary,
+                facts,
+                dropped,
+                commit,
+            } => {
+                let tx = self.sender();
+                let undo: Rc<dyn Fn(Vec<String>)> = Rc::new(move |commits| {
+                    let _ = tx.send(ClientEvent::MemoryUndo { commits });
+                });
+                self.ui.chat.push_memory(kind, &summary, facts, dropped, &commit, undo);
+            }
+            BackendEvent::MemoryError { text } => self.ui.chat.push_notice(&text),
+            BackendEvent::MemorySettings { auto_approve } => s.auto_approve = Some(auto_approve),
         }
 
         self.sync_pill(&s);

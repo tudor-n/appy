@@ -312,6 +312,61 @@ class AgentTurnTests(unittest.TestCase):
         self.assertIn("ValueError", agent_mod.describe_error(ValueError("x")))
 
 
+class MemoryNoteTests(unittest.TestCase):
+    NOTE = "saved to lumen-project: first KPI is MRR"
+
+    def user_contents(self, client):
+        return [[m["content"] for m in call["messages"] if m["role"] == "user"][-1]
+                for call in client.calls]
+
+    def test_memory_notes_prefix_the_next_user_message(self):
+        agent, client, _, _ = make_agent([[text_chunk("MRR, sir.")], [text_chunk("Anytime.")]])
+        agent.note_memory_change(self.NOTE)
+        run_quietly(agent, "what's my first KPI?")
+        self.assertEqual(self.user_contents(client)[0],
+                         "[Memory changed since your last reply: saved to lumen-project: "
+                         "first KPI is MRR]\n\nwhat's my first KPI?")
+        run_quietly(agent, "thanks")  # used once
+        self.assertEqual(self.user_contents(client)[1], "thanks")
+
+    def test_several_notes_are_joined(self):
+        agent, client, _, _ = make_agent([[text_chunk("ok")]])
+        agent.note_memory_change("a")
+        agent.note_memory_change("b")
+        run_quietly(agent, "hi")
+        self.assertEqual(self.user_contents(client)[0],
+                         "[Memory changed since your last reply: a | b]\n\nhi")
+
+    def test_attached_notes_come_after_memory_changes(self):
+        class Attacher:
+            released = []
+
+            def attach(self, text):
+                return ("[From your memory, note 'dummy-robot':\n- PCA9685]", ["dummy-robot"])
+
+            def release(self, slugs):
+                self.released.extend(slugs)
+
+        att = Attacher()
+        agent, client, _, _ = make_agent([[text_chunk("ok")], ConnectionError("down")],
+                                         note_attacher=att)
+        agent.note_memory_change("a")
+        run_quietly(agent, "dummy?")
+        self.assertEqual(self.user_contents(client)[0],
+                         "[Memory changed since your last reply: a]\n\n"
+                         "[From your memory, note 'dummy-robot':\n- PCA9685]\n\ndummy?")
+        run_quietly(agent, "dummy again")  # fails: the note goes back for the next turn
+        self.assertEqual(att.released, ["dummy-robot"])
+
+    def test_memory_notes_survive_a_failed_turn(self):
+        agent, client, _, _ = make_agent([ConnectionError("down"), [text_chunk("ok")]])
+        agent.note_memory_change("a")
+        run_quietly(agent, "hi")
+        agent.note_memory_change("b")
+        run_quietly(agent, "again")
+        self.assertEqual(self.user_contents(client)[1],
+                         "[Memory changed since your last reply: a | b]\n\nagain")
+
 class ContextSizeTests(unittest.TestCase):
     def test_usage_chunk_sets_context_tokens(self):
         agent, client, _, _ = make_agent([[text_chunk("Hi."), usage_chunk(9000, 50)]])

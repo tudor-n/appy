@@ -8,6 +8,8 @@ import uvicorn
 
 
 VALID_EFFORTS = ("none", "low", "medium", "high")
+MEMORY_DECISIONS = ("accept", "deny", "edit")
+MEMORY_KINDS = ("remember", "forget", "approved", "edited", "undo", "auto")
 
 
 class UiBridge:
@@ -17,6 +19,9 @@ class UiBridge:
         on_set_effort: Optional[Callable[[str], None]] = None,
         get_effort: Optional[Callable[[], str]] = None,
         on_compact: Optional[Callable[[], None]] = None,
+        on_memory_decision: Optional[Callable[[str, str, Optional[str], Optional[str]], None]] = None,
+        on_memory_undo: Optional[Callable[[Optional[list]], None]] = None,
+        on_memory_auto_approve: Optional[Callable[[bool], None]] = None,
     ):
         self.app = FastAPI()
         self.clients: set[WebSocket] = set()
@@ -25,6 +30,13 @@ class UiBridge:
         self.on_set_effort = on_set_effort
         self.get_effort = get_effort
         self.on_compact = on_compact
+        self.on_memory_decision = on_memory_decision
+        self.on_memory_undo = on_memory_undo
+        self.on_memory_auto_approve = on_memory_auto_approve
+        # The auto-approve setting, replayed too (the panel pill's menu shows it)
+        self.last_settings: Optional[dict] = None
+        # The review card's list, replayed (like the status) to clients that connect later
+        self.last_proposals: Optional[dict] = None
         # The last status sent, replayed to clients that connect later. The overlay is
         # usually still reconnecting when "booting" goes out, and would otherwise sit
         # looking idle through the whole model load.
@@ -40,6 +52,10 @@ class UiBridge:
                     await ws.send_json({"type": "effort", "value": self.get_effort()})
                 if self.last_status:
                     await ws.send_json(self.last_status)
+                if self.last_proposals:
+                    await ws.send_json(self.last_proposals)
+                if self.last_settings:
+                    await ws.send_json(self.last_settings)
                 while True:
                     raw = await ws.receive_text()
                     try:
@@ -56,6 +72,29 @@ class UiBridge:
                             self.on_user_text(text)
                     elif kind == "compact" and self.on_compact:
                         self.on_compact()
+                    elif kind == "memory_decision" and self.on_memory_decision:
+                        slug, decision = data.get("slug"), data.get("decision")
+                        text = data.get("text")
+                        if not isinstance(slug, str) or not slug or decision not in MEMORY_DECISIONS:
+                            continue
+                        if decision == "edit" and not (isinstance(text, str) and text.strip()):
+                            continue
+                        before = data.get("before")
+                        if decision != "edit" or not isinstance(before, str):
+                            before = None
+                        self.on_memory_decision(slug, decision,
+                                                text if decision == "edit" else None, before)
+                    elif kind == "memory_undo" and self.on_memory_undo:
+                        # `commits`: exactly the changes a pill's Undo means (newest first)
+                        commits = data.get("commits")
+                        if commits is None:
+                            self.on_memory_undo(None)
+                        elif (isinstance(commits, list) and commits
+                              and all(isinstance(c, str) and c for c in commits)):
+                            self.on_memory_undo(commits)
+                    elif kind == "memory_auto_approve" and self.on_memory_auto_approve:
+                        if isinstance(data.get("on"), bool):
+                            self.on_memory_auto_approve(data["on"])
                     elif kind == "set_effort" and self.on_set_effort:
                         value = data.get("effort")
                         if value in VALID_EFFORTS:
@@ -106,6 +145,25 @@ class UiBridge:
 
     def effort(self, value: str):
         self.emit({"type": "effort", "value": value})
+
+    def memory_proposals(self, items: list):
+        """The whole review list (empty = nothing to review); see PROTOCOL.md."""
+        self.last_proposals = {"type": "memory_proposals", "items": items}
+        self.emit(self.last_proposals)
+
+    def memory_settings(self, auto_approve: bool):
+        self.last_settings = {"type": "memory_settings", "auto_approve": bool(auto_approve)}
+        self.emit(self.last_settings)
+
+    def memory_committed(self, kind: str, summary: str, facts=(), dropped=(), commit: str = ""):
+        """`facts`/`dropped`: the sentences the change added and removed (the overlay's
+        memory pill lists them); `commit`: so the pill's Undo can name exactly this one."""
+        self.emit({"type": "memory_committed", "kind": kind, "summary": summary,
+                   "facts": list(facts), "dropped": list(dropped), "commit": commit or ""})
+
+    def memory_error(self, text: str):
+        """A memory action failed (e.g. an undo): shown in the chat."""
+        self.emit({"type": "memory_error", "text": text})
 
     def widget(self, card: dict):
         """Show a card next to Appy; `card` carries its own "widget" kind (see PROTOCOL.md)."""

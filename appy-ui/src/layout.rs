@@ -20,6 +20,8 @@ const HOME_MARGIN_BOTTOM: f64 = 56.0;
 const FLIP_MARGIN: f64 = 16.0;
 /// Space between the mascot body and the weather card.
 const CARD_GAP: f64 = 14.0;
+/// Space between the chat panel and the memory panel.
+pub const MEMORY_GAP: f64 = 10.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HSide {
@@ -27,6 +29,15 @@ pub enum HSide {
     #[default]
     Right,
     Left,
+}
+
+/// Which side of the chat the memory panel is on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VSide {
+    /// Above the chat (preferred).
+    #[default]
+    Above,
+    Below,
 }
 
 /// Axis-aligned rectangle (x, y, w, h).
@@ -46,6 +57,13 @@ impl Rect {
     /// How far the rect sticks out of a `win`-sized screen, summed over all edges.
     fn overflow(&self, win: Size) -> f64 {
         overflow(self.x, self.w, win.0) + overflow(self.y, self.h, win.1)
+    }
+
+    fn intersects(&self, other: &Rect) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
     }
 }
 
@@ -154,8 +172,8 @@ pub fn clamp_mascot(anchor: Point, win: Size, body: Rect) -> Point {
 /// glass mode) and is bottom-aligned with the body.
 ///
 /// Preference: beside it on the side away from the chat, then above it, then (if the
-/// chat is hidden) on the chat's side. The first spot that's fully on screen wins;
-/// otherwise the one sticking out least.
+/// chat is hidden) on the chat's side. The first spot that's fully on screen (and clear
+/// of `avoid`, the memory panel) wins; otherwise the one sticking out least.
 pub fn card_slot(
     body: Rect,
     clear_of: Rect,
@@ -163,6 +181,7 @@ pub fn card_slot(
     win: Size,
     chat_side: HSide,
     chat_open: bool,
+    avoid: Option<Rect>,
 ) -> Point {
     let (cw, ch) = card;
     let bottom = body.y + body.h - ch;
@@ -180,13 +199,15 @@ pub fn card_slot(
     }
 
     let fit = |p: &Point| {
-        Rect {
+        let r = Rect {
             x: p.0,
             y: p.1,
             w: cw,
             h: ch,
-        }
-        .overflow(win)
+        };
+        // Covering the memory panel counts like sticking out by the card's size
+        let blocked = avoid.is_some_and(|a| r.intersects(&a));
+        r.overflow(win) + if blocked { cw + ch } else { 0.0 }
     };
     candidates
         .iter()
@@ -199,6 +220,45 @@ pub fn card_slot(
                 .min_by(|a, b| fit(a).total_cmp(&fit(b)))
                 .expect("at least one candidate")
         })
+}
+
+/// Where the memory panel goes: above the chat (or below it when there's no room
+/// above), with its outer edge (the one away from Appy) lined up with the chat's, kept
+/// on screen. `sticky` (dragging) adds hysteresis like the chat's left/right flip.
+pub fn memory_slot(
+    chat: Rect,
+    panel: Size,
+    win: Size,
+    side: HSide,
+    current: VSide,
+    sticky: bool,
+) -> (Point, VSide) {
+    let (pw, ph) = panel;
+    let x = match side {
+        HSide::Right => chat.x + chat.w - pw,
+        HSide::Left => chat.x,
+    };
+    let x = if win.0 - pw < 0.0 { 0.0 } else { x.clamp(0.0, win.0 - pw) };
+    let above = chat.y - MEMORY_GAP - ph;
+    let below = chat.y + chat.h + MEMORY_GAP;
+    let (up, down) = (overflow(above, ph, win.1), overflow(below, ph, win.1));
+    let vside = if sticky {
+        match current {
+            // `above` is how much room there is above the panel (negative: sticks out)
+            VSide::Above if -above > FLIP_MARGIN && down < up => VSide::Below,
+            VSide::Below if above > FLIP_MARGIN => VSide::Above,
+            current => current,
+        }
+    } else if up == 0.0 || up <= down {
+        VSide::Above
+    } else {
+        VSide::Below
+    };
+    let y = match vside {
+        VSide::Above => above,
+        VSide::Below => below,
+    };
+    ((x, y), vside)
 }
 
 /// One frame of easing toward a target point. Returns (new point, arrived).
@@ -319,9 +379,9 @@ mod tests {
             h: 96.0,
         };
         let card = (104.0, 104.0);
-        let p = card_slot(body, body, card, WIN, HSide::Right, true);
+        let p = card_slot(body, body, card, WIN, HSide::Right, true, None);
         assert_eq!(p, (800.0 - 14.0 - 104.0, 600.0 + 96.0 - 104.0));
-        let p = card_slot(body, body, card, WIN, HSide::Left, true);
+        let p = card_slot(body, body, card, WIN, HSide::Left, true, None);
         assert_eq!(p.0, 800.0 + 96.0 + 14.0);
     }
 
@@ -334,7 +394,7 @@ mod tests {
             w: 96.0,
             h: 96.0,
         };
-        let p = card_slot(body, body, (104.0, 104.0), WIN, HSide::Right, true);
+        let p = card_slot(body, body, (104.0, 104.0), WIN, HSide::Right, true, None);
         assert_eq!(p, (-4.0, 600.0 - 14.0 - 104.0));
     }
 
@@ -353,7 +413,7 @@ mod tests {
             w: 454.0,
             h: 248.0,
         };
-        let p = card_slot(body, glass, (104.0, 104.0), WIN, HSide::Right, true);
+        let p = card_slot(body, glass, (104.0, 104.0), WIN, HSide::Right, true, None);
         assert_eq!(p, (772.0 - 14.0 - 104.0, 600.0 + 96.0 - 104.0));
         assert!(p.0 + 104.0 <= glass.x);
     }
@@ -367,8 +427,83 @@ mod tests {
             w: 96.0,
             h: 96.0,
         };
-        let p = card_slot(body, body, (104.0, 104.0), WIN, HSide::Right, false);
+        let p = card_slot(body, body, (104.0, 104.0), WIN, HSide::Right, false, None);
         assert_eq!(p.0, 96.0 + 14.0);
+    }
+
+    #[test]
+    fn card_slot_avoids_the_memory_panel() {
+        let body = Rect {
+            x: 800.0,
+            y: 600.0,
+            w: 96.0,
+            h: 96.0,
+        };
+        // The memory panel covers the spot left of Appy: the card goes above him
+        let panel = Rect {
+            x: 600.0,
+            y: 500.0,
+            w: 190.0,
+            h: 200.0,
+        };
+        let p = card_slot(body, body, (104.0, 104.0), WIN, HSide::Right, true, Some(panel));
+        assert_eq!(p, (796.0, 600.0 - 14.0 - 104.0));
+    }
+
+    fn chat_at(x: f64, y: f64) -> Rect {
+        Rect {
+            x,
+            y,
+            w: 290.0,
+            h: 300.0,
+        }
+    }
+
+    const PANEL: Size = (360.0, 260.0);
+
+    #[test]
+    fn memory_slot_prefers_above() {
+        let (p, v) = memory_slot(chat_at(1000.0, 500.0), PANEL, WIN, HSide::Right, VSide::Above, false);
+        assert_eq!(v, VSide::Above);
+        assert_eq!(p, (1290.0 - 360.0, 500.0 - 10.0 - 260.0));
+    }
+
+    #[test]
+    fn memory_slot_flips_below_near_the_top() {
+        let (p, v) = memory_slot(chat_at(1000.0, 100.0), PANEL, WIN, HSide::Right, VSide::Above, false);
+        assert_eq!(v, VSide::Below);
+        assert_eq!(p.1, 100.0 + 300.0 + 10.0);
+        // and back above once there's room, when not dragging
+        let (_, v) = memory_slot(chat_at(1000.0, 500.0), PANEL, WIN, HSide::Right, VSide::Below, false);
+        assert_eq!(v, VSide::Above);
+    }
+
+    #[test]
+    fn memory_slot_hysteresis() {
+        let side = |y: f64, current: VSide| {
+            memory_slot(chat_at(1000.0, y), PANEL, WIN, HSide::Right, current, true).1
+        };
+        // above sticks out by 10 (less than FLIP_MARGIN): stays above while dragging
+        assert_eq!(side(260.0, VSide::Above), VSide::Above);
+        assert_eq!(side(240.0, VSide::Above), VSide::Below); // by 30
+        // below, above would have 10px spare: stays below; 20px spare: back above
+        assert_eq!(side(280.0, VSide::Below), VSide::Below);
+        assert_eq!(side(290.0, VSide::Below), VSide::Above);
+        // not dragging: no hysteresis
+        assert_eq!(
+            memory_slot(chat_at(1000.0, 260.0), PANEL, WIN, HSide::Right, VSide::Above, false).1,
+            VSide::Below
+        );
+    }
+
+    #[test]
+    fn memory_slot_aligns_outer_edge_and_clamps() {
+        let (p, _) = memory_slot(chat_at(1000.0, 500.0), PANEL, WIN, HSide::Left, VSide::Above, false);
+        assert_eq!(p.0, 1000.0);
+        let (p, _) = memory_slot(chat_at(0.0, 500.0), PANEL, WIN, HSide::Right, VSide::Above, false);
+        assert_eq!(p.0, 0.0);
+        let (p, _) = memory_slot(chat_at(1700.0, 500.0), PANEL, WIN, HSide::Left, VSide::Above, false);
+        assert_eq!(p.0, 1920.0 - 360.0);
     }
 
     #[test]

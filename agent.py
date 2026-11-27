@@ -1,5 +1,6 @@
 """The conversation loop: stream a reply from the LLM, speak it, run tools, repeat."""
 import json
+import threading
 from pathlib import Path
 from collections import deque
 
@@ -121,6 +122,7 @@ class Agent:
         summary_max: int = SUMMARY_MAX,
         context_limit: int = CONTEXT_TOKENS,
         compaction_dump: Path | None = None,
+        note_attacher=None,
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
         UI can show a card for it. Its errors are logged, never fatal to the turn.
@@ -156,6 +158,18 @@ class Agent:
         # never enter the history)
         self.last_usage: int | None = None
         self._usage_messages = 0
+        # Memory changes since the last turn (approved, edited, undone, auto-saved). The
+        # system prompt's memory is built once at startup, so these ride along with the
+        # next user message instead.
+        self._memory_notes: list[str] = []
+        self._memory_lock = threading.Lock()
+        # note_attach.NoteAttacher: puts the memory notes a message names in front of it
+        self.note_attacher = note_attacher
+
+    def note_memory_change(self, line: str) -> None:
+        """Tell Appy about a memory change on his next turn (any thread)."""
+        with self._memory_lock:
+            self._memory_notes.append(line)
 
     @property
     def recent_tools(self) -> frozenset[str]:
@@ -195,7 +209,21 @@ class Agent:
         picks the arguments, and if it skips the call anyway the agent makes it itself
         with `force.fallback_args` (see tools.forced_call for why)."""
         checkpoint = len(self.messages)
-        self.messages.append({"role": "user", "content": user_text})
+        with self._memory_lock:
+            notes, self._memory_notes = self._memory_notes, []
+        attached_block, attached = "", []
+        if self.note_attacher is not None:
+            try:
+                attached_block, attached = self.note_attacher.attach(user_text)
+            except Exception as exc:  # never let memory break a turn
+                print(f"[memory] couldn't attach notes: {type(exc).__name__}: {exc}")
+        parts = []
+        if notes:
+            parts.append(f"[Memory changed since your last reply: {' | '.join(notes)}]")
+        if attached_block:
+            parts.append(attached_block)
+        content = "\n\n".join(parts + [user_text])
+        self.messages.append({"role": "user", "content": content})
         self.status.set_phase("thinking")
         try:
             self._run_rounds(effort, speak_aloud, force)
@@ -204,6 +232,10 @@ class Agent:
             # user messages in a row on the next turn, which strict chat templates
             # (e.g. Gemma's) reject, breaking every later request.
             del self.messages[checkpoint:]
+            with self._memory_lock:  # Appy never saw them: keep them for the next turn
+                self._memory_notes[:0] = notes
+            if attached:
+                self.note_attacher.release(attached)
             print(f"\n[llm error] {type(exc).__name__}: {exc}\n")
             apology = describe_error(exc)
             self.ui.response(apology, "skeptical")

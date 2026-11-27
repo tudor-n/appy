@@ -67,3 +67,93 @@ older turns are folded into a summary between turns and the UI shows "compacting
 Set `APPY_DUMP_COMPACTION=1` to also write each compaction's exact prompt and the summary that
 came back to `<session>.compaction-N.txt` next to the log; `COMPACT_AT=2500` makes it happen
 sooner when testing.
+
+## Long-term memory
+
+Durable facts live on the Mac mini, in a git repo at `~/appy-data` (`memory/core.md` plus one
+markdown note per topic). The memory service (`appy_memory/`, FastAPI on port 8765) owns every
+read and write. At startup Appy puts `core.md` and the note index into its system prompt; the
+model can then call `memory_read`, `memory_remember` and `memory_forget`. Each change is a commit
+whose message carries the session id. When Appy quits, it uploads its session log to
+`~/appy-data/logs/` and deletes the local copy; logs that couldn't be uploaded go up at the next
+start. If the Mac is unreachable, Appy starts without long-term memory.
+
+Laptop `.env`: `MEMORY_URL=http://100.103.162.57:8765` and `MEMORY_TOKEN=<shared token>`.
+Mac `~/appy-memory/.env`: `MEMORY_TOKEN=<same token>`, `MEMORY_DIR=~/appy-data`,
+`MEMORY_HOST=0.0.0.0`, `MEMORY_PORT=8765`. The service is plain HTTP with a bearer token, and
+`0.0.0.0` also exposes it on the LAN; since the laptop only uses Tailscale, binding to the
+Mac's Tailscale IP (`MEMORY_HOST=100.103.162.57`) is safer.
+
+```sh
+appy_memory/deploy/deploy.sh        # copy to the Mac, run its tests, (re)start under launchd
+ssh macmini tail -f appy-memory/service.log         # one line per remember/forget/undo/upload
+ssh macmini git -C appy-data log --stat             # history of every memory change
+curl -X POST -H "Authorization: Bearer $MEMORY_TOKEN" $MEMORY_URL/undo   # undo the last change
+.venv/bin/python dev/check_memory_tools.py          # live check that the model calls the tools
+```
+
+Set `APPY_DUMP_PROMPT=1` to write the exact system prompt of a run to `<session>.prompt.txt` next
+to its log.
+
+### Learning from conversations (the consolidator)
+
+You don't have to say "remember". After a session's log reaches the Mac, the memory service
+reads it in the background: it cuts the transcript into ~5k-token windows, asks the model which
+notes each window adds durable facts to (project details, decisions, preferences; never small
+talk), and rewrites those notes with the new facts folded in. Code checks every rewrite (title and
+gist kept, bullets only, under the size cap, actually changed). The result waits as a proposal in
+`~/appy-data/pending/<note>.json`, one per note, for you to approve in the overlay; nothing reaches
+memory without that (unless auto-approve is on, below). While you're talking to Appy the consolidator waits (the laptop pings
+`/activity` at each turn), so it never competes with live chat for the model.
+
+Mac `~/appy-memory/.env` additions: `BASE_URL=http://100.103.162.57:1234/v1` (LM Studio listens on
+the Tailscale IP only), `MODEL=google/gemma-4-26b-a4b`, optionally `CONSOLIDATOR_EFFORT` (default
+`none`: same quality as `low` here, 15x faster), `CONSOLIDATOR_WINDOW_TOKENS` (5000),
+`CONSOLIDATOR_IDLE_SECONDS` (120), and `CONSOLIDATOR_DUMP=1` to write every prompt and output to
+`~/appy-data/dumps/`.
+
+```sh
+ssh macmini grep consolidator appy-memory/service.log    # one line per session processed
+curl -H "Authorization: Bearer $MEMORY_TOKEN" $MEMORY_URL/proposals   # what's waiting for review
+curl -H "Authorization: Bearer $MEMORY_TOKEN" $MEMORY_URL/settings    # {"auto_approve": …}
+.venv/bin/python dev/check_consolidator.py 2             # live check on 7 fixture sessions
+```
+
+### Reviewing what Appy learned
+
+Proposals show up in a memory panel that floats above the chat while the chat is open (below
+it when Appy sits near the top of the screen). It shows one note at a time: the title, what
+changed (removed lines struck through, new ones in white) and **Approve**, **Deny** and **Edit**
+(Edit opens the whole note as text; Save checks it keeps the title, the description line and
+"- " bullets). Scroll over the panel, or use ▲ ▼, for the next one ("2 of 3"). **Approve all**
+approves every note that isn't being edited or redone; **Later** hides the panel until something
+new arrives (or the next launch), without deciding anything. If the note changed since the
+proposal was written (a fact remembered or forgotten meanwhile), the panel shows "updating…"
+while the Mac redoes it against the current note; review it again when it comes back. While a
+proposal is being redone it can still be denied or edited; a saved edit keeps the facts
+remembered since and leaves out the ones forgotten since. The panel refreshes when Appy starts, after each decision, and every minute.
+
+Every change to memory (a remember, a forget, an approved, edited or auto-approved proposal)
+shows up as a small centred pill in the chat, one per burst: "Remembered a fact", "Remembered 3
+facts", "Forgot a fact". Hover it and it unfolds into the facts themselves (a replaced fact
+struck through), with **Undo**, which takes back everything in that pill. Only the newest
+pill's Undo is live; the "Undid" pill that follows offers "Undo earlier" to go further back.
+Undoing an approved proposal puts it back in the panel; undoing an auto-approved one just
+reverts it.
+
+Appy knows about every change right away: his memory in the system prompt is built once at
+startup (so the prompt stays cached), and changes made during the session ride along with your
+next message as a short note with the facts themselves, like
+`[Memory changed since your last reply: note 'bench' now also says: The PSU is a Korad
+KA3005P.; no longer says: The PSU is a Riden RD6024.]`.
+
+**Auto-approve.** Right-click the panel pill → **Auto-approve memories** (shown while Appy runs).
+With it on, nothing waits for review: what the consolidator learns is committed straight away
+(still through the same checks) as `memory: … [auto]`, and a "Remembered …" pill with Undo
+shows up if Appy is running. Turning it on also approves what's already waiting. The setting
+lives on the Mac (`~/appy-data/settings.json`), so it holds across launches and covers sessions
+processed while the laptop is off.
+
+`dev/mock_backend.py --memory --busy` sends three sample proposals and answers the panel and
+the auto-approve toggle, for working on the panel without the Mac (`--busy` keeps the chat
+open; `MOCK_PORT` and the overlay's `APPY_WS_URL` / `APPY_PILL_ADDR` run it beside a real Appy).

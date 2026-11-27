@@ -35,6 +35,7 @@ impl App {
         let mut s = self.state.borrow_mut();
 
         self.layout_shell(&mut s);
+        self.place_memory(&mut s, now);
         let card_gone = self.step_card(&mut s, now);
         self.sync_input_region(&mut s);
 
@@ -115,7 +116,38 @@ impl App {
             self.ui.window_size(),
             s.placement.side,
             s.chat_open,
+            self.ui.memory_bounds(),
         )
+    }
+
+    /// Show the memory panel while the chat is open and there's something to review,
+    /// and keep it above the chat (or below it, when there's no room above).
+    fn place_memory(&self, s: &mut SharedState, now: Instant) {
+        let ui = &self.ui;
+        let shown = s.chat_open && ui.memory.is_wanted();
+        if shown != ui.memory.is_shown() {
+            if !shown && ui.memory.root.focus_child().is_some() {
+                // Edit was open: don't leave the keyboard in a hidden text box
+                GtkWindowExt::set_focus(&ui.window, None::<&gtk4::Widget>);
+            }
+            ui.memory.set_shown(shown);
+            if !shown {
+                s.memory_panel_hidden(now);
+            }
+        }
+        let Some(chat) = ui.memory_anchor(s.locked) else {
+            return;
+        };
+        let (pos, side) = layout::memory_slot(
+            chat,
+            ui.memory_size(),
+            ui.window_size(),
+            s.placement.side,
+            s.memory_side,
+            s.drag.active,
+        );
+        s.memory_side = side;
+        ui.move_memory(pos);
     }
 
     /// Ease the weather card toward its spot beside Appy, or back into him when it's
@@ -179,16 +211,18 @@ impl App {
                 let g_skew = (skew_x * 0.60).clamp(-4.5, 4.5);
                 let g_rot = (rot * 0.65).clamp(-2.2, 2.2);
                 css.load_from_data(&format!(
-                    ".appy-shell.glass-locked {{ transform: translate({g_tx:.2}px, {g_ty:.2}px) skewX({g_skew:.2}deg) rotate({g_rot:.2}deg); }}\n.chat-wobble {{ transform: none; }}"
+                    ".appy-shell.glass-locked {{ transform: translate({g_tx:.2}px, {g_ty:.2}px) skewX({g_skew:.2}deg) rotate({g_rot:.2}deg); }}\n.chat-wobble, .memory-panel.open {{ transform: none; }}"
                 ));
             } else {
                 css.load_from_data(&format!(
-                    ".appy-shell.glass-locked {{ transform: none; }}\n.chat-wobble {{ transform: translate({tx:.2}px, {ty:.2}px) skewX({skew_x:.2}deg) rotate({rot:.2}deg); }}"
+                    ".appy-shell.glass-locked {{ transform: none; }}\n.chat-wobble, .memory-panel.open {{ transform: translate({tx:.2}px, {ty:.2}px) skewX({skew_x:.2}deg) rotate({rot:.2}deg); }}"
                 ));
             }
             s.wobble_css_active = true;
         } else if s.wobble_css_active {
-            css.load_from_data(".appy-shell.glass-locked, .chat-wobble { transform: none; }");
+            css.load_from_data(
+                ".appy-shell.glass-locked, .chat-wobble, .memory-panel.open { transform: none; }",
+            );
             s.wobble_css_active = false;
         }
     }
@@ -210,7 +244,9 @@ impl App {
     /// Open/close the chat panel. Returns true if the mascot needs a redraw.
     fn update_chat_visibility(&self, s: &mut SharedState, now: Instant) -> bool {
         let ui = &self.ui;
-        let input_selected = ui.window.is_active() && ui.input.focus.contains_focus();
+        // Typing in the memory panel's Edit box counts like typing in the chat
+        let input_selected = ui.window.is_active()
+            && (ui.input.focus.contains_focus() || ui.memory.contains_focus());
         let show = s.should_show_chat(input_selected, now);
         if s.chat_open == show {
             return false;

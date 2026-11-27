@@ -1,3 +1,4 @@
+import math
 import os
 import queue
 import threading
@@ -11,6 +12,9 @@ from openai import OpenAI
 import tools
 from agent import Agent
 from hearing import Ear
+from memory_client import MemoryClient, system_prompt
+from memory_review import MemoryReview
+from note_attach import NoteAttacher
 from session_log import SessionLogger, default_logs_dir
 from status import StatusTracker
 from voice import Speaker
@@ -42,12 +46,30 @@ def main():
 
     # Created before the bridge so a message arriving right away finds it
     status = StatusTracker(lambda state: ui.status(state))
+    # The memory review coordinator, once memory is set up (the bridge's callbacks need it)
+    review_box: dict = {"review": None}
+
+    def on_memory_decision(slug: str, decision: str, text, before=None):
+        if review_box["review"]:
+            review_box["review"].decide(slug, decision, text, before)
+
+    def on_memory_undo(commits=None):
+        if review_box["review"]:
+            review_box["review"].undo(commits)
+
+    def on_memory_auto_approve(on: bool):
+        if review_box["review"]:
+            review_box["review"].set_auto_approve(on)
+
     # Start WebSocket bridge immediately so the UI shows "loading..." during boot
     ui = UiBridge(
         on_user_text=on_user_text,
         on_set_effort=set_effort,
         get_effort=lambda: effort_state["value"],
         on_compact=lambda: turn_queue.put(("compact", "")),
+        on_memory_decision=on_memory_decision,
+        on_memory_undo=on_memory_undo,
+        on_memory_auto_approve=on_memory_auto_approve,
     )
     ui.start()
     status.announce("booting")
@@ -74,16 +96,48 @@ def main():
         """Pop a card out next to Appy for tools that have one."""
         if name == "get_weather" and (card := tools.weather_card(result)):
             ui.widget(card)
+        if review_box["review"]:  # "Remembered: ..." chip with Undo
+            review_box["review"].tool_committed(name, result)
+        if attacher and name in ("memory_remember", "memory_forget"):
+            # a new or changed note: re-read the index off the turn's thread
+            threading.Thread(target=attacher.refresh, daemon=True).start()
 
     model = os.getenv("MODEL", "google/gemma-4-26b-a4b")
     log = SessionLogger(default_logs_dir())
     log.start(model=model, effort=effort_state["value"])
 
+    # Long-term memory lives on the Mac. Its context goes into the system prompt once,
+    # here, so the prompt stays byte-for-byte the same all run (KV cache); changes made
+    # during the run reach Appy as a note on his next message (Agent.note_memory_change).
+    memory = MemoryClient.from_env(log.session_id)
+    tools.set_memory(memory)
+    context = memory.context() if memory else None
+    if context is not None:
+        notes = len(context["index"].splitlines())
+        print(f"[memory] core ~{math.ceil(len(context['core']) / 3.2)} tokens, {notes} notes")
+    elif not os.getenv("MEMORY_URL", "").strip():
+        print("[memory] off (MEMORY_URL not set)")
+    prompt = system_prompt(load_system_prompt(), context)
+    # Notes the user names get attached to their message (Gemma rarely calls memory_read)
+    attacher = NoteAttacher(memory, context["index"]) if memory and context else None
+    if os.getenv("APPY_DUMP_PROMPT"):  # exactly what the model gets as its system prompt
+        dump = log.path.with_suffix(".prompt.txt")
+        try:
+            dump.parent.mkdir(parents=True, exist_ok=True)
+            dump.write_text(prompt, encoding="utf-8")
+            print(f"[memory] system prompt -> {dump}")
+        except OSError as exc:
+            print(f"[memory] couldn't write {dump}: {exc}")
+    if memory:  # logs left behind by a crash or while the Mac was down
+        threading.Thread(target=memory.upload_leftovers, args=(log.path.parent, log.path),
+                         daemon=True).start()
+
     agent = Agent(
         client,
         model=model,
         temperature=float(os.getenv("TEMPERATURE", "0.4")),
-        system_prompt=load_system_prompt(),
+        system_prompt=prompt,
+        tools=tools.TOOL_SCHEMAS + (tools.MEMORY_TOOL_SCHEMAS if memory else []),
         speaker=speaker,
         ui=ui,
         status=status,
@@ -96,7 +150,19 @@ def main():
         context_limit=int(os.getenv("CONTEXT_TOKENS", "16384")),
         # APPY_DUMP_COMPACTION=1: write each compaction's prompt + summary next to the log
         compaction_dump=log.path.with_suffix("") if os.getenv("APPY_DUMP_COMPACTION") else None,
+        note_attacher=attacher,
     )
+
+    def on_memory_change(line: str):
+        agent.note_memory_change(line)
+        if attacher:
+            attacher.refresh()
+    if memory:  # the overlay's review panel for what the consolidator learned
+        review_box["review"] = MemoryReview(memory, ui.memory_proposals, ui.memory_committed,
+                                            emit_error=ui.memory_error,
+                                            emit_settings=ui.memory_settings,
+                                            on_change=on_memory_change)
+        review_box["review"].start()
 
     def _voice_forwarder():
         while ear.running:
@@ -135,6 +201,8 @@ def main():
 
             now = datetime.now().strftime("%I:%M %p")
             log.user(text=user_input, source=source)
+            if memory:  # the Mac's consolidator yields to live chat
+                threading.Thread(target=memory.activity, daemon=True).start()
             ear.pause()  # don't let Appy hear itself
             status.begin_turn(queued=source == "text")
             try:
@@ -156,6 +224,11 @@ def main():
         raise
     finally:
         log.end(reason=reason)
+        if review_box["review"]:
+            review_box["review"].stop()
+        if memory:
+            uploaded = memory.upload_log(log.path)
+            print(f"[memory] log {'uploaded' if uploaded else 'kept locally'}")
         ear.stop()
         speaker.close()
 

@@ -2,11 +2,16 @@
 
 Serves the same WebSocket on :8001 as main.py. Replies come from APPY_LLM_URL (any
 OpenAI-compatible chat endpoint) if set, otherwise from canned keyword responses.
-Run: .venv/bin/python dev/mock_backend.py
+Run: .venv/bin/python dev/mock_backend.py [--memory] [--busy]
+`--memory` also sends three sample memory proposals and the auto-approve setting, and
+answers the review panel's buttons and the pill's auto-approve toggle.
+`--busy` holds the "thinking" status, which keeps the chat (and the memory panel) open.
+MOCK_PORT picks the port (default 8001); pair it with the overlay's APPY_WS_URL.
 """
 import asyncio
 import json
 import os
+import sys
 import urllib.request
 from typing import List, Dict
 
@@ -93,17 +98,95 @@ def fallback_reply(user_text: str) -> Dict[str, str]:
     return {"text": f"Got it: \"{user_text}\". Backend is live and listening.", "expression": "neutral"}
 
 
+MEMORY_DEMO = "--memory" in sys.argv
+SAMPLE_PROPOSALS = [
+    {"slug": "mark-i-suit", "title": "Mark I suit", "summary": "Added the helmet HUD hardware.",
+     "before": "# Mark I suit\n> Iron Man style arm exoskeleton\n- BLDC motors with 50:1 harmonic drives.\n"
+               "- An STM32 runs the joint loops at 1 kHz.\n",
+     "after": "# Mark I suit\n> Iron Man style arm exoskeleton\n- BLDC motors with 50:1 harmonic drives.\n"
+              "- An STM32 runs the joint loops at 1 kHz.\n- The helmet HUD runs on a Raspberry Pi Zero 2 W.\n"},
+    {"slug": "bench", "title": "Bench", "summary": "Replaced the Riden PSU with a Korad.",
+     "before": "# Bench\n> Lab bench gear\n- The PSU is a Riden RD6024.\n- The scope is a Rigol DS1054Z.\n",
+     "after": "# Bench\n> Lab bench gear\n- The PSU is a Korad KA3005P.\n- The scope is a Rigol DS1054Z.\n"},
+    {"slug": "watering-bot", "title": "Watering bot",
+     "summary": "New note: Tudor's plant watering robot.",
+     "before": "",
+     "after": "# Watering bot\n> Tudor's automatic plant watering robot\n"
+              "- An ESP32 runs the watering bot.\n"
+              "- Capacitive soil moisture sensors read each pot.\n"
+              "- A 12 V peristaltic pump waters a pot when its moisture drops below 30%.\n"
+              "- Readings are logged over MQTT to the Mac mini.\n"
+              "- The pump is driven through a logic-level MOSFET with a flyback diode.\n"
+              "- Each pot has its own solenoid valve on a shared manifold.\n"
+              "- The tank holds 5 litres and has a float switch for low water.\n"
+              "- Firmware updates go over the air.\n"
+              "- A small OLED shows the last watering time per pot.\n"},
+]
+AUTO_APPROVE = [False]
+
+
+def facts(item: dict) -> dict:
+    """What a change added and removed, as the real backend sends it."""
+    old = [l[2:] for l in item["before"].splitlines() if l.startswith("- ")]
+    new = [l[2:] for l in item["after"].splitlines() if l.startswith("- ")]
+    return {"facts": [l for l in new if l not in old], "dropped": [l for l in old if l not in new]}
+
+
+async def memory_demo(ws: WebSocket, data: dict, items: list) -> None:
+    """Answer the review card like the real backend would (without a memory service)."""
+    if data.get("type") == "memory_auto_approve":
+        AUTO_APPROVE[0] = bool(data.get("on"))
+        await ws.send_json({"type": "memory_settings", "auto_approve": AUTO_APPROVE[0]})
+        if AUTO_APPROVE[0]:  # like the Mac: what's waiting is approved too
+            for item in list(items):
+                items.remove(item)
+                await ws.send_json({"type": "memory_committed", "kind": "auto",
+                                    "summary": item["summary"], **facts(item)})
+            await ws.send_json({"type": "memory_proposals", "items": items})
+        return
+    if data.get("type") == "memory_undo":
+        await ws.send_json({"type": "memory_committed", "kind": "undo", "summary": "memory: the last change"})
+        return
+    slug, decision = data.get("slug"), data.get("decision")
+    item = next((i for i in items if i["slug"] == slug), None)
+    if not item:
+        return
+    if decision == "edit" and not str(data.get("text", "")).startswith("# "):
+        item["error"] = "edit rejected: lost the title line"
+    else:
+        items.remove(item)
+        if decision in ("accept", "edit"):
+            kind = "approved" if decision == "accept" else "edited"
+            await ws.send_json({"type": "memory_committed", "kind": kind,
+                                "summary": item["summary"], **facts(item)})
+    await ws.send_json({"type": "memory_proposals", "items": items})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     # The overlay starts out showing "booting"; tell it the (instant) mock is ready
     await ws.send_json({"type": "status", "state": "idle", "label": "idle"})
     history: List[Dict[str, str]] = []
+    proposals = [dict(p) for p in SAMPLE_PROPOSALS] if MEMORY_DEMO else []
+    if "--busy" in sys.argv:
+        await ws.send_json({"type": "status", "state": "thinking", "label": "thinking"})
+    if MEMORY_DEMO:
+        await ws.send_json({"type": "memory_settings", "auto_approve": AUTO_APPROVE[0]})
+        await ws.send_json({"type": "memory_proposals", "items": proposals})
+        await ws.send_json({"type": "memory_committed", "kind": "remember",
+                            "summary": "- Tudor's bench PSU is a Riden RD6024.",
+                            "facts": ["Tudor's bench PSU is a Riden RD6024."]})
 
     try:
         while True:
             raw_msg = await ws.receive_text()
             data = json.loads(raw_msg)
+
+            if MEMORY_DEMO and data.get("type") in ("memory_decision", "memory_undo",
+                                                    "memory_auto_approve"):
+                await memory_demo(ws, data, proposals)
+                continue
 
             if data.get("type") == "compact":  # the input pill's circle button
                 await ws.send_json({"type": "status", "state": "compacting", "label": "compacting"})
@@ -152,4 +235,4 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("MOCK_PORT", "8001")))

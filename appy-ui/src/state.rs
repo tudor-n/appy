@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use gtk4::Label;
 use gtk4::prelude::*;
 
-use crate::layout::{Placement, Point};
+use crate::layout::{Placement, Point, VSide};
 use crate::protocol::{AppyState, Effort, Expression};
 
 /// How long the chat stays visible after backend activity, so you can read the reply.
@@ -46,6 +46,10 @@ pub struct SharedState {
     pub blink: Blink,
     /// The weather card, while it's on screen.
     pub card: Option<Card>,
+    /// The memory service's auto-approve setting; None until the brain says.
+    pub auto_approve: Option<bool>,
+    /// Whether the memory panel sits above or below the chat.
+    pub memory_side: VSide,
 }
 
 impl SharedState {
@@ -72,6 +76,8 @@ impl SharedState {
             wobble: Wobble::default(),
             blink: Blink::new(now),
             card: None,
+            auto_approve: None,
+            memory_side: VSide::default(),
         }
     }
 
@@ -97,8 +103,23 @@ impl SharedState {
         }
     }
 
+    /// The pointer is over the memory panel: keeps the chat open like the chat itself.
+    pub fn set_memory_hover(&mut self, hovered: bool, now: Instant) {
+        if self.hover.memory != hovered {
+            self.hover.memory = hovered;
+            self.after_hover_change(now);
+        }
+    }
+
+    /// The memory panel went away (last proposal decided, or Later) while it may have been
+    /// under the pointer, which then never gets a `leave`: let go of its hover with the
+    /// usual grace, so the chat (and the chip that just landed) doesn't snap shut.
+    pub fn memory_panel_hidden(&mut self, now: Instant) {
+        self.set_memory_hover(false, now);
+    }
+
     fn after_hover_change(&mut self, now: Instant) {
-        if self.hover.mascot || self.hover.panel {
+        if self.hover.mascot || self.hover.panel || self.hover.memory {
             self.hover.grace_until = None;
         } else {
             // Pointer left everything: start the grace period, and let an explicit
@@ -167,12 +188,16 @@ pub fn format_duration(d: Duration) -> String {
 pub struct Hover {
     pub mascot: bool,
     pub panel: bool,
+    pub memory: bool,
     pub grace_until: Option<Instant>,
 }
 
 impl Hover {
     pub fn is_hovered(&self, now: Instant) -> bool {
-        self.mascot || self.panel || self.grace_until.is_some_and(|until| now < until)
+        self.mascot
+            || self.panel
+            || self.memory
+            || self.grace_until.is_some_and(|until| now < until)
     }
 }
 
@@ -392,6 +417,32 @@ mod tests {
         s.set_mascot_hover(true, t0);
         assert!(s.should_show_chat(false, t0));
         s.set_mascot_hover(false, t0);
+        assert!(s.should_show_chat(false, t0 + ms(100)));
+        assert!(!s.should_show_chat(false, t0 + ms(400)));
+    }
+
+    #[test]
+    fn moving_from_the_chat_to_the_memory_panel_keeps_the_chat_open() {
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.state = AppyState::Idle; // booted
+        s.set_panel_hover(true, t0);
+        s.set_panel_hover(false, t0); // crossing the click-through gap
+        s.set_memory_hover(true, t0 + ms(80));
+        assert!(s.should_show_chat(false, t0 + ms(5000)));
+        s.set_memory_hover(false, t0 + ms(5000));
+        assert!(!s.should_show_chat(false, t0 + ms(5400)));
+    }
+
+    #[test]
+    fn deciding_the_last_proposal_keeps_the_chat_open_briefly() {
+        // The panel goes away under the pointer: the usual grace, not an instant close
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.state = AppyState::Idle; // booted
+        s.set_memory_hover(true, t0);
+        s.memory_panel_hidden(t0);
+        assert!(!s.hover.memory);
         assert!(s.should_show_chat(false, t0 + ms(100)));
         assert!(!s.should_show_chat(false, t0 + ms(400)));
     }
