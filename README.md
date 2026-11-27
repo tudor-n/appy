@@ -131,10 +131,12 @@ note; review it again when it comes back. While a proposal is being redone it ca
 denied or edited. The panel refreshes when Appy starts, after each decision, and every minute.
 
 Every change to memory (a remember, a forget, an approved, edited or auto-approved proposal)
-adds a chip to the chat, like "Saved: Added the helmet HUD hardware", with **Undo**, which
-reverts the newest change (only the newest chip's Undo is live); the "Undid" chip that follows
-offers "Undo earlier" to go further back. Undoing an approved proposal puts it back in the
-panel; undoing an auto-approved one just reverts it.
+shows up as a small centred pill in the chat, one per burst: "Remembered a fact", "Remembered 3
+facts", "Forgot a fact". Hover it and it unfolds into the facts themselves (a replaced fact
+struck through), with **Undo**, which takes back everything in that pill. Only the newest
+pill's Undo is live; the "Undid" pill that follows offers "Undo earlier" to go further back.
+Undoing an approved proposal puts it back in the panel; undoing an auto-approved one just
+reverts it.
 
 Appy knows about every change right away: his memory in the system prompt is built once at
 startup (so the prompt stays cached), and changes made during the session ride along with your
@@ -144,7 +146,7 @@ KA3005P.; no longer says: The PSU is a Riden RD6024.]`.
 
 **Auto-approve.** Right-click the panel pill → **Auto-approve memories** (shown while Appy runs).
 With it on, nothing waits for review: what the consolidator learns is committed straight away
-(still through the same checks) as `memory: … [auto]`, and an "Auto-saved: …" chip with Undo
+(still through the same checks) as `memory: … [auto]`, and a "Remembered …" pill with Undo
 shows up if Appy is running. Turning it on also approves what's already waiting. The setting
 lives on the Mac (`~/appy-data/settings.json`), so it holds across launches and covers sessions
 processed while the laptop is off.
