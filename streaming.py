@@ -34,6 +34,20 @@ def pop_ready_chunk(buf: str) -> tuple[str | None, str]:
     return parts[0].strip(), parts[1]
 
 
+# Kokoro's phonemizer reads a decimal point as a pause ("5.5" -> "five five", "3.14" ->
+# "three fourteen") and a thousands comma as a pause ("1,500" -> "one, five hundred").
+THOUSANDS_COMMA = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+# A single decimal point between digits; skips versions and IPs ("2.0.1", "192.168.1.1")
+DECIMAL = re.compile(r"(?<![\d.])(\d+)\.(\d+)(?![\d]|\.\d)")
+
+
+def speakable(text: str) -> str:
+    """Rewrite numbers so Kokoro says them right ("5.5" -> "5 point 5"). Only for the
+    audio: the chat keeps showing the original text."""
+    text = THOUSANDS_COMMA.sub("", text)
+    return DECIMAL.sub(lambda m: f"{m.group(1)} point {' '.join(m.group(2))}", text)
+
+
 class SpeechChunker:
     """Accumulates streamed text and hands back sentences ready for TTS."""
 
