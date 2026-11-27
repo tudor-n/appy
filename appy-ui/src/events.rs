@@ -30,7 +30,10 @@ impl App {
         let mut s = self.state.borrow_mut();
 
         // Activity keeps the chat open for a bit; a silent sync shouldn't
-        if !matches!(ev, BackendEvent::Effort { .. } | BackendEvent::Context { .. }) {
+        if !matches!(
+            ev,
+            BackendEvent::Effort { .. } | BackendEvent::Context { .. } | BackendEvent::Mode { .. }
+        ) {
             s.trigger_voice_cooldown(now);
         }
 
@@ -64,6 +67,11 @@ impl App {
             BackendEvent::Effort { value } => {
                 s.effort = value;
                 self.ui.input.effort.show(value);
+            }
+            BackendEvent::Mode { value } => {
+                // Switch the face right away; the next reply (if any) sets its own
+                s.mode = value;
+                s.expression = value.resting_expression();
             }
             BackendEvent::Context { tokens, limit } => {
                 self.ui.input.compact.set_context(tokens, limit);

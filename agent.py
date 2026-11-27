@@ -123,9 +123,14 @@ class Agent:
         context_limit: int = CONTEXT_TOKENS,
         compaction_dump: Path | None = None,
         note_attacher=None,
+        pinned_expression=lambda: None,
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
         UI can show a card for it. Its errors are logged, never fatal to the turn.
+
+        `pinned_expression()`, if it returns a face, replaces the one the model tagged
+        (focus mode always shows "focused"; see tools.pinned_expression). It's read after
+        each round, so a set_mode call earlier in the turn already counts.
 
         Calls to `stale_tools` are removed from the history once the turn is over, so
         the model calls them again next time instead of reusing old data (which also
@@ -139,6 +144,7 @@ class Agent:
         self.tools = tools
         self.run_tool = run_tool
         self.on_tool_result = on_tool_result
+        self.pinned_expression = pinned_expression
         self.log = log or NullLogger()
         self.stale_tools = stale_tools
         self.compact_at = compact_at
@@ -461,4 +467,5 @@ class Agent:
         if speak_aloud and tail:
             self.speaker.speak(tail)
 
-        return reply.strip(), tags.expression, [tool_calls[i] for i in sorted(tool_calls)]
+        expression = self.pinned_expression() or tags.expression
+        return reply.strip(), expression, [tool_calls[i] for i in sorted(tool_calls)]

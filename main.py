@@ -68,6 +68,7 @@ def main():
         on_user_text=on_user_text,
         on_set_effort=set_effort,
         get_effort=lambda: effort_state["value"],
+        get_mode=tools.current_mode,
         on_compact=lambda: turn_queue.put(("compact", "")),
         on_memory_decision=on_memory_decision,
         on_memory_undo=on_memory_undo,
@@ -95,6 +96,8 @@ def main():
         """Pop a card out next to Appy for tools that have one."""
         if name == "get_weather" and (card := tools.weather_card(result)):
             ui.widget(card)
+        if name == "set_mode":  # the mascot's resting face shows the mode
+            ui.mode(tools.current_mode())
         if review_box["review"]:  # "Remembered: ..." chip with Undo
             review_box["review"].tool_committed(name, result)
         if attacher and name in ("memory_remember", "memory_forget"):
@@ -150,6 +153,7 @@ def main():
         # APPY_DUMP_COMPACTION=1: write each compaction's prompt + summary next to the log
         compaction_dump=log.path.with_suffix("") if os.getenv("APPY_DUMP_COMPACTION") else None,
         note_attacher=attacher,
+        pinned_expression=tools.pinned_expression,
     )
 
     def on_memory_change(line: str):

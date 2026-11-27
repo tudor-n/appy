@@ -93,6 +93,26 @@ pub enum Expression {
     Skeptical,
 }
 
+/// How Appy talks (tools.VALID_MODES on the Python side). Focus mode shows as the
+/// focused face, which the mascot also rests on between replies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Banter,
+    Focus,
+}
+
+impl Mode {
+    /// The face the mascot relaxes to when nothing else is going on.
+    pub fn resting_expression(self) -> Expression {
+        match self {
+            Mode::Banter => Expression::Neutral,
+            Mode::Focus => Expression::Focused,
+        }
+    }
+}
+
 /// Backend -> UI.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -115,6 +135,10 @@ pub enum BackendEvent {
     },
     Effort {
         value: Effort,
+    },
+    /// Appy's mode; sent on connect and whenever it changes.
+    Mode {
+        value: Mode,
     },
     /// How much of the context the conversation uses; at `limit` it's compacted
     /// automatically. Drives the compact ring on the input pill.
@@ -298,6 +322,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resting_face_shows_the_mode() {
+        assert_eq!(Mode::default(), Mode::Banter);
+        assert_eq!(Mode::Banter.resting_expression(), Expression::Neutral);
+        assert_eq!(Mode::Focus.resting_expression(), Expression::Focused);
+    }
+
+    #[test]
     fn parses_backend_events() {
         let ev: BackendEvent =
             serde_json::from_str(r#"{"type":"status","state":"thinking","label":"thinking"}"#)
@@ -321,6 +352,9 @@ mod tests {
 
         let ev: BackendEvent = serde_json::from_str(r#"{"type":"effort","value":"none"}"#).unwrap();
         assert!(matches!(ev, BackendEvent::Effort { value: Effort::Off }));
+
+        let ev: BackendEvent = serde_json::from_str(r#"{"type":"mode","value":"focus"}"#).unwrap();
+        assert!(matches!(ev, BackendEvent::Mode { value: Mode::Focus }));
 
         let ev: BackendEvent =
             serde_json::from_str(r#"{"type":"context","tokens":4200,"limit":9500}"#).unwrap();
