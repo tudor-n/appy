@@ -43,8 +43,10 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(seen["auth"], "Bearer k")
         body = seen["body"]
         self.assertEqual(body["model"], "gemma")
-        self.assertEqual(body["reasoning_effort"], "low")
-        self.assertEqual((body["temperature"], body["max_tokens"]), (0.1, 3400))
+        # Forced JSON never reasons: with reasoning on, Gemma (LM Studio) loops inside the
+        # JSON string until it runs out of tokens
+        self.assertEqual(body["reasoning_effort"], "none")
+        self.assertEqual((body["temperature"], body["max_tokens"]), (0.1, 400))
         self.assertEqual(body["response_format"]["type"], "json_schema")
         self.assertEqual(body["response_format"]["json_schema"]["schema"], {"type": "object"})
 
@@ -57,6 +59,9 @@ class LLMTests(unittest.TestCase):
 
         self.assertEqual(self.make(handler).chat([], temperature=0.1, max_tokens=5), ("hi", 0))
         self.assertNotIn("response_format", seen["body"])
+        # plain text (the rewrite) reasons at the configured effort, with room for it
+        self.assertEqual(seen["body"]["reasoning_effort"], "low")
+        self.assertEqual(seen["body"]["max_tokens"], 5 + 3000)
 
     def test_reasoning_gets_headroom_and_empty_output_fails(self):
         seen = []
