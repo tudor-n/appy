@@ -18,6 +18,7 @@ class UiBridge:
         on_user_text: Optional[Callable[[str], None]] = None,
         on_set_effort: Optional[Callable[[str], None]] = None,
         get_effort: Optional[Callable[[], str]] = None,
+        get_mode: Optional[Callable[[], str]] = None,
         on_compact: Optional[Callable[[], None]] = None,
         on_memory_decision: Optional[Callable[[str, str, Optional[str], Optional[str]], None]] = None,
         on_memory_undo: Optional[Callable[[Optional[list]], None]] = None,
@@ -29,6 +30,7 @@ class UiBridge:
         self.on_user_text = on_user_text
         self.on_set_effort = on_set_effort
         self.get_effort = get_effort
+        self.get_mode = get_mode
         self.on_compact = on_compact
         self.on_memory_decision = on_memory_decision
         self.on_memory_undo = on_memory_undo
@@ -52,6 +54,9 @@ class UiBridge:
                 # Sync the UI's effort picker with the backend's current value
                 if self.get_effort:
                     await ws.send_json({"type": "effort", "value": self.get_effort()})
+                # ...and the mascot's resting face with the current mode
+                if self.get_mode:
+                    await ws.send_json({"type": "mode", "value": self.get_mode()})
                 if self.last_status:
                     await ws.send_json(self.last_status)
                 if self.last_proposals:
@@ -156,6 +161,10 @@ class UiBridge:
 
     def effort(self, value: str):
         self.emit({"type": "effort", "value": value})
+
+    def mode(self, value: str):
+        """Appy's mode ("banter" | "focus"): the overlay rests on the focused face in focus."""
+        self.emit({"type": "mode", "value": value})
 
     def memory_proposals(self, items: list):
         """The whole review list (empty = nothing to review); see PROTOCOL.md."""

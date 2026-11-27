@@ -8,7 +8,7 @@ use gtk4::Label;
 use gtk4::prelude::*;
 
 use crate::layout::{Placement, Point, VSide};
-use crate::protocol::{AppyState, Effort, Expression};
+use crate::protocol::{AppyState, Effort, Expression, Mode};
 
 /// How long the chat stays visible after backend activity, so you can read the reply.
 const VOICE_COOLDOWN: Duration = Duration::from_secs(8);
@@ -25,6 +25,8 @@ pub struct SharedState {
     pub state: AppyState,
     pub expression: Expression,
     pub effort: Effort,
+    /// Appy's mode, from the backend; decides the resting face.
+    pub mode: Mode,
     /// Phase of the busy dots animation.
     pub phase: f64,
     /// Phase of the talking bounce.
@@ -91,6 +93,7 @@ impl SharedState {
             state: AppyState::Booting,
             expression: Expression::Neutral,
             effort: Effort::Off,
+            mode: Mode::Banter,
             phase: 0.0,
             talk_phase: 0.0,
             speaking_until: None,

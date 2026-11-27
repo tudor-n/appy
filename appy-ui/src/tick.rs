@@ -15,7 +15,7 @@ use crate::chat::format_live_dots;
 use crate::input::set_class;
 use crate::layout::{self, Rect};
 use crate::mascot::BUSY_PHASE_WRAP;
-use crate::protocol::{AppyState, Expression};
+use crate::protocol::AppyState;
 use crate::state::{FRAME_SECS, SharedState, per_frame};
 use crate::weather::CARD_SIZE;
 
@@ -315,9 +315,11 @@ impl App {
         ui.input.effort.collapse();
         // Put away scrolled up: it comes back showing the newest messages, at its usual size
         ui.chat.pin_to_bottom();
-        // Relax back to the neutral face once the conversation is put away
-        if s.state == AppyState::Idle && s.expression != Expression::Neutral {
-            s.expression = Expression::Neutral;
+        // Relax back to the resting face (neutral, or focused in focus mode) once the
+        // conversation is put away
+        let resting = s.mode.resting_expression();
+        if s.state == AppyState::Idle && s.expression != resting {
+            s.expression = resting;
             self.sync_pill(s);
             return true;
         }

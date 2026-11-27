@@ -28,6 +28,18 @@ class UiBridgeTests(unittest.TestCase):
         self.assertEqual(first, {"type": "effort", "value": "none"})
         self.assertEqual(second, {"type": "status", "state": "booting", "label": "booting"})
 
+    def test_client_gets_the_mode_on_connect(self):
+        bridge = UiBridge(get_mode=lambda: "focus")
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            self.assertEqual(receive(ws), {"type": "mode", "value": "focus"})
+
+    def test_mode_is_sent(self):
+        bridge = UiBridge()
+        sent = []
+        bridge.emit = sent.append
+        bridge.mode("banter")
+        self.assertEqual(sent, [{"type": "mode", "value": "banter"}])
+
     def test_replays_only_the_latest_status(self):
         bridge = UiBridge()
         bridge.status("booting")

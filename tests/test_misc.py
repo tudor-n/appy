@@ -380,6 +380,11 @@ class ModeTests(unittest.TestCase):
         self.assertIn("set_mode", names)
         self.assertNotIn("set_mode", tools.STALE_TOOLS)
 
+    def test_pinned_expression(self):
+        self.assertIsNone(tools.pinned_expression())
+        tools.set_mode("focus")
+        self.assertEqual(tools.pinned_expression(), "focused")
+
     def test_banter_stamp(self):
         self.assertEqual(tools.turn_stamp("09:00 AM"), "[09:00 AM \u00b7 BANTER]")
 

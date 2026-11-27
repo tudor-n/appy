@@ -314,6 +314,12 @@ def set_mode(mode: str) -> str:
     return json.dumps({"mode": mode, "note": f"Mode is now {mode.upper()}. Reply in {mode} mode."})
 
 
+def pinned_expression() -> str | None:
+    """The face every reply gets in the current mode, or None to let the model pick.
+    The focused face is how Tudor can tell focus mode is on."""
+    return "focused" if _mode["value"] == "focus" else None
+
+
 def turn_stamp(now: str) -> str:
     """The tag that starts every user message: `[10:32 PM · FOCUS]`."""
     return f"[{now} \u00b7 {current_mode().upper()}]"

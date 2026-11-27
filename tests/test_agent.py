@@ -39,6 +39,29 @@ def run_quietly(agent: Agent, text: str, **kwargs):
 
 
 class AgentTurnTests(unittest.TestCase):
+    def test_pinned_expression_overrides_the_tag(self):
+        agent, _, _, ui = make_agent([[text_chunk("[happy] Done.")]], pinned_expression=lambda: "focused")
+        run_quietly(agent, "hi")
+        self.assertIn(("response", "Done.", "focused"), ui.events)
+
+    def test_no_pin_keeps_the_tag(self):
+        agent, _, _, ui = make_agent([[text_chunk("[happy] Done.")]], pinned_expression=lambda: None)
+        run_quietly(agent, "hi")
+        self.assertIn(("response", "Done.", "happy"), ui.events)
+
+    def test_pin_is_read_after_the_tool_round(self):
+        # set_mode runs in round 0; the reply in round 1 must already use the new mode
+        mode = {"pin": None}
+        def run_tool(name, args):
+            mode["pin"] = "focused"
+            return "{}"
+        agent, _, _, ui = make_agent([
+            [tool_chunk(0, "c1", "set_mode", '{"mode":"focus"}')],
+            [text_chunk("[neutral] Locked in.")],
+        ], run_tool=run_tool, pinned_expression=lambda: mode["pin"])
+        run_quietly(agent, "lock in")
+        self.assertIn(("response", "Locked in.", "focused"), ui.events)
+
     def test_plain_reply_is_spoken_shown_and_recorded(self):
         agent, _, speaker, ui = make_agent([[
             text_chunk("[happy] Hello"),

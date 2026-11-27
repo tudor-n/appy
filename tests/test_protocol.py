@@ -69,6 +69,11 @@ class ProtocolDriftTests(unittest.TestCase):
     def test_efforts_match(self):
         self.assertEqual(set(rust_enum("Effort").values()), set(VALID_EFFORTS))
 
+    def test_modes_match(self):
+        import tools
+
+        self.assertEqual(set(rust_enum("Mode").values()), set(tools.VALID_MODES))
+
     def test_status_states_are_known_to_ui(self):
         self.assertLessEqual(PYTHON_STATES, set(rust_enum("AppyState").values()))
 
