@@ -46,6 +46,8 @@ pub struct SharedState {
     pub blink: Blink,
     /// The weather card, while it's on screen.
     pub card: Option<Card>,
+    /// The memory service's auto-approve setting; None until the brain says.
+    pub auto_approve: Option<bool>,
 }
 
 impl SharedState {
@@ -72,6 +74,7 @@ impl SharedState {
             wobble: Wobble::default(),
             blink: Blink::new(now),
             card: None,
+            auto_approve: None,
         }
     }
 

@@ -12,6 +12,20 @@ PlasmoidItem {
 
     Plasmoid.contextualActions: [
         PlasmaCore.Action {
+            // What Appy learns is saved without review (the overlay still shows a chip
+            // with Undo). Hidden until the running Appy reports the setting.
+            text: "Auto-approve memories"
+            icon.name: "dialog-ok-apply"
+            checkable: true
+            checked: root.autoApprove === true
+            visible: root.connected && root.autoApprove !== null
+            onTriggered: {
+                var xhr = new XMLHttpRequest();
+                xhr.open("POST", "http://127.0.0.1:8002/auto-approve");
+                xhr.send();
+            }
+        },
+        PlasmaCore.Action {
             text: "Quit Appy"
             icon.name: "application-exit"
             visible: root.connected
@@ -28,6 +42,8 @@ PlasmoidItem {
     property int msgCount: 0
     property bool minimized: false
     property bool connected: false
+    // The memory service's auto-approve setting (null: unknown, or memory is off)
+    property var autoApprove: null
     property real phase: 0.0
     property real talkPhase: 0.0
     property real blinkScale: 1.0
@@ -101,11 +117,14 @@ PlasmoidItem {
                             root.appyExpression = data.expression || "neutral";
                             root.msgCount = data.msg_count || 0;
                             root.minimized = !!data.minimized;
+                            root.autoApprove = (typeof data.auto_approve === "boolean")
+                                ? data.auto_approve : null;
                         } catch (e) {}
                     } else {
                         root.connected = false;
                         root.minimized = false;
                         root.msgCount = 0;
+                        root.autoApprove = null;
                     }
                 }
             };

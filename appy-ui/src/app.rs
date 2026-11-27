@@ -115,6 +115,12 @@ impl App {
         match ev {
             UiEvent::ToggleOverlay => self.toggle_overlay(),
             UiEvent::Quit => self.gtk_app.quit(),
+            UiEvent::ToggleAutoApprove => {
+                let current = self.state.borrow().auto_approve;
+                if let Some(on) = current {
+                    let _ = self.ws_tx.send(ClientEvent::MemoryAutoApprove { on: !on });
+                }
+            }
             UiEvent::Backend(ev) => self.on_backend(ev),
         }
     }
@@ -140,6 +146,7 @@ impl App {
                 expression: s.expression,
                 msg_count: s.message_count,
                 minimized: !self.ui.window.is_visible(),
+                auto_approve: s.auto_approve,
             };
         }
     }

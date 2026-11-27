@@ -80,6 +80,7 @@ impl App {
                 });
                 self.ui.chat.push_chip(&chip_text(kind, &summary), undo);
             }
+            BackendEvent::MemorySettings { auto_approve } => s.auto_approve = Some(auto_approve),
         }
 
         self.sync_pill(&s);

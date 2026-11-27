@@ -1,7 +1,7 @@
 //! Tiny HTTP endpoint on 127.0.0.1:8002 for the KDE Plasma panel pill (appy-pill/).
 //!
 //! `GET /state` returns a `PillSyncState` snapshot (polled every 200ms by the pill);
-//! `POST /toggle` and `POST /quit` control the overlay. Localhost only, one request per
+//! `POST /toggle`, `POST /quit` and `POST /auto-approve` control the overlay. Localhost only, one request per
 //! connection, so a hand-rolled responder is enough.
 
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,7 @@ const ADDR: &str = "127.0.0.1:8002";
 enum Route {
     Toggle,
     Quit,
+    AutoApprove,
     State,
 }
 
@@ -26,6 +27,8 @@ fn route(request: &str) -> Route {
         Route::Toggle
     } else if request.starts_with("POST /quit") {
         Route::Quit
+    } else if request.starts_with("POST /auto-approve") {
+        Route::AutoApprove
     } else {
         Route::State
     }
@@ -71,6 +74,10 @@ async fn handle(
             let _ = ui_tx.send(UiEvent::Quit).await;
             r#"{"ok":true}"#.to_string()
         }
+        Route::AutoApprove => {
+            let _ = ui_tx.send(UiEvent::ToggleAutoApprove).await;
+            r#"{"ok":true}"#.to_string()
+        }
         Route::State => {
             let snapshot = pill_sync.lock().map(|g| g.clone()).unwrap_or_default();
             serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into())
@@ -88,6 +95,7 @@ mod tests {
         assert_eq!(route("POST /toggle HTTP/1.1\r\n"), Route::Toggle);
         assert_eq!(route("POST /quit HTTP/1.1\r\n"), Route::Quit);
         assert_eq!(route("GET /state HTTP/1.1\r\n"), Route::State);
+        assert_eq!(route("POST /auto-approve HTTP/1.1\r\n"), Route::AutoApprove);
         assert_eq!(route(""), Route::State);
     }
 

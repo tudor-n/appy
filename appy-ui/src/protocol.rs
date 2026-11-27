@@ -127,6 +127,10 @@ pub enum BackendEvent {
         kind: MemoryKind,
         summary: String,
     },
+    /// The memory service's settings (sent on connect and after every change).
+    MemorySettings {
+        auto_approve: bool,
+    },
 }
 
 /// One note's pending update: the whole note before and after.
@@ -230,6 +234,8 @@ pub enum ClientEvent {
     },
     /// Undo the newest memory change.
     MemoryUndo,
+    /// Turn auto-approve on or off (the panel pill's menu).
+    MemoryAutoApprove { on: bool },
 }
 
 /// Snapshot served to the panel pill at `GET /state`.
@@ -239,6 +245,8 @@ pub struct PillSyncState {
     pub expression: Expression,
     pub msg_count: usize,
     pub minimized: bool,
+    /// None until the brain says (or with memory off): the pill hides its toggle.
+    pub auto_approve: Option<bool>,
 }
 
 impl Default for PillSyncState {
@@ -248,6 +256,7 @@ impl Default for PillSyncState {
             expression: Expression::Neutral,
             msg_count: 0,
             minimized: true,
+            auto_approve: None,
         }
     }
 }
@@ -257,6 +266,8 @@ impl Default for PillSyncState {
 pub enum UiEvent {
     ToggleOverlay,
     Quit,
+    /// The panel pill's "Auto-approve memories" item: flip the current setting.
+    ToggleAutoApprove,
     Backend(BackendEvent),
 }
 
@@ -421,6 +432,25 @@ mod tests {
         );
         let json = serde_json::to_string(&ClientEvent::MemoryUndo).unwrap();
         assert_eq!(json, r#"{"type":"memory_undo"}"#);
+        let json = serde_json::to_string(&ClientEvent::MemoryAutoApprove { on: true }).unwrap();
+        assert_eq!(json, r#"{"type":"memory_auto_approve","on":true}"#);
+    }
+
+    #[test]
+    fn parses_memory_settings_and_auto_chips() {
+        let ev: BackendEvent =
+            serde_json::from_str(r#"{"type":"memory_settings","auto_approve":true}"#).unwrap();
+        assert!(matches!(ev, BackendEvent::MemorySettings { auto_approve: true }));
+        let ev: BackendEvent =
+            serde_json::from_str(r#"{"type":"memory_committed","kind":"auto","summary":"x"}"#)
+                .unwrap();
+        assert!(matches!(
+            ev,
+            BackendEvent::MemoryCommitted {
+                kind: MemoryKind::Auto,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -428,7 +458,7 @@ mod tests {
         let json = serde_json::to_string(&PillSyncState::default()).unwrap();
         assert_eq!(
             json,
-            r#"{"state":"idle","expression":"neutral","msg_count":0,"minimized":true}"#
+            r#"{"state":"idle","expression":"neutral","msg_count":0,"minimized":true,"auto_approve":null}"#
         );
     }
 }
