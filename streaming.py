@@ -4,11 +4,12 @@ Nothing in here does I/O, so it is all unit-testable (see tests/test_streaming.p
 """
 import re
 
+# Speech is cut into whole sentences only. Kokoro voices each chunk as its own
+# utterance, so a chunk ending at a comma got a sentence's falling tone ("That sounds
+# like a plan, boss." came out as "...a plan. Boss."). Splitting the first sentence at
+# a comma used to buy a head start while Kokoro ran on the CPU; on the GPU a whole
+# sentence takes ~100ms, and a short opener ("Finally.") now starts on its own.
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
-CLAUSE_END = re.compile(r"(?<=[.!?,;:—])\s+")
-# The first chunk may end at a clause boundary so speech starts sooner, but only once
-# it's long enough to sound natural ("It's going fine," yes; "Let me check," no).
-MIN_FIRST_CLAUSE = 16
 
 TAG_RE = re.compile(r"^\s*\[([a-zA-Z]+)\]\s*(.*)$", re.DOTALL)
 VALID_EXPRESSIONS = frozenset({
@@ -22,41 +23,32 @@ VALID_EXPRESSIONS = frozenset({
 })
 
 
-def pop_ready_chunk(buf: str, first_chunk: bool) -> tuple[str | None, str]:
-    """Split off the first speakable chunk of `buf`, returning (chunk, rest).
+def pop_ready_chunk(buf: str) -> tuple[str | None, str]:
+    """Split the first complete sentence off `buf`, returning (sentence, rest).
 
-    Returns (None, buf) when no complete chunk is available yet.
+    Returns (None, buf) when no complete sentence is available yet.
     """
-    pattern = CLAUSE_END if first_chunk else SENTENCE_END
-    parts = pattern.split(buf)
-    if len(parts) <= 1:
+    parts = SENTENCE_END.split(buf, maxsplit=1)
+    if len(parts) == 1:
         return None, buf
-
-    acc = ""
-    for idx, part in enumerate(parts[:-1]):
-        acc = f"{acc} {part}".strip() if acc else part.strip()
-        if not first_chunk or len(acc) >= MIN_FIRST_CLAUSE:
-            rest = " ".join(parts[idx + 1 :])
-            return acc, rest
-    return None, buf
+    return parts[0].strip(), parts[1]
 
 
 class SpeechChunker:
-    """Accumulates streamed text and hands back chunks ready for TTS."""
+    """Accumulates streamed text and hands back sentences ready for TTS."""
 
     def __init__(self):
         self._buf = ""
-        self._sent_first = False
 
     def feed(self, text: str) -> list[str]:
         self._buf += text
         ready = []
         while True:
-            chunk, self._buf = pop_ready_chunk(self._buf, not self._sent_first)
-            if not chunk:
+            chunk, self._buf = pop_ready_chunk(self._buf)
+            if chunk is None:
                 return ready
-            ready.append(chunk)
-            self._sent_first = True
+            if chunk:
+                ready.append(chunk)
 
     def flush(self) -> str:
         """Return whatever is left over (possibly empty) and reset the buffer."""
