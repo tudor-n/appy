@@ -1,15 +1,19 @@
-//! Long-term memory in the overlay: the review tray (what the consolidator learned,
-//! waiting for Accept / Deny / Edit) and the chips for memory commits.
+//! Long-term memory in the overlay: the review panel (what the consolidator learned,
+//! waiting for Approve / Deny / Edit) and the chips for memory commits.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, PolicyType, ScrolledWindow, TextView, glib};
+use gtk4::{
+    Align, Box as GtkBox, Button, EventControllerScroll, EventControllerScrollFlags, Label,
+    Orientation, PolicyType, ScrolledWindow, Stack, StackTransitionType, TextView, glib,
+};
 
+use crate::input::set_class;
 use crate::protocol::{Decision, MemoryKind, Proposal};
 
-const TRAY_MAX_HEIGHT: i32 = 260;
 const EDIT_MIN_HEIGHT: i32 = 140;
 
 
@@ -79,10 +83,6 @@ pub fn diff_lines(before: &str, after: &str) -> Vec<DiffLine> {
     out
 }
 
-pub fn tray_label(n: usize) -> String {
-    format!("{n} memory update{}", if n == 1 { "" } else { "s" })
-}
-
 pub fn chip_text(kind: MemoryKind, summary: &str) -> String {
     let fact = summary.strip_prefix("- ").unwrap_or(summary);
     match kind {
@@ -141,7 +141,6 @@ pub struct Outgoing {
 #[derive(Debug, Default)]
 pub struct TrayState {
     pub items: Vec<Proposal>,
-    pub expanded: bool,
     pub editing: Option<Editing>,
     /// The proposal on screen (one per page).
     pub page: usize,
@@ -319,64 +318,121 @@ pub fn undo_label(kind: MemoryKind) -> Option<&'static str> {
 
 type SendFn = dyn Fn(Outgoing);
 
-/// The collapsed "N memory updates" card above the input, expanding into one diff per
-/// note with Accept / Deny / Edit. Hidden while there's nothing to review.
+/// The panel's width; the chat is 290 px, the panel is wider so a note reads easily.
+pub const MEMORY_WIDTH: i32 = 360;
+/// A long diff scrolls inside its card past this, so the buttons never leave the card.
+const DIFF_MAX_HEIGHT: i32 = 180;
+const PAGE_TRANSITION_MS: u32 = 220;
+/// One wheel notch or touchpad swipe moves one page; more scrolling within this is ignored.
+const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
+
+/// The memory review panel: floats above (or below) the chat, one proposal per page with
+/// Approve / Deny / Edit, plus Later and Approve all. Placed by tick.rs.
 #[derive(Clone)]
-pub struct MemoryTray {
+pub struct MemoryPanel {
     pub root: GtkBox,
     inner: Rc<Inner>,
 }
 
 struct Inner {
-    header: Button,
-    scroller: ScrolledWindow,
-    list: GtkBox,
+    count: Label,
+    up: Button,
+    down: Button,
+    approve_all: Button,
+    stack: Stack,
     state: RefCell<TrayState>,
     on_send: RefCell<Option<Rc<SendFn>>>,
+    last_page_turn: Cell<Option<Instant>>,
 }
 
-impl MemoryTray {
+impl MemoryPanel {
     pub fn new() -> Self {
-        let root = GtkBox::new(Orientation::Vertical, 4);
-        root.add_css_class("memory-tray");
-        root.set_visible(false);
+        let root = GtkBox::new(Orientation::Vertical, 8);
+        root.add_css_class("memory-panel");
+        root.set_width_request(MEMORY_WIDTH);
+        root.set_valign(Align::Start);
+        root.set_halign(Align::Start);
+        root.set_can_target(false);
 
-        let header = Button::new();
+        let header = GtkBox::new(Orientation::Horizontal, 6);
         header.add_css_class("memory-header");
-        header.set_halign(Align::Fill);
-        header.set_focus_on_click(false);
+        let title = Label::new(Some("Memory"));
+        title.add_css_class("memory-heading");
+        let count = Label::new(None);
+        count.add_css_class("memory-count");
+        let spacer = GtkBox::new(Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        let up = nav_button("▲", "Previous");
+        let down = nav_button("▼", "Next");
+        let later = button("Later", false);
+        let approve_all = button("Approve all", true);
+        header.append(&title);
+        header.append(&count);
+        header.append(&spacer);
+        header.append(&up);
+        header.append(&down);
+        header.append(&later);
+        header.append(&approve_all);
         root.append(&header);
 
-        let list = GtkBox::new(Orientation::Vertical, 0);
-        let scroller = ScrolledWindow::builder()
-            .hscrollbar_policy(PolicyType::Never)
-            .vscrollbar_policy(PolicyType::Automatic)
-            .propagate_natural_height(true)
-            .max_content_height(TRAY_MAX_HEIGHT)
-            .child(&list)
-            .visible(false)
+        let stack = Stack::builder()
+            .vhomogeneous(true)
+            .hhomogeneous(true)
+            .transition_duration(PAGE_TRANSITION_MS)
             .build();
-        root.append(&scroller);
+        root.append(&stack);
 
-        let tray = Self {
+        let panel = Self {
             root,
             inner: Rc::new(Inner {
-                header,
-                scroller,
-                list,
+                count,
+                up,
+                down,
+                approve_all,
+                stack,
                 state: RefCell::new(TrayState::default()),
                 on_send: RefCell::new(None),
+                last_page_turn: Cell::new(None),
             }),
         };
-        let t = tray.clone();
-        tray.inner.header.connect_clicked(move |_| {
-            {
-                let mut state = t.inner.state.borrow_mut();
-                state.expanded = !state.expanded;
-            }
-            t.render();
+
+        let p = panel.clone();
+        panel.inner.up.connect_clicked(move |_| p.turn_page(-1));
+        let p = panel.clone();
+        panel.inner.down.connect_clicked(move |_| p.turn_page(1));
+        let p = panel.clone();
+        later.connect_clicked(move |_| {
+            p.inner.state.borrow_mut().later();
+            p.render();
         });
-        tray
+        let p = panel.clone();
+        panel.inner.approve_all.connect_clicked(move |_| {
+            let out = p.inner.state.borrow_mut().approve_all();
+            p.send(out);
+            p.render();
+        });
+
+        // DISCRETE: GTK turns touchpad deltas into whole steps, like wheel notches
+        let scroll = EventControllerScroll::new(
+            EventControllerScrollFlags::VERTICAL | EventControllerScrollFlags::DISCRETE,
+        );
+        let p = panel.clone();
+        scroll.connect_scroll(move |_, _, dy| {
+            if dy != 0.0 {
+                let now = Instant::now();
+                let cooling = p
+                    .inner
+                    .last_page_turn
+                    .get()
+                    .is_some_and(|t| now.duration_since(t) < PAGE_COOLDOWN);
+                if !cooling {
+                    p.turn_page(if dy > 0.0 { 1 } else { -1 });
+                }
+            }
+            glib::Propagation::Stop
+        });
+        panel.root.add_controller(scroll);
+        panel
     }
 
     /// Where decisions go (the App sends them to the backend).
@@ -390,51 +446,110 @@ impl MemoryTray {
         self.render();
     }
 
-    fn press(&self, slug: &str, action: Action) {
-        let out = self.inner.state.borrow_mut().press(slug, action);
-        if let Some(out) = out {
-            let send = self.inner.on_send.borrow().clone();
-            if let Some(send) = send {
-                send(out);
+    /// Something to review, and not put away with Later.
+    pub fn is_wanted(&self) -> bool {
+        let state = self.inner.state.borrow();
+        !state.items.is_empty() && !state.is_hidden()
+    }
+
+    /// Show or hide (with the chat's fade); hidden, it takes no clicks.
+    pub fn set_shown(&self, shown: bool) {
+        set_class(&self.root, "open", shown);
+        self.root.set_can_target(shown);
+    }
+
+    pub fn is_shown(&self) -> bool {
+        self.root.has_css_class("open")
+    }
+
+    /// Keyboard focus is in the panel (the Edit box): keep the chat open while typing.
+    pub fn contains_focus(&self) -> bool {
+        self.root.focus_child().is_some()
+    }
+
+    fn send(&self, out: Vec<Outgoing>) {
+        let send = self.inner.on_send.borrow().clone();
+        if let Some(send) = send {
+            for o in out {
+                send(o);
             }
         }
+    }
+
+    fn press(&self, slug: &str, action: Action) {
+        let out = self.inner.state.borrow_mut().press(slug, action);
+        self.send(out.into_iter().collect());
         self.render();
     }
 
-    fn render(&self) {
-        let inner = &self.inner;
-        let (items, expanded, editing) = {
-            let state = inner.state.borrow();
-            (state.items.clone(), state.expanded, state.editing.clone())
+    fn turn_page(&self, step: i32) {
+        let moved = {
+            let mut state = self.inner.state.borrow_mut();
+            let before = state.page;
+            if step > 0 {
+                state.next_page();
+            } else {
+                state.prev_page();
+            }
+            state.page != before
         };
-        self.root.set_visible(!items.is_empty());
-        let arrow = if expanded { "▾" } else { "▸" };
-        inner.header.set_label(&format!("{}  {arrow}", tray_label(items.len())));
-        inner.scroller.set_visible(expanded && !items.is_empty());
-        while let Some(child) = inner.list.first_child() {
-            inner.list.remove(&child);
-        }
-        if !expanded {
-            return;
-        }
-        for item in &items {
-            let edit = editing.as_ref().filter(|e| e.slug == item.slug);
-            inner.list.append(&self.row(item, edit));
+        if moved {
+            self.inner.last_page_turn.set(Some(Instant::now()));
+            let transition = if step > 0 {
+                StackTransitionType::SlideUp
+            } else {
+                StackTransitionType::SlideDown
+            };
+            self.show_page(transition);
         }
     }
 
-    fn row(&self, item: &Proposal, editing: Option<&Editing>) -> GtkBox {
-        let row = GtkBox::new(Orientation::Vertical, 3);
-        row.add_css_class("memory-item");
-        row.append(&text_label(&item.title, "memory-title"));
-        row.append(&text_label(&item.summary, "memory-summary"));
+    /// Point the stack at the current page and update the header.
+    fn show_page(&self, transition: StackTransitionType) {
+        let inner = &self.inner;
+        let state = inner.state.borrow();
+        inner.count.set_label(&state.page_label());
+        inner.up.set_sensitive(state.page > 0);
+        inner.down.set_sensitive(state.page + 1 < state.items.len());
+        inner.approve_all.set_sensitive(state.can_approve_all());
+        let name = format!("p{}", state.page);
+        if inner.stack.child_by_name(&name).is_some() {
+            inner.stack.set_visible_child_full(&name, transition);
+        }
+    }
+
+    /// Rebuild every page (the list, a decision or Edit changed).
+    fn render(&self) {
+        let (items, editing) = {
+            let state = self.inner.state.borrow();
+            (state.items.clone(), state.editing.clone())
+        };
+        let stack = &self.inner.stack;
+        while let Some(child) = stack.first_child() {
+            stack.remove(&child);
+        }
+        for (i, item) in items.iter().enumerate() {
+            let edit = editing.as_ref().filter(|e| e.slug == item.slug);
+            stack.add_named(&self.page(item, edit), Some(&format!("p{i}")));
+        }
+        self.show_page(StackTransitionType::None);
+    }
+
+    fn page(&self, item: &Proposal, editing: Option<&Editing>) -> GtkBox {
+        let page = GtkBox::new(Orientation::Vertical, 4);
+        page.add_css_class("memory-item");
+        page.append(&text_label(&item.title, "memory-title"));
+        page.append(&text_label(&item.summary, "memory-summary"));
         if let Some(err) = &item.error {
-            row.append(&text_label(err, "memory-error"));
+            page.append(&text_label(err, "memory-error"));
         }
         if item.stale && editing.is_none() {
-            row.append(&text_label("updating…", "memory-summary"));
+            page.append(&text_label("updating…", "memory-summary"));
         }
 
+        // The middle grows to fill the page, so the buttons sit at the bottom
+        let body = GtkBox::new(Orientation::Vertical, 0);
+        body.set_vexpand(true);
         if let Some(e) = editing {
             let view = TextView::builder()
                 .wrap_mode(gtk4::WrapMode::WordChar)
@@ -442,21 +557,22 @@ impl MemoryTray {
                 .accepts_tab(false)
                 .build();
             view.add_css_class("memory-edit");
-            // A TextView measures its text lazily; without a minimum it starts 0 lines tall
-            view.set_size_request(-1, EDIT_MIN_HEIGHT);
             view.buffer().set_text(&e.text);
             let t = self.clone();
             view.buffer().connect_changed(move |buf| {
                 let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
                 t.inner.state.borrow_mut().type_text(&text);
             });
-            row.append(&view);
+            let scroller = scroller(&view);
+            // A TextView measures its text lazily; without a minimum it starts 0 lines tall
+            scroller.set_min_content_height(EDIT_MIN_HEIGHT);
+            body.append(&scroller);
             let v = view.clone();
             glib::idle_add_local_once(move || {
                 v.grab_focus();
             });
         } else if !item.stale {
-            let diff = GtkBox::new(Orientation::Vertical, 0);
+            let diff = GtkBox::new(Orientation::Vertical, 1);
             diff.add_css_class("memory-diff");
             for line in diff_lines(&item.before, &item.after) {
                 // Facts are "- " bullets; the diff marker replaces the bullet
@@ -469,26 +585,44 @@ impl MemoryTray {
                 };
                 diff.append(&text_label(&text, class));
             }
-            row.append(&diff);
+            body.append(&scroller(&diff));
         }
+        page.append(&body);
 
         let buttons = GtkBox::new(Orientation::Horizontal, 6);
         buttons.add_css_class("memory-buttons");
+        buttons.set_halign(Align::End);
         let actions = self.inner.state.borrow().actions(item);
-        for (action, enabled) in actions {
-            let b = button(
-                action.label(),
-                matches!(action, Action::Accept | Action::Save),
-            );
+        // Approve / Save last, at the right edge
+        for (action, enabled) in actions.into_iter().rev() {
+            let b = button(action.label(), matches!(action, Action::Accept | Action::Save));
             b.set_sensitive(enabled);
             let t = self.clone();
             let slug = item.slug.clone();
             b.connect_clicked(move |_| t.press(&slug, action));
             buttons.append(&b);
         }
-        row.append(&buttons);
-        row
+        page.append(&buttons);
+        page
     }
+}
+
+fn scroller(child: &impl IsA<gtk4::Widget>) -> ScrolledWindow {
+    ScrolledWindow::builder()
+        .hscrollbar_policy(PolicyType::Never)
+        .vscrollbar_policy(PolicyType::Automatic)
+        .propagate_natural_height(true)
+        .max_content_height(DIFF_MAX_HEIGHT)
+        .child(child)
+        .build()
+}
+
+fn nav_button(glyph: &str, tooltip: &str) -> Button {
+    let b = Button::with_label(glyph);
+    b.set_focus_on_click(false);
+    b.set_tooltip_text(Some(tooltip));
+    b.add_css_class("memory-nav");
+    b
 }
 
 fn text_label(text: &str, class: &str) -> Label {
@@ -497,7 +631,7 @@ fn text_label(text: &str, class: &str) -> Label {
         .xalign(0.0)
         .wrap(true)
         .wrap_mode(gtk4::pango::WrapMode::WordChar)
-        .max_width_chars(34)
+        .max_width_chars(40)
         .build();
     label.add_css_class(class);
     label
@@ -722,12 +856,6 @@ mod tests {
         assert_eq!(undo_label(MemoryKind::Undo), Some("Undo earlier"));
         assert_eq!(undo_label(MemoryKind::Auto), Some("Undo"));
         assert_eq!(undo_label(MemoryKind::Other), None);
-    }
-
-    #[test]
-    fn tray_label_plural() {
-        assert_eq!(tray_label(1), "1 memory update");
-        assert_eq!(tray_label(3), "3 memory updates");
     }
 
     #[test]

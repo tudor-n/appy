@@ -252,59 +252,82 @@ button.effort-opt.active:hover {
     letter-spacing: -0.01em;
 }
 
-/* Memory review tray: what the consolidator learned, above the input */
-.memory-tray {
+/* Memory review panel: what the consolidator learned, floating above (or below) the
+   chat. One proposal per page; fades in with the chat. */
+.memory-panel {
     background-color: #242626;
-    border-radius: 16px;
-    padding: 6px 8px 8px 8px;
-    margin-bottom: 2px;
+    border-radius: 20px;
+    padding: 12px 14px 14px 16px;
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+    transition:
+        transform 260ms cubic-bezier(0.22, 1.15, 0.36, 1.0),
+        opacity 170ms ease;
 }
-button.memory-header {
+.memory-panel.open {
+    opacity: 1;
+    transform: none;
+}
+.memory-heading {
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+.memory-count {
+    color: #8e8e93;
+    font-size: 13px;
+    font-weight: 500;
+    margin-left: 4px;
+}
+button.memory-nav {
     background-image: none;
     background-color: transparent;
-    color: #ffffff;
+    color: #d1d1d6;
     border: none;
     box-shadow: none;
     outline: none;
+    border-radius: 999px;
     min-height: 0;
-    padding: 2px 4px;
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
+    min-width: 0;
+    padding: 2px 7px;
+    font-size: 11px;
 }
-button.memory-header:hover {
-    background-color: rgba(255, 255, 255, 0.08);
-    border-radius: 10px;
+button.memory-nav:hover {
+    background-color: rgba(255, 255, 255, 0.10);
+}
+button.memory-nav:disabled {
+    opacity: 0.3;
 }
 .memory-item {
-    padding: 8px 4px 2px 4px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 2px 0 0 0;
 }
 .memory-title {
     color: #ffffff;
-    font-size: 12px;
+    font-size: 16px;
     font-weight: 700;
+    letter-spacing: -0.01em;
 }
 .memory-summary {
     color: #8e8e93;
-    font-size: 11px;
+    font-size: 14px;
 }
 .memory-error {
     color: #d1d1d6;
-    font-size: 11px;
+    font-size: 13px;
     font-style: italic;
 }
 .memory-diff {
-    margin: 4px 0 2px 0;
-    padding: 4px 6px;
+    margin: 6px 0 2px 0;
+    padding: 6px 8px;
     background-color: rgba(255, 255, 255, 0.04);
-    border-radius: 8px;
+    border-radius: 10px;
 }
 .diff-same,
 .diff-del,
 .diff-add {
     font-family: monospace;
-    font-size: 10.5px;
+    font-size: 13px;
 }
 .diff-same {
     color: #636366;
@@ -317,7 +340,7 @@ button.memory-header:hover {
     color: #ffffff;
 }
 .memory-buttons {
-    margin-top: 4px;
+    margin-top: 8px;
 }
 button.memory-btn,
 button.memory-undo {
@@ -330,10 +353,14 @@ button.memory-undo {
     border-radius: 999px;
     min-height: 0;
     min-width: 0;
-    padding: 3px 10px;
-    font-size: 11px;
+    padding: 5px 14px;
+    font-size: 13px;
     font-weight: 600;
     letter-spacing: -0.01em;
+}
+.memory-header button.memory-btn {
+    padding: 3px 11px;
+    font-size: 12px;
 }
 button.memory-btn.primary {
     background-color: #f5f5f7;
@@ -348,7 +375,7 @@ button.memory-btn.primary:hover {
 }
 button.memory-btn:focus-visible,
 button.memory-undo:focus-visible,
-button.memory-header:focus-visible {
+button.memory-nav:focus-visible {
     outline: 1px solid rgba(255, 255, 255, 0.6);
 }
 button.memory-btn:disabled {
@@ -358,13 +385,13 @@ textview.memory-edit,
 textview.memory-edit text {
     background-color: rgba(255, 255, 255, 0.06);
     color: #ffffff;
-    font-size: 11px;
+    font-size: 13px;
     caret-color: #ffffff;
 }
 textview.memory-edit {
-    border-radius: 8px;
-    padding: 4px;
-    margin: 4px 0;
+    border-radius: 10px;
+    padding: 6px;
+    margin: 6px 0;
 }
 .memory-chip {
     padding: 2px 3px 2px 11px;

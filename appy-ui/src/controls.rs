@@ -105,6 +105,15 @@ fn connect_hover(app: &'static App) {
     let panel_motion = EventControllerMotion::new();
     panel_motion.connect_enter(move |_, _, _| panel_hover(true));
     panel_motion.connect_leave(move |_| panel_hover(false));
+
+    // The memory panel floats apart from the chat, so it keeps the chat open the same way
+    let memory_motion = EventControllerMotion::new();
+    let memory_hover = move |hovered: bool| {
+        app.with_state(move |s| s.set_memory_hover(hovered, Instant::now()));
+    };
+    memory_motion.connect_enter(move |_, _, _| memory_hover(true));
+    memory_motion.connect_leave(move |_| memory_hover(false));
+    app.ui.memory.root.add_controller(memory_motion);
     app.ui.chat_panel.add_controller(panel_motion);
 }
 

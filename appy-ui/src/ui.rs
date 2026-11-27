@@ -14,7 +14,7 @@ use gtk4::{
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::chat::ChatLog;
-use crate::memory::MemoryTray;
+use crate::memory::MemoryPanel;
 use crate::input::{ChatInput, set_class};
 use crate::layout::{HSide, Rect, Shell};
 use crate::mascot;
@@ -37,12 +37,14 @@ pub struct Ui {
     pub mascot: DrawingArea,
     pub chat_panel: GtkBox,
     pub chat: ChatLog,
-    /// What the consolidator learned, waiting for review (above the input).
-    pub memory: MemoryTray,
+    /// What the consolidator learned, waiting for review: floats above (or below) the
+    /// chat, placed by tick.rs like the weather card.
+    pub memory: MemoryPanel,
     pub input: ChatInput,
     pub card: WeatherCard,
     shell_pos: Rc<Cell<(i32, i32)>>,
     card_pos: Rc<Cell<(i32, i32)>>,
+    memory_pos: Rc<Cell<(i32, i32)>>,
     /// Rewritten every frame while wobbling; layered above the static stylesheet.
     pub wobble_css: CssProvider,
 }
@@ -74,9 +76,8 @@ impl Ui {
         // Wobble transforms are applied to this box (see tick.rs)
         let chat_wobble_box = GtkBox::new(Orientation::Vertical, 8);
         chat_wobble_box.add_css_class("chat-wobble");
-        let memory = MemoryTray::new();
+        let memory = MemoryPanel::new();
         chat_wobble_box.append(&chat.scrolled);
-        chat_wobble_box.append(&memory.root);
         chat_wobble_box.append(&input.container);
 
         let chat_panel = GtkBox::new(Orientation::Vertical, 0);
@@ -106,20 +107,30 @@ impl Ui {
         stage.set_child(Some(&filler));
         stage.add_overlay(&root);
         stage.add_overlay(&card.root);
+        stage.add_overlay(&memory.root);
 
         let shell_pos = Rc::new(Cell::new((0, 0)));
         let card_pos = Rc::new(Cell::new((0, 0)));
+        let memory_pos = Rc::new(Cell::new((0, 0)));
         stage.connect_get_child_position({
-            let (root, card_root) = (root.clone(), card.root.clone());
-            let (shell_pos, card_pos) = (shell_pos.clone(), card_pos.clone());
+            let (root, card_root, memory_root) =
+                (root.clone(), card.root.clone(), memory.root.clone());
+            let (shell_pos, card_pos, memory_pos) =
+                (shell_pos.clone(), card_pos.clone(), memory_pos.clone());
             move |_, child| {
                 let (x, y) = if child == root.upcast_ref::<gtk4::Widget>() {
                     shell_pos.get()
                 } else if child == card_root.upcast_ref::<gtk4::Widget>() {
                     card_pos.get()
+                } else if child == memory_root.upcast_ref::<gtk4::Widget>() {
+                    memory_pos.get()
                 } else {
                     return None;
                 };
+                if child == memory_root.upcast_ref::<gtk4::Widget>() {
+                    let (w, h) = natural_height_size(child);
+                    return Some(Rectangle::new(x, y, w, h));
+                }
                 // Minimum size, like the GtkFixed this replaced: it keeps the message
                 // list as tall as the mascot column instead of its full 360px
                 let (minimum, _) = child.preferred_size();
@@ -141,6 +152,7 @@ impl Ui {
             card,
             shell_pos,
             card_pos,
+            memory_pos,
             wobble_css,
         }
     }
@@ -161,6 +173,53 @@ impl Ui {
         if self.card_pos.replace(pos) != pos {
             self.stage.queue_allocate();
         }
+    }
+
+    pub fn move_memory(&self, (x, y): (f64, f64)) {
+        let pos = (x.round() as i32, y.round() as i32);
+        if self.memory_pos.replace(pos) != pos {
+            self.stage.queue_allocate();
+        }
+    }
+
+    /// The memory panel's size as laid out (see `natural_height_size`).
+    pub fn memory_size(&self) -> (f64, f64) {
+        let (w, h) = natural_height_size(self.memory.root.upcast_ref());
+        (w as f64, h as f64)
+    }
+
+    /// What the memory panel lines up with: the chat panel, or the whole glass panel in
+    /// glass mode. (While the chat slides in, the panel rides along with it.)
+    pub fn memory_anchor(&self, locked: bool) -> Option<Rect> {
+        let widget: &gtk4::Widget = if locked {
+            self.root.upcast_ref()
+        } else {
+            self.chat_panel.upcast_ref()
+        };
+        widget
+            .compute_bounds(&self.stage)
+            .filter(|b| b.width() > 0.0)
+            .map(|b| Rect {
+                x: b.x() as f64,
+                y: b.y() as f64,
+                w: b.width() as f64,
+                h: b.height() as f64,
+            })
+    }
+
+    /// The memory panel's rect, while it's shown.
+    pub fn memory_bounds(&self) -> Option<Rect> {
+        if !self.memory.is_shown() {
+            return None;
+        }
+        let (x, y) = self.memory_pos.get();
+        let (w, h) = self.memory_size();
+        Some(Rect {
+            x: x as f64,
+            y: y as f64,
+            w,
+            h,
+        })
     }
 
     /// The shell's visible rect (margins excluded): the glass panel in glass mode.
@@ -243,6 +302,9 @@ impl Ui {
         if self.card.is_present() {
             rects.extend(self.bounds_of(self.card.root.upcast_ref()));
         }
+        if self.memory.is_shown() {
+            rects.extend(self.bounds_of(self.memory.root.upcast_ref()));
+        }
         rects
     }
 
@@ -272,6 +334,14 @@ impl Ui {
     pub fn update_input_region(&self, chat_open: bool, locked: bool, dragging: bool) {
         self.set_input_region(&self.input_rects(chat_open, locked, dragging));
     }
+}
+
+/// The memory panel at its minimum width but natural height: at its minimum height the
+/// note's diff (a scroller) would shrink to nothing.
+fn natural_height_size(widget: &gtk4::Widget) -> (i32, i32) {
+    let (min_w, _, _, _) = widget.measure(Orientation::Horizontal, -1);
+    let (_, nat_h, _, _) = widget.measure(Orientation::Vertical, min_w);
+    (min_w, nat_h)
 }
 
 /// Installs the static stylesheet and returns the (initially empty) wobble provider.
