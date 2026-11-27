@@ -9,16 +9,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gtk4::prelude::*;
+use gtk4::gdk::Monitor;
 use gtk4::{Application, glib};
+use gtk4_layer_shell::LayerShell;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::chat::format_live_dots;
 use crate::mascot::{self, Pose};
 use crate::net;
 use crate::protocol::{AppyState, ClientEvent, Effort, PillSyncState, UiEvent};
-use crate::state::{ActiveStatus, SharedState};
+use crate::layout::Point;
+use crate::state::{ActiveStatus, MonitorMove, SharedState};
 use crate::ui::Ui;
 use crate::{controls, tick};
+
+/// How long after moving to another monitor to check that the overlay made it.
+const MONITOR_CHECK: std::time::Duration = std::time::Duration::from_millis(1500);
 
 pub struct App {
     gtk_app: Application,
@@ -187,15 +193,54 @@ impl App {
         self.ui.mascot.queue_draw();
     }
 
+    /// Dropped onto another monitor: move the overlay there, with the mascot where he
+    /// was let go (`pointer` is on the new monitor, `grab` where on the mascot he was
+    /// held), and a little hop as he lands.
+    pub fn move_to_monitor(&'static self, monitor: &Monitor, pointer: Point, size: (f64, f64), grab: Point) {
+        {
+            let mut s = self.state.borrow_mut();
+            s.monitor_move = Some(MonitorMove {
+                anchor: (pointer.0 - grab.0, pointer.1 - grab.1),
+                size,
+                since: Instant::now(),
+            });
+            s.last_input_region = None;
+        }
+        // Hidden until he's in place on the new monitor (tick.rs fades him in), so the
+        // old layout never flashes up there
+        self.ui.stage.add_css_class("moving");
+        // Remaps the window (unmap + map) right away, so not while borrowing the state
+        self.ui.window.set_monitor(Some(monitor));
+
+        // Safety net: if he didn't show up on the new monitor, show the window again
+        let monitor = monitor.clone();
+        glib::timeout_add_local_once(MONITOR_CHECK, move || {
+            let window = &self.ui.window;
+            let on = window
+                .surface()
+                .and_then(|s| s.display().monitor_at_surface(&s));
+            // Whatever happened, never leave him faded out
+            self.ui.stage.remove_css_class("moving");
+            if window.is_visible() && (!window.is_mapped() || on.as_ref() != Some(&monitor)) {
+                eprintln!("[ui] not on the new monitor after a move; showing the overlay again");
+                window.set_visible(false);
+                window.set_monitor(Some(&monitor));
+                window.set_visible(true);
+            }
+        });
+    }
+
     /// A handle for sending to the backend from widget callbacks.
     pub fn sender(&self) -> UnboundedSender<ClientEvent> {
         self.ws_tx.clone()
     }
 
-    /// Ask the backend to compact the conversation now. The UI follows the backend's
-    /// "compacting" status, so there's nothing to update here.
+    /// Ask the backend to compact the conversation now. It's queued behind any answer
+    /// in progress, so the ring lights up right away to show the click landed; the rest
+    /// follows the backend's "compacting" status and the new context size.
     pub fn compact(&self) {
         let _ = self.ws_tx.send(ClientEvent::Compact);
+        self.ui.input.compact.set_pending(Instant::now());
     }
 
     pub fn set_effort(&self, effort: Effort) {

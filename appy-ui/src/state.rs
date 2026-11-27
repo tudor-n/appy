@@ -50,6 +50,37 @@ pub struct SharedState {
     pub auto_approve: Option<bool>,
     /// Whether the memory panel sits above or below the chat.
     pub memory_side: VSide,
+    /// Where the memory panel is drawn, eased toward its slot; None while it's hidden.
+    pub memory_pos: Option<Point>,
+    /// The overlay is moving to another monitor: where the mascot goes there, applied
+    /// once the window has its new size.
+    pub monitor_move: Option<MonitorMove>,
+    /// Just arrived on another monitor: the next full layout puts everything in place
+    /// and fades the overlay back in.
+    pub landing: bool,
+}
+
+/// See `SharedState::monitor_move`.
+#[derive(Debug, Clone, Copy)]
+pub struct MonitorMove {
+    pub anchor: Point,
+    /// The new monitor's size; the window ends up this wide and at most this tall.
+    pub size: (f64, f64),
+    pub since: Instant,
+}
+
+/// Give up waiting for the window's new size after this long.
+pub const MONITOR_MOVE_TIMEOUT: Duration = Duration::from_millis(600);
+
+impl MonitorMove {
+    /// Whether a `win`-sized window is the one on the new monitor (panels may take
+    /// some of its height).
+    pub fn arrived(&self, win: (f64, f64), now: Instant) -> bool {
+        let fits = (win.0 - self.size.0).abs() < 1.0
+            && win.1 <= self.size.1 + 0.5
+            && win.1 > self.size.1 - 200.0;
+        fits || now.duration_since(self.since) > MONITOR_MOVE_TIMEOUT
+    }
 }
 
 impl SharedState {
@@ -78,7 +109,15 @@ impl SharedState {
             card: None,
             auto_approve: None,
             memory_side: VSide::default(),
+            memory_pos: None,
+            monitor_move: None,
+            landing: false,
         }
+    }
+
+    /// Appy is being dragged.
+    pub fn is_moving(&self) -> bool {
+        self.drag.active
     }
 
     pub fn is_busy(&self) -> bool {
@@ -136,7 +175,7 @@ impl SharedState {
         }
         self.locked
             || self.hover.is_hovered(now)
-            || self.drag.active
+            || self.is_moving()
             || input_selected
             // Busy opens the chat to show its status pill
             || self.is_busy()
@@ -161,7 +200,18 @@ pub struct ActiveStatus {
 
 impl ActiveStatus {
     fn finish(self) {
-        let elapsed = format_duration(self.started.elapsed());
+        let took = self.started.elapsed();
+        // The overlay always starts on "loading"; when the brain turns out to be up
+        // already, there was no loading to report ("loaded for 0s")
+        if self.state == AppyState::Booting && took < Duration::from_secs(1) {
+            if let Some(pill) = self.label.parent()
+                && let Some(log) = pill.parent().and_downcast::<gtk4::Box>()
+            {
+                log.remove(&pill);
+            }
+            return;
+        }
+        let elapsed = format_duration(took);
         self.label.set_text(&format!(
             "{} for {}",
             self.state.done_status_text(),
@@ -171,6 +221,16 @@ impl ActiveStatus {
             pill.remove_css_class("live");
         }
     }
+}
+
+/// Animations are tuned in 60 Hz frames. The frame loop runs at the screen's own rate
+/// and passes how many of those frames went by (e.g. 0.42 on a 144 Hz screen).
+pub const FRAME_SECS: f64 = 1.0 / 60.0;
+
+/// An exponential ease's per-frame `rate`, adjusted for `frames` elapsed: easing by the
+/// result once covers the same ground as easing by `rate` `frames` times.
+pub fn per_frame(rate: f64, frames: f64) -> f64 {
+    1.0 - (1.0 - rate).powf(frames)
 }
 
 pub fn format_duration(d: Duration) -> String {
@@ -205,14 +265,22 @@ impl Hover {
 #[derive(Debug, Default)]
 pub struct Drag {
     pub active: bool,
+    /// The pointer's position on the mascot's drawing area when the drag began.
+    pub grab: Point,
+    /// The pointer is past the screen edge, over another monitor: letting go there
+    /// moves Appy to it.
+    pub over_other_monitor: bool,
     start: Point,
     last_dx: f64,
     last_dy: f64,
 }
 
 impl Drag {
-    pub fn begin(&mut self, anchor: Point) {
+    /// `pointer` is where the drag began, in window coordinates.
+    pub fn begin(&mut self, anchor: Point, pointer: Point) {
         self.active = true;
+        self.over_other_monitor = false;
+        self.grab = (pointer.0 - anchor.0, pointer.1 - anchor.1);
         self.start = anchor;
         self.last_dx = 0.0;
         self.last_dy = 0.0;
@@ -294,12 +362,20 @@ impl Wobble {
         self.vy = (self.vy + step_dy * 0.55).clamp(-35.0, 35.0);
     }
 
-    /// Advance one frame. Returns true while still moving; snaps to rest otherwise.
-    pub fn step(&mut self) -> bool {
-        self.vx = (self.vx - self.x * 0.22) * 0.78;
-        self.vy = (self.vy - self.y * 0.22) * 0.78;
-        self.x += self.vx;
-        self.y += self.vy;
+    /// Advance by `frames` 60 Hz frames (fractional on faster screens). Returns true
+    /// while still moving; snaps to rest otherwise.
+    pub fn step(&mut self, frames: f64) -> bool {
+        // Whole-frame substeps at most, so the spring behaves the same at any refresh rate
+        let mut left = frames;
+        while left > 0.0 {
+            let f = left.min(1.0);
+            let damping = 0.78f64.powf(f);
+            self.vx = (self.vx - self.x * 0.22 * f) * damping;
+            self.vy = (self.vy - self.y * 0.22 * f) * damping;
+            self.x += self.vx * f;
+            self.y += self.vy * f;
+            left -= f;
+        }
 
         let moving = [self.x, self.y, self.vx, self.vy]
             .iter()
@@ -476,7 +552,8 @@ mod tests {
     #[test]
     fn drag_tracks_steps_and_target() {
         let mut drag = Drag::default();
-        drag.begin((100.0, 50.0));
+        drag.begin((100.0, 50.0), (130.0, 90.0));
+        assert_eq!(drag.grab, (30.0, 40.0));
         assert_eq!(drag.update(10.0, 5.0), (10.0, 5.0));
         assert_eq!(drag.update(15.0, 5.0), (5.0, 0.0));
         assert_eq!(drag.target(-500.0, 20.0), (-400.0, 70.0));
@@ -503,14 +580,57 @@ mod tests {
     }
 
     #[test]
+    fn monitor_move_waits_for_the_new_window_size() {
+        let t0 = Instant::now();
+        let mv = MonitorMove {
+            anchor: (10.0, 10.0),
+            size: (1920.0, 1080.0),
+            since: t0,
+        };
+        assert!(!mv.arrived((1536.0, 864.0), t0)); // still the laptop-sized window
+        assert!(mv.arrived((1920.0, 1032.0), t0)); // new screen, minus a panel
+        assert!(mv.arrived((1536.0, 864.0), t0 + ms(700))); // gave up waiting
+    }
+
+    #[test]
     fn wobble_settles() {
         let mut w = Wobble::default();
-        assert!(!w.step());
+        assert!(!w.step(1.0));
         w.kick(-20.0, 10.0);
-        assert!(w.step());
-        let frames = (0..200).take_while(|_| w.step()).count();
+        assert!(w.step(1.0));
+        let frames = (0..200).take_while(|_| w.step(1.0)).count();
         assert!(frames < 200, "wobble never settled");
         assert_eq!((w.x, w.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn wobble_is_the_same_at_any_refresh_rate() {
+        // 60 frames at 60 Hz vs 144 frames at 144 Hz: about the same motion
+        let (mut slow, mut fast) = (Wobble::default(), Wobble::default());
+        slow.kick(-20.0, 10.0);
+        fast.kick(-20.0, 10.0);
+        for i in 0..144 {
+            if i % 12 == 0 {
+                // compare at the 5 common instants per 12 fast frames
+                assert!((slow.x - fast.x).abs() < 1.5, "x {} vs {}", slow.x, fast.x);
+            }
+            fast.step(60.0 / 144.0);
+            if i % 12 == 11 {
+                for _ in 0..5 {
+                    slow.step(1.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn per_frame_rate_composes() {
+        // Two half frames cover what one whole frame does
+        let half = per_frame(0.22, 0.5);
+        let after_two_halves = 1.0 - (1.0 - half) * (1.0 - half);
+        assert!((after_two_halves - 0.22).abs() < 1e-12);
+        assert!((per_frame(0.22, 1.0) - 0.22).abs() < 1e-12);
+        assert_eq!(per_frame(0.22, 0.0), 0.0);
     }
 
     #[test]

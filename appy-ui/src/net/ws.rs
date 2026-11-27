@@ -17,16 +17,25 @@ pub async fn run(
     mut outgoing: UnboundedReceiver<ClientEvent>,
 ) {
     let url = std::env::var("APPY_WS_URL").unwrap_or_else(|_| WS_URL.to_string());
+    // A message that found the connection dead goes out first on the next one
+    let mut unsent: Option<String> = None;
     loop {
         let Ok((stream, _)) = connect_async(url.as_str()).await else {
             tokio::time::sleep(RECONNECT_DELAY).await;
             continue;
         };
         let (mut write, mut read) = stream.split();
+        if let Some(json) = unsent.take()
+            && write.send(WsMsg::Text(json.clone().into())).await.is_err()
+        {
+            unsent = Some(json);
+            tokio::time::sleep(RECONNECT_DELAY).await;
+            continue;
+        }
         loop {
             tokio::select! {
-                Some(Ok(msg)) = read.next() => {
-                    if let WsMsg::Text(txt) = msg {
+                msg = read.next() => match msg {
+                    Some(Ok(WsMsg::Text(txt))) => {
                         match serde_json::from_str::<BackendEvent>(&txt) {
                             Ok(ev) => {
                                 let _ = ui_tx.send(UiEvent::Backend(ev)).await;
@@ -34,15 +43,20 @@ pub async fn run(
                             Err(e) => eprintln!("[ws] ignoring unrecognised message ({e}): {txt}"),
                         }
                     }
-                }
-                Some(ev) = outgoing.recv() => {
+                    Some(Ok(WsMsg::Close(_))) | Some(Err(_)) | None => break, // reconnect
+                    Some(Ok(_)) => {} // pings are answered by tungstenite
+                },
+                ev = outgoing.recv() => {
+                    let Some(ev) = ev else { return }; // the UI is gone
                     if let Ok(json) = serde_json::to_string(&ev)
-                        && write.send(WsMsg::Text(json.into())).await.is_err() {
-                            break;
-                        }
+                        && write.send(WsMsg::Text(json.clone().into())).await.is_err()
+                    {
+                        unsent = Some(json);
+                        break;
+                    }
                 }
-                else => break,
             }
         }
+        tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }

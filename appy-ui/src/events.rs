@@ -29,8 +29,8 @@ impl App {
         let now = Instant::now();
         let mut s = self.state.borrow_mut();
 
-        // Activity keeps the chat open for a bit; a silent config sync shouldn't
-        if !matches!(ev, BackendEvent::Effort { .. }) {
+        // Activity keeps the chat open for a bit; a silent sync shouldn't
+        if !matches!(ev, BackendEvent::Effort { .. } | BackendEvent::Context { .. }) {
             s.trigger_voice_cooldown(now);
         }
 
@@ -64,6 +64,9 @@ impl App {
             BackendEvent::Effort { value } => {
                 s.effort = value;
                 self.ui.input.effort.show(value);
+            }
+            BackendEvent::Context { tokens, limit } => {
+                self.ui.input.compact.set_context(tokens, limit);
             }
             BackendEvent::Widget(Widget::Weather(report)) => {
                 self.ui.card.set(&report);
@@ -133,6 +136,8 @@ impl App {
         }
 
         match next {
+            // The ring stays lit until the smaller context size arrives
+            AppyState::Compacting => self.ui.input.compact.set_pending(now),
             AppyState::Speaking => {
                 if s.state != AppyState::Speaking {
                     s.talk_phase = 0.0;

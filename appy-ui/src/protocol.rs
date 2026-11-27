@@ -116,6 +116,12 @@ pub enum BackendEvent {
     Effort {
         value: Effort,
     },
+    /// How much of the context the conversation uses; at `limit` it's compacted
+    /// automatically. Drives the compact ring on the input pill.
+    Context {
+        tokens: u64,
+        limit: u64,
+    },
     /// A card for Appy to pop out next to himself.
     Widget(Widget),
     /// What the consolidator learned and is waiting for review (all of it; empty = none).
@@ -315,6 +321,16 @@ mod tests {
 
         let ev: BackendEvent = serde_json::from_str(r#"{"type":"effort","value":"none"}"#).unwrap();
         assert!(matches!(ev, BackendEvent::Effort { value: Effort::Off }));
+
+        let ev: BackendEvent =
+            serde_json::from_str(r#"{"type":"context","tokens":4200,"limit":9500}"#).unwrap();
+        assert!(matches!(
+            ev,
+            BackendEvent::Context {
+                tokens: 4200,
+                limit: 9500
+            }
+        ));
     }
 
     #[test]
