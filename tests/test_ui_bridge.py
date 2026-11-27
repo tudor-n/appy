@@ -60,7 +60,12 @@ class UiBridgeTests(unittest.TestCase):
         sent = []
         bridge.emit = sent.append
         bridge.memory_committed("approved", "added the HUD")
-        self.assertEqual(sent, [{"type": "memory_committed", "kind": "approved", "summary": "added the HUD"}])
+        bridge.memory_committed("approved", "added the HUD", ["The HUD runs on a Pi."], ["old"])
+        self.assertEqual(sent, [
+            {"type": "memory_committed", "kind": "approved", "summary": "added the HUD",
+             "facts": [], "dropped": []},
+            {"type": "memory_committed", "kind": "approved", "summary": "added the HUD",
+             "facts": ["The HUD runs on a Pi."], "dropped": ["old"]}])
 
     def test_memory_decision_and_undo_reach_callbacks(self):
         calls = []

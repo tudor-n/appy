@@ -70,9 +70,12 @@ class MemoryReviewTests(unittest.TestCase):
                 self.lists.append(items)
                 self.changed.notify_all()
 
-        def emit_chip(kind, summary):
+        self.facts = []
+
+        def emit_chip(kind, summary, facts=(), dropped=()):
             with self.changed:
                 self.chips.append((kind, summary))
+                self.facts.append((list(facts), list(dropped)))
                 self.changed.notify_all()
 
         self.settings = []
@@ -204,6 +207,18 @@ class MemoryReviewTests(unittest.TestCase):
         self.review.tool_committed("get_weather", line)
         self.review.tool_committed("memory_remember", "not json")
         self.assertEqual(self.chips, [("remember", "- Tudor lives in Sibiu."), ("forget", "- x")])
+        self.assertEqual(self.facts, [(["Tudor lives in Sibiu."], []), ([], ["x"])])
+
+    def test_chips_carry_the_facts(self):
+        self.client.items = [dict(ITEM, before="# Bench\n- Riden\n", after="# Bench\n- Korad\n")]
+        self.review.start()
+        self.review.decide("bench", "accept", None)
+        self.wait(lambda: self.chips)
+        self.assertEqual(self.facts[0], (["Korad"], ["Riden"]))
+        self.client.auto_items = [{"commit": "bbb", "slug": "bench", "summary": "s",
+                                   "added": ["A."], "removed": []}]
+        self.wait(lambda: len(self.chips) >= 2)
+        self.assertEqual((self.chips[1][0], self.facts[1]), ("auto", (["A."], [])))
 
 
     def test_start_sends_the_setting(self):
@@ -273,7 +288,7 @@ class MemoryReviewTests(unittest.TestCase):
     def test_undo_announces_pending_auto_commits_first(self):
         self.review.stop()
         self.review = MemoryReview(self.client, lambda items: None,
-                                   lambda k, s: self.chips.append((k, s)),
+                                   lambda k, s, *facts: self.chips.append((k, s)),
                                    on_change=self.notes.append, poll_seconds=60)
         self.review.start()
         self.review.refresh()  # takes the head

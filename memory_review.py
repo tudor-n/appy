@@ -29,10 +29,14 @@ def describe_change(slug: str, added: list[str], removed: list[str], summary: st
     return f"note '{slug}' " + ("; ".join(parts) if parts else f"changed: {summary}")
 
 
-def change_between(slug: str, before: str, after: str, summary: str) -> str:
+def facts_between(before: str, after: str) -> tuple[list[str], list[str]]:
+    """The facts (bullets, without "- ") a change added and removed."""
     old, new = _bullets(before), _bullets(after)
-    return describe_change(slug, [b for b in new if b not in old],
-                           [b for b in old if b not in new], summary)
+    return [b for b in new if b not in old], [b for b in old if b not in new]
+
+
+def change_between(slug: str, before: str, after: str, summary: str) -> str:
+    return describe_change(slug, *facts_between(before, after), summary)
 
 
 class MemoryReview:
@@ -88,7 +92,12 @@ class MemoryReview:
         except ValueError:
             return
         if isinstance(data, dict) and data.get("commit") and data.get("line"):
-            self.emit_committed(kinds[name], str(data["line"]))
+            line = str(data["line"])
+            fact = [line.removeprefix("- ").strip()]
+            if name == "memory_remember":
+                self.emit_committed(kinds[name], line, fact, [])
+            else:
+                self.emit_committed(kinds[name], line, [], fact)
 
     def _loop(self) -> None:
         while True:
@@ -153,16 +162,18 @@ class MemoryReview:
             self._errors[slug] = str(result.get("error") or "that didn't work")
         if not result.get("commit"):
             pass  # nothing was written (denied, stale, or an edit identical to the note)
-        elif status == "accepted":
-            self.emit_committed("approved", str(result.get("summary", "")))
-            if item:
-                self.on_change(change_between(slug, item["before"], item["after"],
-                                              str(result.get("summary", ""))))
-        elif status == "edited":
-            self.emit_committed("edited", str(result.get("summary", "")))
-            self.on_change(change_between(slug, before if before is not None else
-                                          (item or {}).get("before", ""), text or "",
-                                          str(result.get("summary", ""))))
+        elif status in ("accepted", "edited"):
+            summary = str(result.get("summary", ""))
+            if status == "accepted":
+                old, new = (item["before"], item["after"]) if item else ("", "")
+            else:
+                old = before if before is not None else (item or {}).get("before", "")
+                new = text or ""
+            added, removed = facts_between(old, new)
+            self.emit_committed("approved" if status == "accepted" else "edited", summary,
+                                added, removed)
+            if item or status == "edited":
+                self.on_change(describe_change(slug, added, removed, summary))
         self._sync(force=True)
 
     def _send_settings(self) -> None:
@@ -180,7 +191,8 @@ class MemoryReview:
         if self._head is not None:
             for item in data["items"]:
                 print(f"[memory] auto-saved {item['slug']}: {item['summary']}")
-                self.emit_committed("auto", item["summary"])
+                self.emit_committed("auto", item["summary"], item.get("added", []),
+                                    item.get("removed", []))
                 self.on_change(describe_change(item["slug"], item.get("added", []),
                                                item.get("removed", []), item["summary"]))
         if data["head"]:

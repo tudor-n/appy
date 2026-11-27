@@ -149,8 +149,11 @@ class UiBridge:
         self.last_settings = {"type": "memory_settings", "auto_approve": bool(auto_approve)}
         self.emit(self.last_settings)
 
-    def memory_committed(self, kind: str, summary: str):
-        self.emit({"type": "memory_committed", "kind": kind, "summary": summary})
+    def memory_committed(self, kind: str, summary: str, facts=(), dropped=()):
+        """`facts`/`dropped`: the sentences the change added and removed (the overlay's
+        memory pill lists them)."""
+        self.emit({"type": "memory_committed", "kind": kind, "summary": summary,
+                   "facts": list(facts), "dropped": list(dropped)})
 
     def widget(self, card: dict):
         """Show a card next to Appy; `card` carries its own "widget" kind (see PROTOCOL.md)."""
