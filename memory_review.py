@@ -184,7 +184,7 @@ class MemoryReview:
                 old, new = (item["before"], item["after"]) if item else ("", "")
             else:
                 old = before if before is not None else (item or {}).get("before", "")
-                new = text or ""
+                new = str(result.get("text") or text or "")  # as saved (facts kept since)
             added, removed = facts_between(old, new)
             self.emit_committed("approved" if status == "accepted" else "edited", summary,
                                 added, removed, str(result.get("commit") or ""))

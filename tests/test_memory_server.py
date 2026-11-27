@@ -262,6 +262,7 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(r.json()["status"], "edited")
         self.assertEqual((self.root / "memory" / "bench.md").read_text(),
                          text + "- The iron is a Pinecil.\n")
+        self.assertEqual(r.json()["text"], text + "- The iron is a Pinecil.\n")  # for the pill
 
     def test_edit_on_a_moved_note_drops_facts_removed_since(self):
         self.vault.remember("The iron is a Pinecil.", "bench", "live")

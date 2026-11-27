@@ -182,7 +182,8 @@ def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
                     raise VaultError(400, f"edit not saved: {exc.reason}")
                 sha = vault.apply_note(slug, text, f"memory: {summary[:60]} [edited]", sessions)
                 _say(f"proposal {slug}: edited -> {sha}")
-                return {"status": "edited", "commit": sha, "summary": summary}
+                # the note as saved, which may keep facts the edited text didn't have
+                return {"status": "edited", "commit": sha, "summary": summary, "text": text}
             return accept(slug, item, "approved")
 
     def accept(slug: str, item: dict, tag: str) -> dict:

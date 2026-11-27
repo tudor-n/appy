@@ -152,6 +152,17 @@ class MemoryReviewTests(unittest.TestCase):
         self.assertEqual(self.chips, [("edited", "Replaced the PSU.")])
         self.assertEqual(self.client.decisions[0][2], "# Bench\n- Korad KA3005P\n")
 
+    def test_edit_describes_the_note_the_mac_saved(self):
+        # The Mac carries an edit over to the current note, keeping a fact remembered
+        # since the proposal was written: that fact wasn't removed
+        self.client.next_decision = {"status": "edited", "commit": "def", "summary": "s",
+                                     "text": "# Bench\n- Korad\n- Pinecil\n"}
+        self.review.start()
+        self.review.decide("bench", "edit", "# Bench\n- Korad\n", "# Bench\n- Pinecil\n")
+        self.wait(lambda: self.notes)
+        self.assertEqual(self.facts[0], (["Korad"], []))
+        self.assertEqual(self.notes, ["note 'bench' now also says: Korad"])
+
     def test_no_chip_when_nothing_was_committed(self):
         self.review.start()
         self.wait(lambda: self.lists)
