@@ -114,6 +114,12 @@ def _gist(text: str) -> str:
     return cut.rstrip(" ,;:") + "…"
 
 
+def _same_commit(a: str, b: str) -> bool:
+    """Short and full shas name the same commit when one is a prefix of the other."""
+    a, b = a.strip(), b.strip()
+    return bool(a and b) and (a.startswith(b) or b.startswith(a))
+
+
 def _write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
@@ -348,8 +354,12 @@ class Vault:
         self._save_state(state)
         return {"slug": slug, "line": line, "commit": sha}
 
-    def undo(self) -> dict:
+    def undo(self, expect: str | None = None) -> dict:
+        """Revert the newest memory change. With `expect` (a commit), only if that is
+        still the newest one: the overlay's Undo names exactly what it shows."""
         target = self.git.undo_target()
+        if expect and (target is None or not _same_commit(target[0], expect)):
+            raise VaultError(409, "memory changed since: a newer change has to be undone first")
         if target is None:
             return {"undone": None, "commit": None}
         sha, subject = target

@@ -24,8 +24,8 @@ struct MemoryPill {
     burst: MemoryBurst,
     title: Label,
     list: GtkBox,
-    /// How many changes the pill's Undo takes back (grows with the burst).
-    undo_count: Rc<Cell<usize>>,
+    /// The `memory_undo`s the pill's Undo sends (grows with the burst).
+    undo_what: Rc<RefCell<Vec<Vec<String>>>>,
 }
 
 pub struct ChatLog {
@@ -126,23 +126,24 @@ impl ChatLog {
         summary: &str,
         facts: Vec<String>,
         dropped: Vec<String>,
-        undo: Rc<dyn Fn()>,
+        commit: &str,
+        undo: Rc<dyn Fn(Vec<String>)>,
     ) {
         let now = Instant::now();
         {
             let mut current = self.memory.borrow_mut();
             if let Some(pill) = current.as_mut().filter(|p| p.burst.accepts(kind, now)) {
-                pill.burst.add(kind, summary, facts, dropped, now);
+                pill.burst.add(kind, summary, facts, dropped, commit, now);
                 pill.title.set_label(&pill.burst.title());
                 fill_facts(&pill.list, &pill.burst);
-                pill.undo_count.set(pill.burst.undo_count());
+                *pill.undo_what.borrow_mut() = undo_what(&pill.burst);
                 return;
             }
         }
         for old in self.undo_buttons.take() {
             old.set_sensitive(false);
         }
-        let burst = MemoryBurst::new(kind, summary, facts, dropped, now);
+        let burst = MemoryBurst::new(kind, summary, facts, dropped, commit, now);
 
         let pill = GtkBox::new(Orientation::Vertical, 0);
         pill.add_css_class("status-pill");
@@ -157,17 +158,19 @@ impl ChatLog {
         let list = GtkBox::new(Orientation::Vertical, 3);
         fill_facts(&list, &burst);
         body.append(&list);
-        let undo_count = Rc::new(Cell::new(burst.undo_count()));
+        let undo_what_now = Rc::new(RefCell::new(undo_what(&burst)));
         if let Some(label) = burst.undo_label() {
             let button = Button::with_label(label);
             button.add_css_class("memory-undo");
             button.set_focus_on_click(false);
             button.set_halign(Align::End);
-            let count = undo_count.clone();
+            let what = undo_what_now.clone();
+            let closed = burst.close_handle();
             button.connect_clicked(move |b| {
                 b.set_sensitive(false);
-                for _ in 0..count.get() {
-                    undo();
+                closed.set(true); // what happens next (the undo itself) gets its own pill
+                for commits in what.borrow().iter() {
+                    undo(commits.clone());
                 }
             });
             body.append(&button);
@@ -192,8 +195,25 @@ impl ChatLog {
             burst,
             title,
             list,
-            undo_count,
+            undo_what: undo_what_now,
         });
+    }
+
+    /// A one-line notice in the chat (e.g. an undo that didn't happen).
+    pub fn push_notice(&self, text: &str) {
+        let pill = GtkBox::new(Orientation::Horizontal, 0);
+        pill.add_css_class("status-pill");
+        pill.add_css_class("memory-notice");
+        pill.set_halign(Align::Center);
+        let label = Label::builder()
+            .label(text)
+            .wrap(true)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
+            .max_width_chars(34)
+            .build();
+        label.add_css_class("status-pill-text");
+        pill.append(&label);
+        self.push(&pill);
     }
 
     fn push(&self, entry: &GtkBox) {
@@ -353,3 +373,11 @@ fn fill_facts(list: &GtkBox, burst: &MemoryBurst) {
     }
 }
 
+/// The `memory_undo` messages a pill's Undo sends: one naming exactly its commits, or
+/// (without commit ids, or for "Undo earlier") one plain undo per step.
+fn undo_what(burst: &MemoryBurst) -> Vec<Vec<String>> {
+    match burst.undo_commits() {
+        Some(commits) => vec![commits],
+        None => vec![Vec::new(); burst.undo_count()],
+    }
+}

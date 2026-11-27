@@ -173,6 +173,12 @@ class MemoryClientTests(unittest.TestCase):
         self.assertEqual(self.memory.settings(), {"auto_approve": True})
         self.assertEqual(self.memory.changes(head), {"head": head, "items": []})
 
+    def test_undo_expect(self):
+        a = json.loads(self.memory.remember("Tudor lives in Sibiu."))["commit"]
+        json.loads(self.memory.remember("Tudor has a W124."))
+        self.assertIn("error", self.memory.undo(expect=a))
+        self.assertTrue(self.memory.undo()["undone"])
+
     def test_settings_service_down(self):
         down = down_client()
         with redirect_stdout(io.StringIO()):

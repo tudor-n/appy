@@ -60,17 +60,17 @@ class UiBridgeTests(unittest.TestCase):
         sent = []
         bridge.emit = sent.append
         bridge.memory_committed("approved", "added the HUD")
-        bridge.memory_committed("approved", "added the HUD", ["The HUD runs on a Pi."], ["old"])
+        bridge.memory_committed("approved", "added the HUD", ["The HUD runs on a Pi."], ["old"], "abc")
         self.assertEqual(sent, [
             {"type": "memory_committed", "kind": "approved", "summary": "added the HUD",
-             "facts": [], "dropped": []},
+             "facts": [], "dropped": [], "commit": ""},
             {"type": "memory_committed", "kind": "approved", "summary": "added the HUD",
-             "facts": ["The HUD runs on a Pi."], "dropped": ["old"]}])
+             "facts": ["The HUD runs on a Pi."], "dropped": ["old"], "commit": "abc"}])
 
     def test_memory_decision_and_undo_reach_callbacks(self):
         calls = []
         bridge = UiBridge(on_memory_decision=lambda *a: calls.append(a),
-                          on_memory_undo=lambda: calls.append("undo"))
+                          on_memory_undo=lambda commits: calls.append("undo"))
         with TestClient(bridge.app).websocket_connect("/ws") as ws:
             ws.send_json({"type": "memory_decision", "slug": "bench", "decision": "accept"})
             ws.send_json({"type": "memory_decision", "slug": "bench", "decision": "edit", "text": "# B\n"})
@@ -98,6 +98,24 @@ class UiBridgeTests(unittest.TestCase):
             ws.send_json({"type": "user_text", "text": "  "})
         self.assertEqual(calls, [])
 
+
+    def test_memory_undo_carries_commits(self):
+        calls = []
+        bridge = UiBridge(on_memory_undo=calls.append)
+        with TestClient(bridge.app).websocket_connect("/ws") as ws:
+            ws.send_json({"type": "memory_undo"})
+            ws.send_json({"type": "memory_undo", "commits": ["c3", "c2"]})
+            ws.send_json({"type": "memory_undo", "commits": "c3"})  # malformed: ignored
+            ws.send_json({"type": "memory_undo", "commits": [3]})
+            ws.send_json({"type": "user_text", "text": "  "})
+        self.assertEqual(calls, [None, ["c3", "c2"]])
+
+    def test_memory_error_event(self):
+        bridge = UiBridge()
+        sent = []
+        bridge.emit = sent.append
+        bridge.memory_error("couldn't undo")
+        self.assertEqual(sent, [{"type": "memory_error", "text": "couldn't undo"}])
 
     def test_memory_settings_event_and_replay(self):
         bridge = UiBridge()

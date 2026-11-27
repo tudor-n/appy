@@ -21,6 +21,8 @@ class FakeClient:
         self.set_result = None
         self.head = "aaa"
         self.auto_items = []
+        self.undo_calls = []
+        self.refuse = set()
 
     def settings(self):
         return None if self.down else {"auto_approve": self.auto}
@@ -54,7 +56,12 @@ class FakeClient:
             return {"status": "edited", "commit": "def", "summary": ITEM["summary"]}
         return {"status": "denied"}
 
-    def undo(self):
+    def undo(self, expect=None):
+        self.undo_calls.append(expect)
+        if expect is not None and expect in self.refuse:
+            return {"error": "memory changed since: undo the newer change first"}
+        if self.down:
+            return {"error": "long-term memory is unreachable right now"}
         return {"undone": self.undone, "commit": "f00"} if self.undone else {"undone": None, "commit": None}
 
 
@@ -71,11 +78,19 @@ class MemoryReviewTests(unittest.TestCase):
                 self.changed.notify_all()
 
         self.facts = []
+        self.commits = []
+        self.errors = []
 
-        def emit_chip(kind, summary, facts=(), dropped=()):
+        def emit_chip(kind, summary, facts=(), dropped=(), commit=""):
             with self.changed:
                 self.chips.append((kind, summary))
                 self.facts.append((list(facts), list(dropped)))
+                self.commits.append(commit)
+                self.changed.notify_all()
+
+        def emit_error(text):
+            with self.changed:
+                self.errors.append(text)
                 self.changed.notify_all()
 
         self.settings = []
@@ -91,7 +106,8 @@ class MemoryReviewTests(unittest.TestCase):
                 self.notes.append(line)
                 self.changed.notify_all()
 
-        self.review = MemoryReview(self.client, emit_list, emit_chip, emit_settings=emit_settings,
+        self.review = MemoryReview(self.client, emit_list, emit_chip, emit_error=emit_error,
+                                   emit_settings=emit_settings,
                                    on_change=on_change, poll_seconds=0.05)
 
     def tearDown(self):
@@ -208,6 +224,38 @@ class MemoryReviewTests(unittest.TestCase):
         self.review.tool_committed("memory_remember", "not json")
         self.assertEqual(self.chips, [("remember", "- Tudor lives in Sibiu."), ("forget", "- x")])
         self.assertEqual(self.facts, [(["Tudor lives in Sibiu."], []), ([], ["x"])])
+
+    def test_undo_reverts_exactly_the_pills_commits(self):
+        self.review.start()
+        self.review.undo(["c3", "c2", "c1"])
+        self.wait(lambda: len(self.chips) >= 3)
+        self.assertEqual(self.client.undo_calls, ["c3", "c2", "c1"])
+        self.assertEqual(self.errors, [])
+
+    def test_undo_stops_when_something_newer_changed_memory(self):
+        self.client.refuse = {"c2"}
+        self.review.start()
+        self.review.undo(["c3", "c2", "c1"])
+        self.wait(lambda: self.errors)
+        self.assertEqual(self.client.undo_calls, ["c3", "c2"])  # c1 not attempted
+        self.assertEqual(len(self.chips), 1)
+        self.assertIn("newer", self.errors[0])
+
+    def test_failed_plain_undo_is_shown(self):
+        self.client.down = True
+        self.review.start()
+        self.review.undo()
+        self.wait(lambda: self.errors)
+        self.assertIn("unreachable", self.errors[0])
+
+    def test_chips_carry_the_commit(self):
+        self.review.start()
+        self.review.decide("bench", "accept", None)
+        self.wait(lambda: self.chips)
+        self.assertEqual(self.commits[0], "abc")
+        self.review.tool_committed("memory_remember",
+                                   json.dumps({"line": "- y", "commit": "d1"}))
+        self.assertEqual(self.commits[-1], "d1")
 
     def test_chips_carry_the_facts(self):
         self.client.items = [dict(ITEM, before="# Bench\n- Riden\n", after="# Bench\n- Korad\n")]

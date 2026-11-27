@@ -121,8 +121,9 @@ class MemoryClient:
             body["before"] = before
         return json.loads(self._call("POST", f"/proposals/{slug}", body))
 
-    def undo(self) -> dict:
-        return json.loads(self._call("POST", "/undo", {}))
+    def undo(self, expect: str | None = None) -> dict:
+        """Undo the newest change; with `expect`, only if that commit is still the newest."""
+        return json.loads(self._call("POST", "/undo", {"expect": expect} if expect else {}))
 
     def settings(self) -> dict | None:
         """{"auto_approve": bool}, or None if the service can't be reached."""

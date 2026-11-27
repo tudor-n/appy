@@ -20,7 +20,7 @@ class UiBridge:
         get_effort: Optional[Callable[[], str]] = None,
         on_compact: Optional[Callable[[], None]] = None,
         on_memory_decision: Optional[Callable[[str, str, Optional[str], Optional[str]], None]] = None,
-        on_memory_undo: Optional[Callable[[], None]] = None,
+        on_memory_undo: Optional[Callable[[Optional[list]], None]] = None,
         on_memory_auto_approve: Optional[Callable[[bool], None]] = None,
     ):
         self.app = FastAPI()
@@ -85,7 +85,13 @@ class UiBridge:
                         self.on_memory_decision(slug, decision,
                                                 text if decision == "edit" else None, before)
                     elif kind == "memory_undo" and self.on_memory_undo:
-                        self.on_memory_undo()
+                        # `commits`: exactly the changes a pill's Undo means (newest first)
+                        commits = data.get("commits")
+                        if commits is None:
+                            self.on_memory_undo(None)
+                        elif (isinstance(commits, list) and commits
+                              and all(isinstance(c, str) and c for c in commits)):
+                            self.on_memory_undo(commits)
                     elif kind == "memory_auto_approve" and self.on_memory_auto_approve:
                         if isinstance(data.get("on"), bool):
                             self.on_memory_auto_approve(data["on"])
@@ -149,11 +155,15 @@ class UiBridge:
         self.last_settings = {"type": "memory_settings", "auto_approve": bool(auto_approve)}
         self.emit(self.last_settings)
 
-    def memory_committed(self, kind: str, summary: str, facts=(), dropped=()):
+    def memory_committed(self, kind: str, summary: str, facts=(), dropped=(), commit: str = ""):
         """`facts`/`dropped`: the sentences the change added and removed (the overlay's
-        memory pill lists them)."""
+        memory pill lists them); `commit`: so the pill's Undo can name exactly this one."""
         self.emit({"type": "memory_committed", "kind": kind, "summary": summary,
-                   "facts": list(facts), "dropped": list(dropped)})
+                   "facts": list(facts), "dropped": list(dropped), "commit": commit or ""})
+
+    def memory_error(self, text: str):
+        """A memory action failed (e.g. an undo): shown in the chat."""
+        self.emit({"type": "memory_error", "text": text})
 
     def widget(self, card: dict):
         """Show a card next to Appy; `card` carries its own "widget" kind (see PROTOCOL.md)."""

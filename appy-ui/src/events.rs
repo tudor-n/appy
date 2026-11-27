@@ -75,13 +75,15 @@ impl App {
                 summary,
                 facts,
                 dropped,
+                commit,
             } => {
                 let tx = self.sender();
-                let undo: Rc<dyn Fn()> = Rc::new(move || {
-                    let _ = tx.send(ClientEvent::MemoryUndo);
+                let undo: Rc<dyn Fn(Vec<String>)> = Rc::new(move |commits| {
+                    let _ = tx.send(ClientEvent::MemoryUndo { commits });
                 });
-                self.ui.chat.push_memory(kind, &summary, facts, dropped, undo);
+                self.ui.chat.push_memory(kind, &summary, facts, dropped, &commit, undo);
             }
+            BackendEvent::MemoryError { text } => self.ui.chat.push_notice(&text),
             BackendEvent::MemorySettings { auto_approve } => s.auto_approve = Some(auto_approve),
         }
 

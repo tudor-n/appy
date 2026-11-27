@@ -131,6 +131,13 @@ pub enum BackendEvent {
         facts: Vec<String>,
         #[serde(default)]
         dropped: Vec<String>,
+        /// The change's commit, so a pill's Undo can name exactly what it holds.
+        #[serde(default)]
+        commit: String,
+    },
+    /// A memory action failed (e.g. an undo): shown in the chat.
+    MemoryError {
+        text: String,
     },
     /// The memory service's settings (sent on connect and after every change).
     MemorySettings {
@@ -237,8 +244,12 @@ pub enum ClientEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         before: Option<String>,
     },
-    /// Undo the newest memory change.
-    MemoryUndo,
+    /// Undo the newest memory change, or exactly `commits` (newest first; the Mac stops
+    /// if something newer changed memory in between).
+    MemoryUndo {
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        commits: Vec<String>,
+    },
     /// Turn auto-approve on or off (the panel pill's menu).
     MemoryAutoApprove { on: bool },
 }
@@ -435,8 +446,13 @@ mod tests {
             json,
             r##"{"type":"memory_decision","slug":"lab","decision":"edit","text":"# Lab\n","before":"# Old\n"}"##
         );
-        let json = serde_json::to_string(&ClientEvent::MemoryUndo).unwrap();
+        let json = serde_json::to_string(&ClientEvent::MemoryUndo { commits: vec![] }).unwrap();
         assert_eq!(json, r#"{"type":"memory_undo"}"#);
+        let json = serde_json::to_string(&ClientEvent::MemoryUndo {
+            commits: vec!["c2".into(), "c1".into()],
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"type":"memory_undo","commits":["c2","c1"]}"#);
         let json = serde_json::to_string(&ClientEvent::MemoryAutoApprove { on: true }).unwrap();
         assert_eq!(json, r#"{"type":"memory_auto_approve","on":true}"#);
     }
@@ -458,6 +474,14 @@ mod tests {
             panic!("wrong event")
         };
         assert!(facts.is_empty() && dropped.is_empty());
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"memory_committed","kind":"auto","summary":"s","commit":"abc"}"#,
+        )
+        .unwrap();
+        assert!(matches!(ev, BackendEvent::MemoryCommitted { ref commit, .. } if commit == "abc"));
+        let ev: BackendEvent =
+            serde_json::from_str(r#"{"type":"memory_error","text":"Couldn't undo: x"}"#).unwrap();
+        assert!(matches!(ev, BackendEvent::MemoryError { ref text } if text == "Couldn't undo: x"));
     }
 
     #[test]

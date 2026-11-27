@@ -407,6 +407,10 @@ textview.memory-edit {
     color: #f2f2f7;
     font-size: 11.5px;
 }
+.status-pill.memory-notice {
+    border-radius: 13px;
+    background-color: #5a3d3d;
+}
 .memory-fact.dropped {
     color: #c7c7cc;
     text-decoration-line: line-through;

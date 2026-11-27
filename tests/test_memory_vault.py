@@ -288,6 +288,16 @@ class VaultTests(unittest.TestCase):
         self.assertEqual((self.mem / "core.md").read_text(), "- Tudor lives in Sibiu.\n")
         self.assertFalse((self.mem / "new-note.md").exists())
 
+    def test_undo_only_the_expected_change(self):
+        first = self.vault.remember("a", None, "s1")["commit"]
+        second = self.vault.remember("b", None, "s1")["commit"]
+        before = (self.mem / "core.md").read_text()
+        e = self.assertStatus(409, self.vault.undo, first)  # b is newer: refuse
+        self.assertIn("newer", e.message)
+        self.assertEqual((self.mem / "core.md").read_text(), before)
+        self.assertTrue(self.vault.undo(second)["undone"].endswith(": b"))
+        self.assertTrue(self.vault.undo(first)["undone"].endswith(": a"))
+
     def test_undo_sequence(self):
         core = self.mem / "core.md"
         self.vault.remember("a", None, "s1")

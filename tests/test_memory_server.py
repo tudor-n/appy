@@ -81,6 +81,14 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(r.json()["undone"].startswith("memory: remember core:"))
         self.assertEqual(self.http.post("/undo", json={}).json(), {"undone": None, "commit": None})
 
+    def test_undo_endpoint_with_expect(self):
+        sha = self.remember("Tudor lives in Sibiu.").json()["commit"]
+        self.remember("Tudor has a W124.")
+        r = self.http.post("/undo", json={"expect": sha})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("newer", r.json()["error"])
+        self.assertEqual(self.http.post("/undo").status_code, 200)  # no body: plain undo
+
     def test_writes_are_serialised(self):
         results = []
 

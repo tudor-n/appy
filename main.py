@@ -52,9 +52,9 @@ def main():
         if review_box["review"]:
             review_box["review"].decide(slug, decision, text, before)
 
-    def on_memory_undo():
+    def on_memory_undo(commits=None):
         if review_box["review"]:
-            review_box["review"].undo()
+            review_box["review"].undo(commits)
 
     def on_memory_auto_approve(on: bool):
         if review_box["review"]:
@@ -147,6 +147,7 @@ def main():
     )
     if memory:  # the overlay's review panel for what the consolidator learned
         review_box["review"] = MemoryReview(memory, ui.memory_proposals, ui.memory_committed,
+                                            emit_error=ui.memory_error,
                                             emit_settings=ui.memory_settings,
                                             on_change=agent.note_memory_change)
         review_box["review"].start()

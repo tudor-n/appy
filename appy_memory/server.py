@@ -49,6 +49,11 @@ class DecisionBody(BaseModel):
     before: Optional[str] = None
 
 
+class UndoBody(BaseModel):
+    # The commit the overlay means to undo; refused if something newer came since
+    expect: Optional[str] = None
+
+
 class ForgetBody(BaseModel):
     slug: str
     text: str
@@ -118,8 +123,8 @@ def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
         return result
 
     @app.post("/undo", dependencies=guarded)
-    def undo():
-        result = locked(vault.undo)
+    def undo(body: Optional[UndoBody] = None):
+        result = locked(vault.undo, body.expect if body else None)
         _say(f'undo -> {result["commit"]}: {result["undone"]}' if result["undone"]
              else "undo -> nothing to undo")
         return result

@@ -301,6 +301,10 @@ pub struct MemoryBurst {
     forgot: usize,
     /// (sentence, removed)
     lines: Vec<(String, bool)>,
+    /// Each change's commit ("" from an older backend).
+    commits: Vec<String>,
+    /// Set once the pill's Undo was clicked: nothing joins it after that.
+    closed: Rc<Cell<bool>>,
     last: Instant,
 }
 
@@ -310,6 +314,7 @@ impl MemoryBurst {
         summary: &str,
         facts: Vec<String>,
         dropped: Vec<String>,
+        commit: &str,
         now: Instant,
     ) -> Self {
         let mut burst = Self {
@@ -319,15 +324,18 @@ impl MemoryBurst {
             remembered: 0,
             forgot: 0,
             lines: Vec::new(),
+            commits: Vec::new(),
+            closed: Rc::new(Cell::new(false)),
             last: now,
         };
-        burst.add(kind, summary, facts, dropped, now);
+        burst.add(kind, summary, facts, dropped, commit, now);
         burst
     }
 
     /// Whether a change arriving `now` joins this pill.
     pub fn accepts(&self, kind: MemoryKind, now: Instant) -> bool {
         (kind == MemoryKind::Undo) == self.undo
+            && !self.closed.get()
             && now.saturating_duration_since(self.last) <= BURST_WINDOW
     }
 
@@ -337,9 +345,11 @@ impl MemoryBurst {
         summary: &str,
         facts: Vec<String>,
         dropped: Vec<String>,
+        commit: &str,
         now: Instant,
     ) {
         self.changes += 1;
+        self.commits.push(commit.to_string());
         self.last = now;
         self.unknown &= kind == MemoryKind::Other;
         if facts.is_empty() && dropped.is_empty() {
@@ -393,6 +403,20 @@ impl MemoryBurst {
     /// pill) one more step back.
     pub fn undo_count(&self) -> usize {
         if self.undo { 1 } else { self.changes }
+    }
+
+    /// Exactly what the Undo button takes back, newest first; None for plain undos (an
+    /// "Undid" pill's "Undo earlier", or a change without a commit id).
+    pub fn undo_commits(&self) -> Option<Vec<String>> {
+        if self.undo || self.commits.iter().any(|c| c.is_empty()) {
+            return None;
+        }
+        Some(self.commits.iter().rev().cloned().collect())
+    }
+
+    /// Shared with the Undo button: set it to stop the pill taking more changes.
+    pub fn close_handle(&self) -> Rc<Cell<bool>> {
+        self.closed.clone()
     }
 
     pub fn undo_label(&self) -> Option<&'static str> {
@@ -944,20 +968,42 @@ mod tests {
     }
 
     #[test]
+    fn undo_names_the_pills_commits_newest_first() {
+        let t0 = Instant::now();
+        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], "c1", t0);
+        b.add(MemoryKind::Auto, "s", v(&["B."]), vec![], "c2", t0);
+        assert_eq!(b.undo_commits(), Some(v(&["c2", "c1"])));
+        // an older backend without commit ids: plain undos, one per change
+        b.add(MemoryKind::Approved, "s", v(&["C."]), vec![], "", t0);
+        assert_eq!((b.undo_commits(), b.undo_count()), (None, 3));
+        let u = MemoryBurst::new(MemoryKind::Undo, "memory: x", vec![], vec![], "r1", t0);
+        assert_eq!(u.undo_commits(), None); // "Undo earlier": one plain step back
+    }
+
+    #[test]
+    fn a_pill_whose_undo_was_clicked_takes_no_more_changes() {
+        let t0 = Instant::now();
+        let u = MemoryBurst::new(MemoryKind::Undo, "memory: x", vec![], vec![], "r1", t0);
+        assert!(u.accepts(MemoryKind::Undo, t0));
+        u.close_handle().set(true);
+        assert!(!u.accepts(MemoryKind::Undo, t0));
+    }
+
+    #[test]
     fn burst_title_counts() {
         let t0 = Instant::now();
-        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], t0);
+        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], "", t0);
         assert_eq!(b.title(), "Remembered a fact");
-        b.add(MemoryKind::Auto, "s", v(&["B.", "C."]), vec![], t0);
+        b.add(MemoryKind::Auto, "s", v(&["B.", "C."]), vec![], "", t0);
         assert_eq!(b.title(), "Remembered 3 facts");
-        let f = MemoryBurst::new(MemoryKind::Forget, "- x", vec![], v(&["x"]), t0);
+        let f = MemoryBurst::new(MemoryKind::Forget, "- x", vec![], v(&["x"]), "", t0);
         assert_eq!(f.title(), "Forgot a fact");
-        let mut m = MemoryBurst::new(MemoryKind::Remember, "- a", v(&["a"]), vec![], t0);
-        m.add(MemoryKind::Approved, "s", v(&["b"]), v(&["c"]), t0);
+        let mut m = MemoryBurst::new(MemoryKind::Remember, "- a", v(&["a"]), vec![], "", t0);
+        m.add(MemoryKind::Approved, "s", v(&["b"]), v(&["c"]), "", t0);
         assert_eq!(m.title(), "Remembered 2 facts · forgot 1");
-        let mut u = MemoryBurst::new(MemoryKind::Undo, "memory: x [approved]", vec![], vec![], t0);
+        let mut u = MemoryBurst::new(MemoryKind::Undo, "memory: x [approved]", vec![], vec![], "", t0);
         assert_eq!(u.title(), "Undid a change");
-        u.add(MemoryKind::Undo, "memory: y", vec![], vec![], t0);
+        u.add(MemoryKind::Undo, "memory: y", vec![], vec![], "", t0);
         assert_eq!(u.title(), "Undid 2 changes");
         assert_eq!(m.lines(), vec![("a".into(), false), ("b".into(), false), ("c".into(), true)]);
     }
@@ -965,14 +1011,14 @@ mod tests {
     #[test]
     fn burst_window_and_family() {
         let t0 = Instant::now();
-        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], t0);
+        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], "", t0);
         assert!(b.accepts(MemoryKind::Auto, t0 + Duration::from_secs(3)));
         assert!(!b.accepts(MemoryKind::Undo, t0 + Duration::from_secs(1)));
-        b.add(MemoryKind::Auto, "s", v(&["B."]), vec![], t0 + Duration::from_secs(3));
+        b.add(MemoryKind::Auto, "s", v(&["B."]), vec![], "", t0 + Duration::from_secs(3));
         // the window runs from the newest change
         assert!(b.accepts(MemoryKind::Approved, t0 + Duration::from_secs(6)));
         assert!(!b.accepts(MemoryKind::Approved, t0 + Duration::from_secs(8)));
-        let u = MemoryBurst::new(MemoryKind::Undo, "memory: x", vec![], vec![], t0);
+        let u = MemoryBurst::new(MemoryKind::Undo, "memory: x", vec![], vec![], "", t0);
         assert!(u.accepts(MemoryKind::Undo, t0));
         assert!(!u.accepts(MemoryKind::Approved, t0));
     }
@@ -980,27 +1026,27 @@ mod tests {
     #[test]
     fn summary_fallback_when_no_facts() {
         let t0 = Instant::now();
-        let b = MemoryBurst::new(MemoryKind::Approved, "Retitled the note", vec![], vec![], t0);
+        let b = MemoryBurst::new(MemoryKind::Approved, "Retitled the note", vec![], vec![], "", t0);
         assert_eq!(b.title(), "Remembered a fact");
         assert_eq!(b.lines(), vec![("Retitled the note".into(), false)]);
-        let u = MemoryBurst::new(MemoryKind::Undo, "memory: Added the HUD [approved]", vec![], vec![], t0);
+        let u = MemoryBurst::new(MemoryKind::Undo, "memory: Added the HUD [approved]", vec![], vec![], "", t0);
         assert_eq!(u.lines(), vec![("Added the HUD".into(), false)]);
         // explicit remember/forget commits read "remember <note>: <fact>"
-        let u = MemoryBurst::new(MemoryKind::Undo, "memory: remember core: Tudor owns a '94 W124.", vec![], vec![], t0);
+        let u = MemoryBurst::new(MemoryKind::Undo, "memory: remember core: Tudor owns a '94 W124.", vec![], vec![], "", t0);
         assert_eq!(u.lines(), vec![("Tudor owns a '94 W124.".into(), false)]);
     }
 
     #[test]
     fn undo_count_matches_changes() {
         let t0 = Instant::now();
-        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], t0);
-        b.add(MemoryKind::Approved, "s", v(&["B.", "C."]), vec![], t0);
-        b.add(MemoryKind::Auto, "s", v(&["D."]), vec![], t0);
+        let mut b = MemoryBurst::new(MemoryKind::Approved, "s", v(&["A."]), vec![], "", t0);
+        b.add(MemoryKind::Approved, "s", v(&["B.", "C."]), vec![], "", t0);
+        b.add(MemoryKind::Auto, "s", v(&["D."]), vec![], "", t0);
         assert_eq!((b.undo_count(), b.undo_label()), (3, Some("Undo")));
-        let mut u = MemoryBurst::new(MemoryKind::Undo, "memory: x", vec![], vec![], t0);
-        u.add(MemoryKind::Undo, "memory: y", vec![], vec![], t0);
+        let mut u = MemoryBurst::new(MemoryKind::Undo, "memory: x", vec![], vec![], "", t0);
+        u.add(MemoryKind::Undo, "memory: y", vec![], vec![], "", t0);
         assert_eq!((u.undo_count(), u.undo_label()), (1, Some("Undo earlier")));
-        let o = MemoryBurst::new(MemoryKind::Other, "x", vec![], vec![], t0);
+        let o = MemoryBurst::new(MemoryKind::Other, "x", vec![], vec![], "", t0);
         assert_eq!(o.undo_label(), None);
     }
 }

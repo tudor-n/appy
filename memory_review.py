@@ -41,13 +41,15 @@ def change_between(slug: str, before: str, after: str, summary: str) -> str:
 
 class MemoryReview:
     def __init__(self, client, emit_proposals: Callable[[list], None],
-                 emit_committed: Callable[[str, str], None],
+                 emit_committed: Callable[..., None],
+                 emit_error: Callable[[str], None] | None = None,
                  emit_settings: Callable[[bool], None] | None = None,
                  on_change: Callable[[str], None] | None = None,
                  poll_seconds: float = POLL_SECONDS):
         self.client = client
         self.emit_proposals = emit_proposals
         self.emit_committed = emit_committed
+        self.emit_error = emit_error or (lambda text: None)
         self.emit_settings = emit_settings or (lambda on: None)
         self.on_change = on_change or (lambda line: None)
         self._head: str | None = None  # auto commits after this one haven't been announced
@@ -76,8 +78,10 @@ class MemoryReview:
         """`before`: for an edit, the note as the card showed it when editing started."""
         self._jobs.put(("decide", slug, decision, text, before))
 
-    def undo(self) -> None:
-        self._jobs.put(("undo",))
+    def undo(self, commits: list[str] | None = None) -> None:
+        """Undo the newest change, or exactly `commits` (newest first): a pill's changes,
+        stopping if something newer changed memory in between."""
+        self._jobs.put(("undo", list(commits) if commits else None))
 
     def set_auto_approve(self, on: bool) -> None:
         self._jobs.put(("auto", bool(on)))
@@ -94,10 +98,11 @@ class MemoryReview:
         if isinstance(data, dict) and data.get("commit") and data.get("line"):
             line = str(data["line"])
             fact = [line.removeprefix("- ").strip()]
+            commit = str(data["commit"])
             if name == "memory_remember":
-                self.emit_committed(kinds[name], line, fact, [])
+                self.emit_committed(kinds[name], line, fact, [], commit)
             else:
-                self.emit_committed(kinds[name], line, [], fact)
+                self.emit_committed(kinds[name], line, [], fact, commit)
 
     def _loop(self) -> None:
         while True:
@@ -137,19 +142,30 @@ class MemoryReview:
             self._decide(slug, decision, text, before)
         elif kind == "undo":
             # Show any auto commit first: Undo reverts the newest change, which should be
-            # the newest chip Tudor can see
+            # the newest pill Tudor can see
             self._announce_auto()
-            result = self.client.undo()
-            if result.get("undone"):
-                print(f"[memory] undid: {result['undone']}")
-                self.emit_committed("undo", str(result["undone"]))
-                what = str(result["undone"]).removeprefix("memory: ")
-                for tag in (" [approved]", " [edited]", " [auto]"):
-                    what = what.removesuffix(tag)
-                self.on_change(f"undone, no longer true: {what}")
-            elif result.get("error"):
-                print(f"[memory] undo failed: {result['error']}")
+            for expect in job[1] or [None]:
+                if not self._undo_one(expect):
+                    break
             self._sync(force=True)
+
+    def _undo_one(self, expect: str | None) -> bool:
+        """One undo; False (with the reason shown in the chat) if it didn't happen."""
+        result = self.client.undo(expect)
+        if result.get("undone"):
+            print(f"[memory] undid: {result['undone']}")
+            self.emit_committed("undo", str(result["undone"]), [], [],
+                                str(result.get("commit") or ""))
+            what = str(result["undone"]).removeprefix("memory: ")
+            for tag in (" [approved]", " [edited]", " [auto]"):
+                what = what.removesuffix(tag)
+            self.on_change(f"undone, no longer true: {what}")
+            return True
+        if result.get("error"):
+            print(f"[memory] undo failed: {result['error']}")
+            self.emit_error(f"Couldn't undo: {result['error']}")
+            return False
+        return expect is None  # nothing left to undo
 
     def _decide(self, slug: str, decision: str, text: str | None, before: str | None) -> None:
         item = next((i for i in self._last or [] if i["slug"] == slug), None)
@@ -171,7 +187,7 @@ class MemoryReview:
                 new = text or ""
             added, removed = facts_between(old, new)
             self.emit_committed("approved" if status == "accepted" else "edited", summary,
-                                added, removed)
+                                added, removed, str(result.get("commit") or ""))
             if item or status == "edited":
                 self.on_change(describe_change(slug, added, removed, summary))
         self._sync(force=True)
@@ -192,7 +208,7 @@ class MemoryReview:
             for item in data["items"]:
                 print(f"[memory] auto-saved {item['slug']}: {item['summary']}")
                 self.emit_committed("auto", item["summary"], item.get("added", []),
-                                    item.get("removed", []))
+                                    item.get("removed", []), item.get("commit", ""))
                 self.on_change(describe_change(item["slug"], item.get("added", []),
                                                item.get("removed", []), item["summary"]))
         if data["head"]:
