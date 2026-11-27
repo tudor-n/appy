@@ -14,6 +14,7 @@ from agent import Agent
 from hearing import Ear
 from memory_client import MemoryClient, system_prompt
 from memory_review import MemoryReview
+from note_attach import NoteAttacher
 from session_log import SessionLogger, default_logs_dir
 from status import StatusTracker
 from voice import Speaker
@@ -97,6 +98,9 @@ def main():
             ui.widget(card)
         if review_box["review"]:  # "Remembered: ..." chip with Undo
             review_box["review"].tool_committed(name, result)
+        if attacher and name in ("memory_remember", "memory_forget"):
+            # a new or changed note: re-read the index off the turn's thread
+            threading.Thread(target=attacher.refresh, daemon=True).start()
 
     model = os.getenv("MODEL", "google/gemma-4-26b-a4b")
     log = SessionLogger(default_logs_dir())
@@ -114,6 +118,8 @@ def main():
     elif not os.getenv("MEMORY_URL", "").strip():
         print("[memory] off (MEMORY_URL not set)")
     prompt = system_prompt(load_system_prompt(), context)
+    # Notes the user names get attached to their message (Gemma rarely calls memory_read)
+    attacher = NoteAttacher(memory, context["index"]) if memory and context else None
     if os.getenv("APPY_DUMP_PROMPT"):  # exactly what the model gets as its system prompt
         dump = log.path.with_suffix(".prompt.txt")
         try:
@@ -144,12 +150,18 @@ def main():
         context_limit=int(os.getenv("CONTEXT_TOKENS", "16384")),
         # APPY_DUMP_COMPACTION=1: write each compaction's prompt + summary next to the log
         compaction_dump=log.path.with_suffix("") if os.getenv("APPY_DUMP_COMPACTION") else None,
+        note_attacher=attacher,
     )
+
+    def on_memory_change(line: str):
+        agent.note_memory_change(line)
+        if attacher:
+            attacher.refresh()
     if memory:  # the overlay's review panel for what the consolidator learned
         review_box["review"] = MemoryReview(memory, ui.memory_proposals, ui.memory_committed,
                                             emit_error=ui.memory_error,
                                             emit_settings=ui.memory_settings,
-                                            on_change=agent.note_memory_change)
+                                            on_change=on_memory_change)
         review_box["review"].start()
 
     def _voice_forwarder():

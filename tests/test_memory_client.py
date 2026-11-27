@@ -127,6 +127,10 @@ class MemoryClientTests(unittest.TestCase):
         self.log_file("2026-11-24_090000.jsonl")
         self.assertEqual(down_client().upload_leftovers(self.logs, skip=self.logs / "x"), 0)
 
+    def test_rules_forbid_claiming_a_check_without_reading(self):
+        self.assertIn("attached", MEMORY_RULES)
+        self.assertIn("Never say you checked", MEMORY_RULES)
+
     def test_system_prompt_block(self):
         self.assertEqual(
             system_prompt("P", {"core": "- a\n", "index": ""}),

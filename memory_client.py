@@ -12,7 +12,9 @@ from pathlib import Path
 import httpx
 
 MEMORY_RULES = (
-    "Use memory_read before answering about a person/project in the index. "
+    "Notes the user mentions are attached to their message. For any other person/project "
+    "in the index, use memory_read before answering about it. Never say you checked your "
+    "memory unless you read the note (attached or with memory_read). "
     "Only write memory when the user explicitly asks."
 )
 UNREACHABLE = json.dumps({"error": "long-term memory is unreachable right now"})

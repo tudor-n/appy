@@ -190,6 +190,13 @@ class VaultProposalTests(unittest.TestCase):
         self.assertEqual(len(lines), 6)
 
 
+class NoteFormatPromptTests(unittest.TestCase):
+    def test_description_must_be_specific(self):
+        from appy_memory.consolidator import NOTE_FORMAT
+        self.assertIn("key parts", NOTE_FORMAT)
+        self.assertIn("Information regarding", NOTE_FORMAT)  # named as what not to write
+
+
 class FakeLLM:
     """Stands in for LLM: replays scripted outputs and records every call."""
 

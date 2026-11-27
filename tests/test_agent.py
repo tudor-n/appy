@@ -337,6 +337,27 @@ class MemoryNoteTests(unittest.TestCase):
         self.assertEqual(self.user_contents(client)[0],
                          "[Memory changed since your last reply: a | b]\n\nhi")
 
+    def test_attached_notes_come_after_memory_changes(self):
+        class Attacher:
+            released = []
+
+            def attach(self, text):
+                return ("[From your memory, note 'dummy-robot':\n- PCA9685]", ["dummy-robot"])
+
+            def release(self, slugs):
+                self.released.extend(slugs)
+
+        att = Attacher()
+        agent, client, _, _ = make_agent([[text_chunk("ok")], ConnectionError("down")],
+                                         note_attacher=att)
+        agent.note_memory_change("a")
+        run_quietly(agent, "dummy?")
+        self.assertEqual(self.user_contents(client)[0],
+                         "[Memory changed since your last reply: a]\n\n"
+                         "[From your memory, note 'dummy-robot':\n- PCA9685]\n\ndummy?")
+        run_quietly(agent, "dummy again")  # fails: the note goes back for the next turn
+        self.assertEqual(att.released, ["dummy-robot"])
+
     def test_memory_notes_survive_a_failed_turn(self):
         agent, client, _, _ = make_agent([ConnectionError("down"), [text_chunk("ok")]])
         agent.note_memory_change("a")

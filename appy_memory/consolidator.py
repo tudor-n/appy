@@ -84,7 +84,9 @@ CONVERSATION:
 
 NOTE_FORMAT = (
     '- The first line is "# {title}" and the second line is "> " plus a one-line description '
-    "of what the note is about (under 120 characters). Keep both lines."
+    "under 120 characters that names what it is and its key parts, e.g. \"> Tudor's servo "
+    "robot: ESP32, MG996R servos, PCA9685 driver\" (never a generic \"Information "
+    "regarding ...\"). Update it when the facts change. Keep both lines."
 )
 CORE_FORMAT = "- This is the core note about Tudor himself: bullets only, no title or description."
 

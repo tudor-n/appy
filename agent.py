@@ -122,6 +122,7 @@ class Agent:
         summary_max: int = SUMMARY_MAX,
         context_limit: int = CONTEXT_TOKENS,
         compaction_dump: Path | None = None,
+        note_attacher=None,
     ):
         """`on_tool_result(name, result)` is called after each tool runs, e.g. so the
         UI can show a card for it. Its errors are logged, never fatal to the turn.
@@ -162,6 +163,8 @@ class Agent:
         # next user message instead.
         self._memory_notes: list[str] = []
         self._memory_lock = threading.Lock()
+        # note_attach.NoteAttacher: puts the memory notes a message names in front of it
+        self.note_attacher = note_attacher
 
     def note_memory_change(self, line: str) -> None:
         """Tell Appy about a memory change on his next turn (any thread)."""
@@ -208,8 +211,18 @@ class Agent:
         checkpoint = len(self.messages)
         with self._memory_lock:
             notes, self._memory_notes = self._memory_notes, []
-        content = (f"[Memory changed since your last reply: {' | '.join(notes)}]\n\n{user_text}"
-                   if notes else user_text)
+        attached_block, attached = "", []
+        if self.note_attacher is not None:
+            try:
+                attached_block, attached = self.note_attacher.attach(user_text)
+            except Exception as exc:  # never let memory break a turn
+                print(f"[memory] couldn't attach notes: {type(exc).__name__}: {exc}")
+        parts = []
+        if notes:
+            parts.append(f"[Memory changed since your last reply: {' | '.join(notes)}]")
+        if attached_block:
+            parts.append(attached_block)
+        content = "\n\n".join(parts + [user_text])
         self.messages.append({"role": "user", "content": content})
         self.status.set_phase("thinking")
         try:
@@ -221,6 +234,8 @@ class Agent:
             del self.messages[checkpoint:]
             with self._memory_lock:  # Appy never saw them: keep them for the next turn
                 self._memory_notes[:0] = notes
+            if attached:
+                self.note_attacher.release(attached)
             print(f"\n[llm error] {type(exc).__name__}: {exc}\n")
             apology = describe_error(exc)
             self.ui.response(apology, "skeptical")
