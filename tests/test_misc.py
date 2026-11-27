@@ -346,5 +346,43 @@ class RunToolTests(unittest.TestCase):
         self.assertIn("TypeError", self.error("boom", '{"x": 1}'))
 
 
+class ModeTests(unittest.TestCase):
+    def setUp(self):
+        tools.reset_mode()
+
+    def tearDown(self):
+        tools.reset_mode()
+
+    def test_starts_in_banter(self):
+        self.assertEqual(tools.current_mode(), "banter")
+
+    def test_set_mode_persists(self):
+        json.loads(tools.run_tool("set_mode", '{"mode": "focus"}'))
+        self.assertEqual(tools.current_mode(), "focus")
+        self.assertEqual(tools.stamp_message("next one", "10:32 PM"), "[10:32 PM \u00b7 FOCUS] next one")
+
+    def test_case_insensitive(self):
+        self.assertEqual(json.loads(tools.set_mode("FOCUS"))["mode"], "focus")
+
+    def test_unknown_mode_is_an_error_and_keeps_mode(self):
+        tools.set_mode("focus")
+        self.assertIn("Unknown mode", json.loads(tools.set_mode("normal"))["error"])
+        self.assertEqual(tools.current_mode(), "focus")
+
+    def test_missing_mode_is_an_error(self):
+        self.assertIn("error", json.loads(tools.run_tool("set_mode", "{}")))
+
+    def test_already_in_mode(self):
+        self.assertIn("Already", json.loads(tools.set_mode("banter"))["note"])
+
+    def test_schema_registered_and_not_stale(self):
+        names = [s["function"]["name"] for s in tools.TOOL_SCHEMAS]
+        self.assertIn("set_mode", names)
+        self.assertNotIn("set_mode", tools.STALE_TOOLS)
+
+    def test_banter_stamp(self):
+        self.assertEqual(tools.stamp_message("hi", "09:00 AM"), "[09:00 AM \u00b7 BANTER] hi")
+
+
 if __name__ == "__main__":
     unittest.main()

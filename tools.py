@@ -81,7 +81,27 @@ TOOL_SCHEMAS = [
                 "required": [],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_mode",
+            "description": (
+                "Switch how you work with Tudor. 'focus': terse, no jokes, one short "
+                "sentence. 'banter': your normal self. The mode stays until you switch it "
+                "again. Call it only when Tudor asks to change how you talk or work with "
+                "him (e.g. 'lock in', 'focus up', 'ok we're done', 'relax'), never just "
+                "because a question is serious."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["banter", "focus"]},
+                },
+                "required": ["mode"],
+            },
+        },
+    },
 ]
 
 _weather_cache = {"data": None, "ts": 0.0}
@@ -268,11 +288,43 @@ def memory_forget(slug: str, text: str) -> str:
     return _memory.forget(slug, text) if _memory else _NO_MEMORY
 
 
+# How Appy talks: "banter" (default) or "focus". Kept here rather than in the system
+# prompt, which must stay byte-for-byte the same all run (KV cache); every user message
+# carries the mode in its stamp instead (see stamp_message).
+VALID_MODES = ("banter", "focus")
+_mode = {"value": "banter"}
+
+
+def current_mode() -> str:
+    return _mode["value"]
+
+
+def reset_mode() -> None:
+    _mode["value"] = "banter"
+
+
+def set_mode(mode: str) -> str:
+    mode = str(mode).strip().lower()
+    if mode not in VALID_MODES:
+        return json.dumps({"error": f"Unknown mode: {mode}. Use banter or focus."})
+    if mode == _mode["value"]:
+        return json.dumps({"mode": mode, "note": f"Already in {mode.upper()} mode."})
+    _mode["value"] = mode
+    print(f"[mode -> {mode}] ", end="", flush=True)
+    return json.dumps({"mode": mode, "note": f"Mode is now {mode.upper()}. Reply in {mode} mode."})
+
+
+def stamp_message(text: str, now: str) -> str:
+    """The user message as the model sees it: `[10:32 PM · FOCUS] text`."""
+    return f"[{now} \u00b7 {current_mode().upper()}] {text}"
+
+
 TOOL_MAP = {
     "get_weather": get_weather,
     "memory_read": memory_read,
     "memory_remember": memory_remember,
     "memory_forget": memory_forget,
+    "set_mode": set_mode,
 }
 
 # Words that make a message unmistakably about the weather. Deliberately excludes
