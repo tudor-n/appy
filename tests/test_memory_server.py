@@ -246,6 +246,33 @@ class DecisionTests(unittest.TestCase):
         current = (self.root / "memory" / "bench.md").read_text()
         ok = self.http.post("/proposals/bench", json={"decision": "edit", "text": NEW, "before": current})
         self.assertEqual(ok.json()["status"], "edited")
+        self.assertIn("Fluke", (self.root / "memory" / "bench.md").read_text())
+
+    def test_proposal_on_a_moved_note_reads_as_stale_and_is_redone(self):
+        self.vault.remember("The iron is a Pinecil.", "bench", "live")
+        [item] = self.http.get("/proposals").json()["items"]
+        self.assertTrue(item["stale"])  # its diff would show the Pinecil line as removed
+        self.assertEqual(self.refreshed, ["bench"])
+
+    def test_edit_on_a_moved_note_keeps_facts_added_since(self):
+        self.vault.remember("The iron is a Pinecil.", "bench", "live")
+        current = (self.root / "memory" / "bench.md").read_text()
+        text = "# Bench\n> Lab bench gear\n- The PSU is a Korad KA3005P.\n"  # from the old new_text
+        r = self.http.post("/proposals/bench", json={"decision": "edit", "text": text, "before": current})
+        self.assertEqual(r.json()["status"], "edited")
+        self.assertEqual((self.root / "memory" / "bench.md").read_text(),
+                         text + "- The iron is a Pinecil.\n")
+
+    def test_edit_on_a_moved_note_drops_facts_removed_since(self):
+        self.vault.remember("The iron is a Pinecil.", "bench", "live")
+        (self.root / "pending" / "bench.json").unlink()  # a proposal built on the Pinecil
+        self.vault.save_proposal("bench", "Bench", NEW + "- The iron is a Pinecil.\n", "x", SID, 1)
+        self.http.post("/undo", json={})  # the Pinecil remember is taken back
+        current = (self.root / "memory" / "bench.md").read_text()
+        r = self.http.post("/proposals/bench", json={
+            "decision": "edit", "text": NEW + "- The iron is a Pinecil.\n", "before": current})
+        self.assertEqual(r.json()["status"], "edited")
+        self.assertEqual((self.root / "memory" / "bench.md").read_text(), NEW)
 
     def test_undo_of_approval_puts_the_proposal_back(self):
         self.decide("accept")

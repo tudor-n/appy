@@ -88,6 +88,14 @@ class GitRepo:
         except GitError:
             return None
 
+    def file_commits(self, path: str, limit: int = 200) -> list[str]:
+        """The commits that changed `path`, newest first (at most `limit`)."""
+        try:
+            out = self._git("log", f"-{limit}", "--format=%H", "--", path)
+        except GitError:
+            return []
+        return out.split()
+
     def commit_info(self, sha: str) -> tuple[str, list[str]]:
         """A commit's message body and the files it changed."""
         out = self._git("show", "--name-only", "--format=%b%x1e", sha)

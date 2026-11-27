@@ -209,8 +209,12 @@ class Vault:
                 item = self.proposal(path.stem)
                 if item:
                     # for review: the note as it stands now, and whether it moved on since
+                    # (the flag is set by Accept; a note changed by remember/forget since
+                    # the proposal was written is stale too, or its diff would lie)
+                    stale = bool(item.get("stale")) or item.get("base_hash") != self.note_hash(
+                        item["slug"])
                     found.append({**item, "before": self.note_text(item["slug"]) or "",
-                                  "stale": bool(item.get("stale"))})
+                                  "stale": stale})
         return sorted(found, key=lambda p: (str(p.get("updated", "")), p["slug"]))
 
     def save_proposal(self, slug: str, title: str, new_text: str, summary: str, session: str,
@@ -244,6 +248,35 @@ class Vault:
         sha = self._commit(path, old, text, subject, body) if text != old else None
         self.delete_proposal(slug)
         return sha
+
+    def onto_current(self, slug: str, base_hash: str, text: str) -> str:
+        """`text`, written on the note whose hash is `base_hash`, carried over to the note
+        as it is now: facts added since are kept, facts removed since stay removed.
+        VaultError(409) if that base note can't be found in history."""
+        current = self.note_text(slug)
+        if base_hash == self.note_hash(slug):
+            return text
+        base = self._note_with_hash(slug, base_hash)
+        if base is None:
+            raise VaultError(409, f"'{slug}' changed since this update was written; deny it")
+        base_keys = {_match_key(b) for b in self._bullets(base)}
+        now = self._bullets(current or "")
+        now_keys = {_match_key(b) for b in now}
+        lines = [l for l in text.splitlines()
+                 if not (l.startswith("- ") and _match_key(l) in base_keys - now_keys)]
+        have = {_match_key(l) for l in lines if l.startswith("- ")}
+        lines += [b for b in now if _match_key(b) not in base_keys and _match_key(b) not in have]
+        return "\n".join(lines) + "\n"
+
+    def _note_with_hash(self, slug: str, digest: str) -> str | None:
+        if digest == "":
+            return ""  # the note didn't exist yet
+        path = f"memory/{self._path(slug).name}"
+        for sha in self.git.file_commits(path):
+            text = self.git.file_at(sha, path)
+            if text is not None and hashlib.sha256(text.encode("utf-8")).hexdigest() == digest:
+                return text
+        return None
 
     def delete_proposal(self, slug: str) -> bool:
         path = self.root / "pending" / f"{self._path(slug).stem}.json"

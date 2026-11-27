@@ -126,9 +126,10 @@ changed (removed lines struck through, new ones in white) and **Approve**, **Den
 "- " bullets). Scroll over the panel, or use ▲ ▼, for the next one ("2 of 3"). **Approve all**
 approves every note that isn't being edited or redone; **Later** hides the panel until something
 new arrives (or the next launch), without deciding anything. If the note changed since the
-proposal was written, Approve shows "updating…" while the Mac redoes it against the current
-note; review it again when it comes back. While a proposal is being redone it can still be
-denied or edited. The panel refreshes when Appy starts, after each decision, and every minute.
+proposal was written (a fact remembered or forgotten meanwhile), the panel shows "updating…"
+while the Mac redoes it against the current note; review it again when it comes back. While a
+proposal is being redone it can still be denied or edited; a saved edit keeps the facts
+remembered since and leaves out the ones forgotten since. The panel refreshes when Appy starts, after each decision, and every minute.
 
 Every change to memory (a remember, a forget, an approved, edited or auto-approved proposal)
 shows up as a small centred pill in the chat, one per burst: "Remembered a fact", "Remembered 3

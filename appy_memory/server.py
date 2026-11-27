@@ -145,7 +145,12 @@ def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
 
     @app.get("/proposals", dependencies=guarded)
     def proposals():
-        return {"items": locked(vault.proposals)}
+        items = locked(vault.proposals)
+        if app.state.worker is not None:
+            for item in items:
+                if item["stale"]:  # e.g. a remember on its note since: redo it
+                    app.state.worker.refresh(item["slug"])
+        return {"items": items}
 
     @app.post("/proposals/{slug}", dependencies=guarded)
     def decide(slug: str, body: DecisionBody):
@@ -167,7 +172,11 @@ def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
                     raise VaultError(409, f"'{slug}' changed while you were editing; "
                                           "your text wasn't saved")
                 try:
+                    # The edit starts from the proposal, which may predate facts
+                    # remembered (or forgotten) since: carry the edit over to the note now
                     text = check_note(slug, body.text or "", vault.note_text(slug))
+                    text = check_note(slug, vault.onto_current(slug, item.get("base_hash", ""),
+                                                               text), vault.note_text(slug))
                 except NoteFormatError as exc:
                     raise VaultError(400, f"edit not saved: {exc.reason}")
                 sha = vault.apply_note(slug, text, f"memory: {summary[:60]} [edited]", sessions)
@@ -210,6 +219,9 @@ def create_app(vault: Vault, token: str, worker=None) -> FastAPI:
                 for item in vault.proposals():
                     if item.get("stale"):
                         stale.append(item["slug"])
+                        if app.state.worker is not None:
+                            vault.mark_stale(item["slug"])
+                            app.state.worker.refresh(item["slug"])
                         continue
                     try:
                         status = accept(item["slug"], item, "auto")["status"]
