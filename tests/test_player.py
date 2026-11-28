@@ -102,7 +102,9 @@ class BackgroundPlayerTests(unittest.TestCase):
         ok = self.player().authenticate(run=lambda cmd, **kw: runs.append(cmd) or
                                         subprocess.CompletedProcess(cmd, 0))
         self.assertTrue(ok)
-        self.assertEqual(runs, [[str(self.binary), "authenticate", "--cache-path", str(self.cache)]])
+        # its own port: spotifyd's default 8000 is often taken (e.g. by a dev server)
+        self.assertEqual(runs, [[str(self.binary), "authenticate", "--cache-path", str(self.cache),
+                                 "--oauth-port", "8897"]])
 
     def test_authenticate_without_binary(self):
         self.assertFalse(self.player(binary=self.dir / "nope").authenticate(

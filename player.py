@@ -13,6 +13,8 @@ DEFAULT_BINARY = Path.home() / ".local" / "bin" / "spotifyd"
 DEFAULT_CACHE = Path.home() / ".cache" / "appy" / "spotifyd"
 DEVICE_NAME = "Appy"
 STOP_TIMEOUT_S = 3.0
+# Where spotifyd's login waits for the browser; its default, 8000, is often taken
+OAUTH_PORT = 8897
 
 
 class BackgroundPlayer:
@@ -75,4 +77,5 @@ class BackgroundPlayer:
         if not self.binary.is_file():
             return False
         self.cache.mkdir(parents=True, exist_ok=True)
-        return run([str(self.binary), "authenticate", "--cache-path", str(self.cache)]).returncode == 0
+        return run([str(self.binary), "authenticate", "--cache-path", str(self.cache),
+                    "--oauth-port", str(OAUTH_PORT)]).returncode == 0
