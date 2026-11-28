@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import time
 import httpx
 
+from dj import CONTROL_ACTIONS, PLAY_KINDS
+
 WMO_CODES = {
     0: "clear sky",
     1: "mainly clear",
@@ -99,6 +101,45 @@ TOOL_SCHEMAS = [
                     "mode": {"type": "string", "enum": ["banter", "focus"]},
                 },
                 "required": ["mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_music",
+            "description": (
+                "Play or queue music in Riff (Spotify). kind: track (default), artist, "
+                "album, playlist (Tudor's own playlists first), liked (his liked songs; no "
+                "query needed). queue=true adds one song to the queue instead of playing it "
+                "now. Tell Tudor what actually started, from the result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for, e.g. 'Karma Police' or 'gym'."},
+                    "kind": {"type": "string", "enum": list(PLAY_KINDS)},
+                    "queue": {"type": "boolean"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "music_control",
+            "description": (
+                "Pause, resume, skip, go back, change the volume, shuffle, or check what's "
+                "playing in Riff. set_volume takes value 0-100."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": list(CONTROL_ACTIONS)},
+                    "value": {"type": "number", "minimum": 0, "maximum": 100},
+                },
+                "required": ["action"],
             },
         },
     },
@@ -288,6 +329,23 @@ def memory_forget(slug: str, text: str) -> str:
     return _memory.forget(slug, text) if _memory else _NO_MEMORY
 
 
+_dj = None  # a dj.DJ, set by main()
+_NO_DJ = json.dumps({"error": "Music isn't set up."})
+
+
+def set_dj(dj) -> None:
+    global _dj
+    _dj = dj
+
+
+def play_music(query: str = "", kind: str = "track", queue: bool = False) -> str:
+    return _dj.play_music(query=query, kind=kind, queue=queue) if _dj else _NO_DJ
+
+
+def music_control(action: str = "", value: float | None = None) -> str:
+    return _dj.music_control(action=action, value=value) if _dj else _NO_DJ
+
+
 # How Appy talks: "banter" (default) or "focus". Kept here rather than in the system
 # prompt, which must stay byte-for-byte the same all run (KV cache); every user message
 # carries the mode in its stamp instead (see turn_stamp).
@@ -331,6 +389,8 @@ TOOL_MAP = {
     "memory_remember": memory_remember,
     "memory_forget": memory_forget,
     "set_mode": set_mode,
+    "play_music": play_music,
+    "music_control": music_control,
 }
 
 # Words that make a message unmistakably about the weather. Deliberately excludes
@@ -422,7 +482,8 @@ def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | No
 
 # Tools whose results go stale: the agent drops them from the history after each turn,
 # so asking again calls the tool again (and shows its card) instead of reusing old data.
-STALE_TOOLS = frozenset({"get_weather"})
+# "what's playing" answers go stale as fast as the weather
+STALE_TOOLS = frozenset({"get_weather", "music_control"})
 
 
 def run_tool(name: str, arguments: str) -> str:

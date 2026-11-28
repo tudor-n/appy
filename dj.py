@@ -1,0 +1,206 @@
+"""Appy's DJ: the play_music and music_control tools, and the now-playing card.
+
+Transport goes to Riff over MPRIS (riff.py); finding and starting music by name goes
+through the Spotify Web API (spotify.py), aimed at Riff's Spotify Connect device. If Riff
+doesn't show up as a device, tracks and playlists are handed to Riff's MPRIS OpenUri.
+Tool results are JSON for the LLM and never contain Spotify URIs or device IDs.
+"""
+import json
+import time
+from typing import Callable
+
+from riff import Riff, RiffError
+from spotify import Spotify, SpotifyError
+from spotify_auth import NOT_LOGGED_IN, SpotifyAuthError
+
+PLAY_KINDS = ("track", "artist", "album", "playlist", "liked")
+CONTROL_ACTIONS = ("pause", "resume", "next", "previous", "volume_up", "volume_down",
+                   "set_volume", "shuffle_on", "shuffle_off", "now_playing")
+# Riff's Spotify Connect device is found by this (case-insensitive) part of its name
+RIFF_DEVICE_HINT = "riff"
+VOLUME_STEP = 0.15
+DEVICE_POLLS = 5  # after launching Riff, check for its device this many times, 1 s apart
+NOW_PLAYING_WAIT_S = 2.0
+LIKED_FALLBACK = 100
+
+
+def _error(message: str) -> str:
+    return json.dumps({"error": message})
+
+
+class DJ:
+    def __init__(self, riff: Riff, spotify: Spotify | None,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.riff = riff
+        self.spotify = spotify
+        self._sleep = sleep
+        self._volume_hook: Callable[[float], bool] | None = None
+
+    def set_volume_hook(self, fn: Callable[[float], bool]) -> None:
+        """`fn(level)` gets every volume change first and returns True if it handled it
+        (the ducker, while the music is turned down for speech)."""
+        self._volume_hook = fn
+
+    # play_music
+
+    def play_music(self, query: str = "", kind: str = "track", queue: bool = False) -> str:
+        query, kind = str(query or "").strip(), str(kind or "track").strip().lower()
+        if kind not in PLAY_KINDS:
+            return _error(f"Unknown kind {kind}; use one of {', '.join(PLAY_KINDS)}.")
+        if kind != "liked" and not query:
+            return _error("What should I play?")
+        if queue and kind != "track":
+            return _error("I can only queue single songs.")
+        if self.spotify is None:
+            return _error(NOT_LOGGED_IN)
+        try:
+            launched = not self.riff.is_running()
+            self.riff.ensure_running()
+            device = self._riff_device(launched)
+            if kind == "liked":
+                return self._play_liked(device)
+            target = self._find(query, kind)
+            if target is None:
+                return _error(f"I couldn't find {query} on Spotify.")
+            label, uri, hit = target
+            if queue:
+                self.spotify.queue(uri, device)
+                return json.dumps({"playing": label, "queued": True})
+            before = self._now()
+            if device:
+                if kind == "track":
+                    self.spotify.play(device, uris=[uri])
+                else:
+                    self.spotify.play(device, context_uri=uri)
+            else:
+                self.riff.open_uri(uri)
+            return self._started(label, before, hit)
+        except (SpotifyError, SpotifyAuthError, RiffError) as e:
+            return _error(str(e))
+
+    def _riff_device(self, launched: bool) -> str | None:
+        for attempt in range(DEVICE_POLLS if launched else 1):
+            if attempt:
+                self._sleep(1.0)
+            for d in self.spotify.devices():
+                if RIFF_DEVICE_HINT in d["name"].lower() and d.get("id"):
+                    return d["id"]
+        return None
+
+    def _find(self, query: str, kind: str) -> tuple[str, str, dict | None] | None:
+        """(what to call it, its URI, the track hit for a track) or None."""
+        if kind == "playlist":
+            mine = self.spotify.my_playlists()
+            q = query.lower()
+            match = next((p for p in mine if p["name"].lower() == q), None) or \
+                next((p for p in mine if q in p["name"].lower()), None)
+            if match:
+                return match["name"], match["uri"], None
+        hits = self.spotify.search(query, kind)
+        if not hits:
+            return None
+        hit = hits[0]
+        if kind in ("track", "album") and hit.get("artist"):
+            label = f"{hit['name']} by {hit['artist']}"
+        else:
+            label = hit["name"]
+        return label, hit["uri"], hit if kind == "track" else None
+
+    def _play_liked(self, device: str | None) -> str:
+        before = self._now()
+        try:
+            self.spotify.play(device, context_uri=f"spotify:user:{self.spotify.user_id()}:collection")
+        except SpotifyError:
+            uris = self.spotify.liked_tracks(LIKED_FALLBACK)
+            if not uris:
+                return _error("You don't have any liked songs yet.")
+            self.spotify.play(device, uris=uris)
+            self.spotify.shuffle(True, device)
+        return self._started("your liked songs", before, None)
+
+    def _now(self) -> dict | None:
+        try:
+            return self.riff.now_playing()
+        except RiffError:
+            return None
+
+    def _started(self, label: str, before: dict | None, hit: dict | None) -> str:
+        """The play_music result, naming the track Riff actually started if it says."""
+        now = None
+        waited = 0.0
+        while waited < NOW_PLAYING_WAIT_S:
+            now = self._now()
+            if now and now != before:
+                break
+            self._sleep(0.25)
+            waited += 0.25
+        if hit and not (now and now != before):
+            now = {"title": hit["name"], "artist": hit.get("artist", "")}
+        result = {"playing": label, "queued": False}
+        if now:
+            result.update(title=now["title"], artist=now.get("artist", ""))
+        return json.dumps(result)
+
+    # music_control
+
+    def music_control(self, action: str = "", value: float | None = None) -> str:
+        action = str(action or "").strip().lower()
+        if action not in CONTROL_ACTIONS:
+            return _error(f"Unknown action {action}; use one of {', '.join(CONTROL_ACTIONS)}.")
+        try:
+            if action == "now_playing":
+                return self._now_playing()
+            if action == "pause":
+                self.riff.pause()
+            elif action == "resume":
+                self.riff.play()
+            elif action == "next":
+                self.riff.next()
+            elif action == "previous":
+                self.riff.previous()
+            elif action in ("volume_up", "volume_down"):
+                step = VOLUME_STEP if action == "volume_up" else -VOLUME_STEP
+                self._set_volume(self.riff.volume() + step)
+            elif action == "set_volume":
+                if value is None:
+                    return _error("set_volume needs a value from 0 to 100.")
+                self._set_volume(float(value) / 100.0)
+            elif action in ("shuffle_on", "shuffle_off"):
+                self.riff.shuffle(action == "shuffle_on")
+            return json.dumps({"ok": True, "state": self.riff.status().lower()})
+        except (RiffError, ValueError, TypeError) as e:
+            return _error(str(e) if isinstance(e, RiffError) else f"Bad value for {action}.")
+
+    def _set_volume(self, level: float) -> None:
+        level = min(1.0, max(0.0, level))
+        if self._volume_hook and self._volume_hook(level):
+            return
+        self.riff.set_volume(level)
+
+    def _now_playing(self) -> str:
+        state = self.riff.status().lower()
+        now = self.riff.now_playing()
+        if not now or state == "stopped":
+            return _error("Nothing's playing in Riff.")
+        return json.dumps({**now, "state": state})
+
+    # the overlay's card
+
+    def music_card(self, tool_name: str, result: str) -> dict | None:
+        """The `music` widget for a tool result, or None if that result gets no card."""
+        if tool_name not in ("play_music", "music_control"):
+            return None
+        try:
+            data = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, dict) or "error" in data or not data.get("title"):
+            return None
+        if tool_name == "play_music":
+            if data.get("queued"):
+                return None
+            state = "playing"
+        else:
+            state = data.get("state", "playing")
+        return {"widget": "music", "title": data["title"], "artist": data.get("artist", ""),
+                "state": state if state in ("playing", "paused") else "paused"}

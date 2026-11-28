@@ -346,6 +346,50 @@ class RunToolTests(unittest.TestCase):
         self.assertIn("TypeError", self.error("boom", '{"x": 1}'))
 
 
+class DJToolTests(unittest.TestCase):
+    def tearDown(self):
+        tools.set_dj(None)
+
+    def test_dj_tools_without_dj_return_error(self):
+        tools.set_dj(None)
+        for name in ("play_music", "music_control"):
+            with self.subTest(name=name):
+                self.assertEqual(json.loads(tools.run_tool(name, "{}")),
+                                 {"error": "Music isn't set up."})
+
+    def test_dj_tools_route_to_the_dj(self):
+        calls = []
+
+        class FakeDJ:
+            def play_music(self, query="", kind="track", queue=False):
+                calls.append(("play", query, kind, queue))
+                return "{}"
+
+            def music_control(self, action="", value=None):
+                calls.append(("control", action, value))
+                return "{}"
+
+        tools.set_dj(FakeDJ())
+        tools.run_tool("play_music", json.dumps({"query": "gym", "kind": "playlist"}))
+        tools.run_tool("music_control", json.dumps({"action": "set_volume", "value": 40}))
+        self.assertEqual(calls, [("play", "gym", "playlist", False), ("control", "set_volume", 40)])
+
+    def test_music_schemas_are_registered(self):
+        names = [s["function"]["name"] for s in tools.TOOL_SCHEMAS]
+        self.assertIn("play_music", names)
+        self.assertIn("music_control", names)
+        play = next(s for s in tools.TOOL_SCHEMAS if s["function"]["name"] == "play_music")
+        self.assertEqual(play["function"]["parameters"]["properties"]["kind"]["enum"],
+                         ["track", "artist", "album", "playlist", "liked"])
+        control = next(s for s in tools.TOOL_SCHEMAS if s["function"]["name"] == "music_control")
+        self.assertEqual(control["function"]["parameters"]["properties"]["action"]["enum"],
+                         ["pause", "resume", "next", "previous", "volume_up", "volume_down",
+                          "set_volume", "shuffle_on", "shuffle_off", "now_playing"])
+
+    def test_music_control_results_go_stale(self):
+        self.assertIn("music_control", tools.STALE_TOOLS)
+
+
 class ModeTests(unittest.TestCase):
     def setUp(self):
         tools.reset_mode()

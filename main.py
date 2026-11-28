@@ -11,10 +11,14 @@ load_dotenv()  # Must run before importing voice/kokoro so ONNX_PROVIDER is set
 from openai import OpenAI
 import tools
 from agent import Agent
+from dj import DJ
 from hearing import Ear
 from memory_client import MemoryClient, system_prompt
 from memory_review import MemoryReview
 from note_attach import NoteAttacher
+from riff import Riff
+from spotify import Spotify
+from spotify_auth import TokenStore
 from session_log import SessionLogger, default_logs_dir
 from status import StatusTracker
 from voice import Speaker
@@ -92,9 +96,18 @@ def main():
     ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=status.speech_discarded)
     ear.start()
 
+    # Music: transport over MPRIS always; playing by name once Spotify is set up
+    riff = Riff()
+    spotify = Spotify(TokenStore()) if os.getenv("SPOTIFY_CLIENT_ID", "").strip() else None
+    dj = DJ(riff, spotify)
+    tools.set_dj(dj)
+    print(f"[music] Riff via MPRIS; Spotify {'on' if spotify else 'off (SPOTIFY_CLIENT_ID not set)'}")
+
     def show_tool_card(name: str, result: str):
         """Pop a card out next to Appy for tools that have one."""
         if name == "get_weather" and (card := tools.weather_card(result)):
+            ui.widget(card)
+        if card := dj.music_card(name, result):
             ui.widget(card)
         if name == "set_mode":  # the mascot's resting face shows the mode
             ui.mode(tools.current_mode())
