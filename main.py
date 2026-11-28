@@ -11,7 +11,7 @@ load_dotenv()  # Must run before importing voice/kokoro so ONNX_PROVIDER is set
 from openai import OpenAI
 import tools
 from agent import Agent
-from dj import DJ
+from dj import DJ, Ducker
 from hearing import Ear
 from memory_client import MemoryClient, system_prompt
 from memory_review import MemoryReview
@@ -86,22 +86,37 @@ def main():
         api_key=os.getenv("API_KEY", "ollama"),
     )
 
-    speaker = Speaker(on_audio=status.set_audio)
-    # A wake flips the UI to "listening"; if that speech is then discarded as noise,
-    # re-send the real state so the mascot doesn't stay stuck listening.
-    def on_speech_start():
-        status.heard_speech()
-        ui.wake()
-
-    ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=status.speech_discarded)
-    ear.start()
-
     # Music: transport over MPRIS always; playing by name once Spotify is set up
     riff = Riff()
     spotify = Spotify(TokenStore()) if os.getenv("SPOTIFY_CLIENT_ID", "").strip() else None
     dj = DJ(riff, spotify)
     tools.set_dj(dj)
+    # Riff goes quiet while Tudor talks to Appy and while Appy answers
+    ducker = Ducker(riff)
+    dj.set_volume_hook(ducker.on_volume_change)
     print(f"[music] Riff via MPRIS; Spotify {'on' if spotify else 'off (SPOTIFY_CLIENT_ID not set)'}")
+
+    def on_audio(state: str):
+        status.set_audio(state)
+        if state == "silent":
+            ducker.release("appy")
+        else:
+            ducker.hold("appy")
+
+    speaker = Speaker(on_audio=on_audio)
+    # A wake flips the UI to "listening"; if that speech is then discarded as noise,
+    # re-send the real state so the mascot doesn't stay stuck listening.
+    def on_speech_start():
+        status.heard_speech()
+        ui.wake()
+        ducker.hold("user")
+
+    def on_speech_discarded():
+        status.speech_discarded()
+        ducker.release("user")
+
+    ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=on_speech_discarded)
+    ear.start()
 
     def show_tool_card(name: str, result: str):
         """Pop a card out next to Appy for tools that have one."""
@@ -233,6 +248,7 @@ def main():
                 speaker.wait()
             finally:
                 ear.resume(grace=ECHO_GRACE_S)
+                ducker.release("user")  # Tudor's turn is over; Appy's voice holds its own
             # Between turns, once Appy has finished speaking; anything said meanwhile is
             # queued in turn_queue, not lost
             agent.maybe_compact()
@@ -248,6 +264,7 @@ def main():
         if memory:
             uploaded = memory.upload_log(log.path)
             print(f"[memory] log {'uploaded' if uploaded else 'kept locally'}")
+        ducker.restore_now()  # never leave the music turned down
         ear.stop()
         speaker.close()
 

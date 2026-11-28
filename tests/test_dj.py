@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from dj import DJ
+from dj import DJ, Ducker
 from riff import RiffError, RiffNotRunning
 from spotify import SpotifyError
 from spotify_auth import SpotifyAuthError
@@ -342,6 +342,102 @@ class MusicCardTests(DJTestCase):
     def test_paused_now_playing_card(self):
         dj = self.dj(riff=FakeRiff(status="Paused", now={"title": "A", "artist": "B", "album": ""}))
         self.assertEqual(dj.music_card("music_control", dj.music_control("now_playing"))["state"], "paused")
+
+
+class FakeTimer:
+    """threading.Timer stand-in: fire() runs it by hand."""
+    made: list["FakeTimer"] = []
+
+    def __init__(self, delay, fn):
+        self.delay, self.fn, self.started, self.cancelled = delay, fn, False, False
+        FakeTimer.made.append(self)
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        if self.started and not self.cancelled:
+            self.fn()
+
+
+class DuckerTests(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.made = []
+        self.riff = FakeRiff(volume=0.8)
+        self.ducker = Ducker(self.riff, timer=FakeTimer)
+
+    def fire_last(self):
+        FakeTimer.made[-1].fire()
+
+    def test_ducks_to_quarter_and_restores_after_both_release(self):
+        self.ducker.hold("user")
+        self.assertAlmostEqual(self.riff._volume, 0.2)
+        self.ducker.hold("appy")
+        self.ducker.release("appy")
+        self.assertEqual(FakeTimer.made, [])  # Tudor's turn is still open
+        self.assertAlmostEqual(self.riff._volume, 0.2)
+        self.ducker.release("user")
+        self.assertEqual(FakeTimer.made[-1].delay, 0.5)
+        self.fire_last()
+        self.assertAlmostEqual(self.riff._volume, 0.8)
+
+    def test_no_duck_when_not_playing(self):
+        self.riff._status = "Paused"
+        self.ducker.hold("appy")
+        self.ducker.release("appy")
+        self.assertEqual(self.riff.calls, [])
+
+    def test_new_hold_cancels_pending_restore(self):
+        self.ducker.hold("appy")
+        self.ducker.release("appy")
+        pending = FakeTimer.made[-1]
+        self.ducker.hold("appy")
+        self.assertTrue(pending.cancelled)
+        pending.fire()
+        self.assertAlmostEqual(self.riff._volume, 0.2)
+
+    def test_manual_change_while_ducked_is_kept(self):
+        self.ducker.hold("appy")
+        self.riff._volume = 0.5  # Tudor drags Riff's slider
+        self.ducker.release("appy")
+        self.fire_last()
+        self.assertAlmostEqual(self.riff._volume, 0.5)
+
+    def test_volume_command_while_ducked_updates_saved(self):
+        self.ducker.hold("appy")
+        self.assertTrue(self.ducker.on_volume_change(0.6))
+        self.assertAlmostEqual(self.riff._volume, 0.15)
+        self.ducker.release("appy")
+        self.fire_last()
+        self.assertAlmostEqual(self.riff._volume, 0.6)
+
+    def test_volume_command_when_not_ducked_is_not_handled(self):
+        self.assertFalse(self.ducker.on_volume_change(0.6))
+        self.assertEqual(self.riff.calls, [])
+
+    def test_restore_now(self):
+        self.ducker.hold("user")
+        self.ducker.hold("appy")
+        self.ducker.restore_now()
+        self.assertAlmostEqual(self.riff._volume, 0.8)
+        self.ducker.hold("appy")  # and it ducks again afterwards
+        self.assertAlmostEqual(self.riff._volume, 0.2)
+
+    def test_release_without_hold_is_harmless(self):
+        self.ducker.release("user")
+        self.assertEqual(FakeTimer.made, [])
+
+    def test_riff_errors_are_swallowed(self):
+        self.ducker.hold("appy")
+        self.riff.running = False  # Riff quit while ducked
+        self.ducker.release("appy")
+        self.fire_last()
+        self.ducker.restore_now()
+        self.ducker.hold("user")
+        self.assertFalse(self.ducker.on_volume_change(0.3))
 
 
 if __name__ == "__main__":

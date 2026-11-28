@@ -6,6 +6,7 @@ doesn't show up as a device, tracks and playlists are handed to Riff's MPRIS Ope
 Tool results are JSON for the LLM and never contain Spotify URIs or device IDs.
 """
 import json
+import threading
 import time
 from typing import Callable
 
@@ -204,3 +205,88 @@ class DJ:
             state = data.get("state", "playing")
         return {"widget": "music", "title": data["title"], "artist": data.get("artist", ""),
                 "state": state if state in ("playing", "paused") else "paused"}
+
+
+class Ducker:
+    """Turns Riff down while someone talks: Tudor (from the moment the mic hears him
+    until his turn is over) or Appy (while his voice is queued or playing).
+
+    The first reason to duck saves Riff's volume and sets `level` of it; once the last
+    reason is gone, the saved volume comes back `restore_delay` seconds later, unless
+    Riff's volume was changed by hand meanwhile. MPRIS only; Riff errors are ignored.
+    """
+
+    TOLERANCE = 0.02  # MPRIS volumes come back rounded
+
+    def __init__(self, riff: Riff, level: float = 0.25, restore_delay: float = 0.5,
+                 timer=threading.Timer):
+        self.riff = riff
+        self.level = level
+        self.restore_delay = restore_delay
+        self._timer_cls = timer
+        self._lock = threading.RLock()
+        self._reasons: set[str] = set()
+        self._saved: float | None = None  # the volume to restore; None = not ducked
+        self._ducked_to: float | None = None
+        self._pending = None
+
+    def hold(self, reason: str) -> None:
+        with self._lock:
+            self._cancel_pending()
+            self._reasons.add(reason)
+            if self._saved is not None:
+                return
+            try:
+                if not self.riff.is_playing():
+                    return
+                saved = self.riff.volume()
+                self.riff.set_volume(saved * self.level)
+            except RiffError:
+                return
+            self._saved, self._ducked_to = saved, saved * self.level
+
+    def release(self, reason: str) -> None:
+        with self._lock:
+            self._reasons.discard(reason)
+            if self._reasons or self._saved is None or self._pending is not None:
+                return
+            self._pending = self._timer_cls(self.restore_delay, self._restore)
+            self._pending.daemon = True
+            self._pending.start()
+
+    def on_volume_change(self, level: float) -> bool:
+        """A volume command while ducked: remember it for the restore. True = handled."""
+        with self._lock:
+            if self._saved is None:
+                return False
+            try:
+                self.riff.set_volume(level * self.level)
+            except RiffError:
+                self._saved = self._ducked_to = None
+                return False
+            self._saved, self._ducked_to = level, level * self.level
+            return True
+
+    def restore_now(self) -> None:
+        with self._lock:
+            self._cancel_pending()
+            self._reasons.clear()
+            self._restore()
+
+    def _cancel_pending(self) -> None:
+        if self._pending is not None:
+            self._pending.cancel()
+            self._pending = None
+
+    def _restore(self) -> None:
+        with self._lock:
+            self._pending = None
+            if self._reasons or self._saved is None:
+                return
+            saved, ducked_to = self._saved, self._ducked_to
+            self._saved = self._ducked_to = None
+            try:
+                if abs(self.riff.volume() - ducked_to) <= self.TOLERANCE:
+                    self.riff.set_volume(saved)
+            except RiffError:
+                pass
