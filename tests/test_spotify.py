@@ -41,17 +41,19 @@ class Api:
 def client(routes, tokens=None):
     api = Api(routes)
     http = httpx.Client(transport=httpx.MockTransport(api), base_url="https://api.spotify.com/v1")
-    return Spotify(tokens or FakeTokens(), http=http), api
+    return Spotify(tokens or FakeTokens(), http=http, sleep=lambda s: None), api
 
 
-TRACK = {"name": "Hello", "uri": "spotify:track:h", "artists": [{"name": "Adele"}]}
+TRACK = {"name": "Hello", "uri": "spotify:track:h", "artists": [{"name": "Adele"}],
+         "album": {"uri": "spotify:album:25"}}
 
 
 class SearchTests(unittest.TestCase):
     def test_search_track_returns_name_artist_uri(self):
         sp, api = client({("GET", "/v1/search"): (200, {"tracks": {"items": [TRACK]}})})
         self.assertEqual(sp.search("hello", "track"),
-                         [{"name": "Hello", "uri": "spotify:track:h", "artist": "Adele"}])
+                         [{"name": "Hello", "uri": "spotify:track:h", "artist": "Adele",
+                           "album_uri": "spotify:album:25"}])
         q = parse_qs(api.requests[0].url.query.decode())
         self.assertEqual(q["q"], ["hello"])
         self.assertEqual(q["type"], ["track"])
@@ -126,6 +128,19 @@ class PlaybackTests(unittest.TestCase):
         self.assertEqual(json.loads(second.content), {"uris": ["spotify:track:h"]})
         self.assertNotIn("device_id", third.url.params)
 
+    def test_play_from_a_track_in_its_album(self):
+        # spotifyd can't play a bare track (no context), so tracks start inside their album
+        sp, api = client({("PUT", "/v1/me/player/play"): (204, None)})
+        sp.play("abc", context_uri="spotify:album:25", offset_uri="spotify:track:h")
+        self.assertEqual(json.loads(api.requests[0].content),
+                         {"context_uri": "spotify:album:25", "offset": {"uri": "spotify:track:h"}})
+
+    def test_server_errors_are_retried_once(self):
+        answers = [(502, {"error": {"status": 502}}), (204, None)]
+        sp, api = client({("PUT", "/v1/me/player/play"): lambda req: answers.pop(0)})
+        sp.play("abc", uris=["spotify:track:h"])
+        self.assertEqual(len(api.requests), 2)
+
     def test_queue_and_shuffle(self):
         sp, api = client({("POST", "/v1/me/player/queue"): (204, None),
                           ("PUT", "/v1/me/player/shuffle"): (204, None)})
@@ -187,7 +202,7 @@ class ErrorMappingTests(unittest.TestCase):
 
         http = httpx.Client(transport=httpx.MockTransport(boom), base_url="https://api.spotify.com/v1")
         with self.assertRaises(SpotifyError) as ctx:
-            Spotify(FakeTokens(), http=http).devices()
+            Spotify(FakeTokens(), http=http, sleep=lambda s: None).devices()
         self.assertEqual(str(ctx.exception), "I can't reach Spotify right now.")
 
     def test_other_errors_are_generic(self):

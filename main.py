@@ -18,7 +18,7 @@ from hearing import Ear
 from memory_client import MemoryClient, system_prompt
 from memory_review import MemoryReview
 from note_attach import NoteAttacher
-from riff import ActivePlayer, Riff, SpotifydPlayer
+from riff import ActivePlayer, Riff, RiffError, SpotifydPlayer
 from spotify import Spotify
 from spotify_auth import TokenStore
 from session_log import SessionLogger, default_logs_dir
@@ -94,9 +94,19 @@ def main():
     if not background.start():
         print(f"[music] background player off: {background.problem}")
     # Pause/skip/volume/ducking go to whichever is playing (his player first when both are)
-    music = ActivePlayer([SpotifydPlayer(), Riff()])
+    riff = Riff()
+    music = ActivePlayer([SpotifydPlayer(), riff])
+
+    def pause_riff():
+        """Appy's player took over; Spotify doesn't stop Riff by itself."""
+        try:
+            if riff.is_playing():
+                riff.pause()
+        except RiffError:
+            pass
+
     spotify = Spotify(TokenStore()) if os.getenv("SPOTIFY_CLIENT_ID", "").strip() else None
-    dj = DJ(music, spotify, player_running=background.running)
+    dj = DJ(music, spotify, player_running=background.running, pause_others=pause_riff)
     tools.set_dj(dj)
     # Riff goes quiet while Tudor talks to Appy and while Appy answers
     ducker = Ducker(music)

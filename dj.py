@@ -35,11 +35,14 @@ def _error(message: str) -> str:
 class DJ:
     def __init__(self, riff, spotify: Spotify | None,
                  sleep: Callable[[float], None] = time.sleep,
-                 player_running: Callable[[], bool] = lambda: True):
+                 player_running: Callable[[], bool] = lambda: True,
+                 pause_others: Callable[[], None] = lambda: None):
         """`riff`: the MPRIS side (an ActivePlayer in main); `player_running()`: whether
         the background player process is up (no point waiting for its device if not)."""
         self.riff = riff
         self._player_running = player_running
+        # Spotify doesn't stop Riff when Appy's player starts (seen live), so Appy does
+        self._pause_others = pause_others
         self.spotify = spotify
         self._sleep = sleep
         self._volume_hook: Callable[[float], bool] | None = None
@@ -87,10 +90,13 @@ class DJ:
                 self.spotify.queue(uri, device)
                 return json.dumps({"playing": label, "queued": True})
             before = self._now()
-            if kind == "track":
+            if kind == "track" and hit.get("album_uri"):
+                self.spotify.play(device, context_uri=hit["album_uri"], offset_uri=uri)
+            elif kind == "track":
                 self.spotify.play(device, uris=[uri])
             else:
                 self.spotify.play(device, context_uri=uri)
+            self._pause_others()
             return self._started(label, before, hit)
         except (SpotifyError, SpotifyAuthError, RiffError) as e:
             return _error(str(e))
@@ -133,6 +139,7 @@ class DJ:
                 return _error("You don't have any liked songs yet.")
             self.spotify.play(device, uris=uris)
             self.spotify.shuffle(True, device)
+        self._pause_others()
         return self._started("your liked songs", before, None)
 
     def _now(self) -> dict | None:

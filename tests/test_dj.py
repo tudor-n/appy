@@ -96,8 +96,9 @@ class FakeSpotify:
         self.device_polls += 1
         return self._devices if self.device_polls >= self.device_polls_until_found else []
 
-    def play(self, device_id, context_uri=None, uris=None):
-        self.calls.append(("play", device_id, context_uri, uris))
+    def play(self, device_id, context_uri=None, uris=None, offset_uri=None):
+        self.calls.append(("play", device_id, context_uri, uris) +
+                          ((offset_uri,) if offset_uri else ()))
         if self.play_error:
             err, self.play_error = self.play_error, None
             raise err
@@ -109,7 +110,8 @@ class FakeSpotify:
         self.calls.append(("shuffle", on, device_id))
 
 
-HELLO = {"name": "Hello", "uri": "spotify:track:hello", "artist": "Adele"}
+HELLO = {"name": "Hello", "uri": "spotify:track:hello", "artist": "Adele",
+         "album_uri": "spotify:album:25"}
 
 
 class DJTestCase(unittest.TestCase):
@@ -139,10 +141,25 @@ class PlayMusicTests(DJTestCase):
     def test_play_track_uses_riff_device_and_names_real_track(self):
         dj = self.dj(riff=FakeRiff(now={"title": "Hello", "artist": "Adele", "album": "25"}))
         result = self.run_tool(dj.play_music, "hello", "track")
-        self.assertEqual(self.spotify_calls("play"), [("play", "appy-id", None, ["spotify:track:hello"])])
+        self.assertEqual(self.spotify_calls("play"), [("play", "appy-id", "spotify:album:25", None, "spotify:track:hello")])
         self.assertEqual(result["playing"], "Hello by Adele")
         self.assertFalse(result["queued"])
         self.assertEqual((result["title"], result["artist"]), ("Hello", "Adele"))
+
+    def test_track_without_album_plays_bare(self):
+        sp = FakeSpotify(search={"track": [{"name": "Hello", "uri": "spotify:track:hello", "artist": "Adele"}]})
+        self.run_tool(self.dj(spotify=sp).play_music, "hello", "track")
+        self.assertEqual(self.spotify_calls("play"), [("play", "appy-id", None, ["spotify:track:hello"])])
+
+    def test_pauses_riff_when_appy_starts_something(self):
+        paused = []
+        sp = FakeSpotify(search={"track": [HELLO]})
+        dj = DJ(FakeRiff(), sp, sleep=lambda s: None, pause_others=lambda: paused.append(1))
+        dj.play_music("hello", "track")
+        dj.play_music("", "liked")
+        self.assertEqual(paused, [1, 1])
+        dj.play_music("hello", "track", queue=True)  # queueing doesn't take over
+        self.assertEqual(paused, [1, 1])
 
     def test_no_results_is_an_error(self):
         dj = self.dj(spotify=FakeSpotify())
@@ -216,13 +233,13 @@ class PlayMusicTests(DJTestCase):
         sp = FakeSpotify(search={"track": [HELLO]}, device_polls_until_found=3)
         self.run_tool(self.dj(spotify=sp).play_music, "hello", "track")
         self.assertEqual(sp.device_polls, 3)
-        self.assertEqual(self.spotify_calls("play"), [("play", "appy-id", None, ["spotify:track:hello"])])
+        self.assertEqual(self.spotify_calls("play"), [("play", "appy-id", "spotify:album:25", None, "spotify:track:hello")])
 
     def test_plays_on_appy_even_with_riff_closed(self):
         riff = FakeRiff(running=False)
         self.run_tool(self.dj(riff=riff).play_music, "hello", "track")
         self.assertEqual(riff.calls, [])
-        self.assertEqual(self.spotify_calls("play"), [("play", "appy-id", None, ["spotify:track:hello"])])
+        self.assertEqual(self.spotify_calls("play"), [("play", "appy-id", "spotify:album:25", None, "spotify:track:hello")])
 
     def test_no_player_device_is_an_error(self):
         sp = FakeSpotify(devices=[{"id": "phone", "name": "Pixel", "is_active": False}],

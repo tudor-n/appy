@@ -4,6 +4,8 @@ on Riff. Transport (pause/skip/volume) doesn't come through here; that's riff.py
 Every error is a SpotifyError (or SpotifyAuthError) whose message is one sentence Appy
 can say. Results carry Spotify URIs for dj.py, which keeps them out of what the LLM sees.
 """
+import time
+
 import httpx
 
 from spotify_auth import SpotifyAuthError, TokenStore
@@ -37,20 +39,28 @@ def _error(response: httpx.Response) -> SpotifyError:
 
 
 class Spotify:
-    def __init__(self, tokens: TokenStore, http: httpx.Client | None = None):
+    def __init__(self, tokens: TokenStore, http: httpx.Client | None = None,
+                 sleep=time.sleep):
         self._tokens = tokens
         self._http = http or httpx.Client(base_url=API, timeout=8.0)
+        self._sleep = sleep
         self._user_id: str | None = None
 
     def _request(self, method: str, path: str, **kwargs) -> dict | None:
-        for attempt in (0, 1):
+        refreshed = retried = False
+        while True:
             headers = {"Authorization": f"Bearer {self._tokens.access_token()}"}
             try:
                 r = self._http.request(method, path, headers=headers, **kwargs)
             except httpx.TransportError:
                 raise SpotifyError("I can't reach Spotify right now.") from None
-            if r.status_code == 401 and attempt == 0:
+            if r.status_code == 401 and not refreshed:
+                refreshed = True
                 self._tokens.invalidate()
+                continue
+            if r.status_code in (500, 502, 503, 504) and not retried:
+                retried = True  # Spotify's player API has the odd transient 502
+                self._sleep(1.0)
                 continue
             if r.status_code == 401:
                 self._tokens.forget()  # pick up a new login without a restart
@@ -63,7 +73,6 @@ class Spotify:
                 return r.json()
             except ValueError:
                 return None
-        return None  # unreachable
 
     @staticmethod
     def _device(device_id: str | None) -> dict:
@@ -82,6 +91,8 @@ class Spotify:
             if kind in ("track", "album"):
                 artists = item.get("artists") or []
                 hit["artist"] = artists[0].get("name", "") if artists else ""
+            if kind == "track" and (item.get("album") or {}).get("uri"):
+                hit["album_uri"] = item["album"]["uri"]
             elif kind == "playlist":
                 hit["owner"] = (item.get("owner") or {}).get("display_name", "")
             out.append(hit)
@@ -120,8 +131,15 @@ class Spotify:
                 for d in body.get("devices") or []]
 
     def play(self, device_id: str | None, context_uri: str | None = None,
-             uris: list[str] | None = None) -> None:
-        body = {"context_uri": context_uri} if context_uri else {"uris": list(uris or [])}
+             uris: list[str] | None = None, offset_uri: str | None = None) -> None:
+        """Play a context (album, playlist, artist; from `offset_uri` if given) or a list
+        of tracks. spotifyd can't play bare tracks, so a track goes in its album."""
+        if context_uri:
+            body = {"context_uri": context_uri}
+            if offset_uri:
+                body["offset"] = {"uri": offset_uri}
+        else:
+            body = {"uris": list(uris or [])}
         self._request("PUT", "/me/player/play", params=self._device(device_id), json=body)
 
     def queue(self, uri: str, device_id: str | None) -> None:
