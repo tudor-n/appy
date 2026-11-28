@@ -24,6 +24,7 @@ mod input;
 mod layout;
 mod mascot;
 mod memory;
+mod music;
 mod net;
 mod protocol;
 mod state;

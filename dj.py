@@ -23,6 +23,7 @@ VOLUME_STEP = 0.15
 DEVICE_POLLS = 5  # after launching Riff, check for its device this many times, 1 s apart
 NOW_PLAYING_WAIT_S = 2.0
 LIKED_FALLBACK = 100
+CARD_STATES = ("playing", "paused")  # the `state` values of the music card
 
 
 def _error(message: str) -> str:
@@ -204,7 +205,7 @@ class DJ:
         else:
             state = data.get("state", "playing")
         return {"widget": "music", "title": data["title"], "artist": data.get("artist", ""),
-                "state": state if state in ("playing", "paused") else "paused"}
+                "state": state if state in CARD_STATES else "paused"}
 
 
 class Ducker:

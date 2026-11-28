@@ -80,6 +80,10 @@ impl App {
                 self.ui.card.set(&report);
                 self.show_card(&mut s, now);
             }
+            BackendEvent::Widget(Widget::Music(track)) => {
+                self.ui.card.set_music(&track);
+                self.show_card(&mut s, now);
+            }
             BackendEvent::MemoryProposals { items } => self.ui.memory.set_items(&items),
             BackendEvent::MemoryCommitted {
                 kind,
