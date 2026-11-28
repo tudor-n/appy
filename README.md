@@ -80,6 +80,24 @@ Set `APPY_DUMP_COMPACTION=1` to also write each compaction's exact prompt and th
 came back to `<session>.compaction-N.txt` next to the log; `COMPACT_AT=2500` makes it happen
 sooner when testing.
 
+## Music (Riff + Spotify)
+
+Appy can drive [Riff](https://flathub.org/apps/dev.diegovsky.Riff) (the GTK Spotify client,
+Premium account): "play Karma Police", "put on some Radiohead", "play my gym playlist",
+"play my liked songs", "queue Paranoid Android", "skip", "pause", "turn it up", "what's
+playing?". Pause, skip, volume and "what's playing" talk to Riff directly over MPRIS and
+work without any setup. Playing things by name goes through Spotify's Web API as you,
+which needs a one-time setup:
+
+1. At [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), create an
+   app (any name; tick "Web API"). Add the redirect URI `http://127.0.0.1:8898/callback`.
+2. Put its client ID in `.env` as `SPOTIFY_CLIENT_ID` (no secret needed).
+3. Run `appy spotify-login` and approve in the browser. The refresh token is saved to
+   `~/.config/appy/spotify.json`, readable only by you.
+
+Spotify-made playlists (Discover Weekly, Daily Mixes, ...) can't be played: Spotify doesn't
+give new apps access to them.
+
 ## Long-term memory
 
 Durable facts live on the Mac mini, in a git repo at `~/appy-data` (`memory/core.md` plus one
