@@ -26,6 +26,10 @@ DEVICE_POLLS = 5  # spotifyd may still be connecting: look this many times, 1 s 
 NOW_PLAYING_WAIT_S = 2.0
 LIKED_FALLBACK = 100
 CARD_STATES = ("playing", "paused")  # the `state` values of the music card
+# How far the music goes down while someone talks. Riff and spotifyd map MPRIS volume
+# logarithmically over ~60 dB, so a step (not a fraction) is a fixed loudness drop:
+# 0.3 ~ 18 dB, background but audible. (A quarter of the volume was ~45 dB: silent.)
+DUCK_STEP = 0.3
 
 
 def _error(message: str) -> str:
@@ -237,7 +241,7 @@ class Ducker:
     """Turns Riff down while someone talks: Tudor (from the moment the mic hears him
     until his turn is over) or Appy (while his voice is queued or playing).
 
-    The first reason to duck saves Riff's volume and sets `level` of it; once the last
+    The first reason to duck saves the player's volume and lowers it by `step`; once the last
     reason is gone, the saved volume comes back `restore_delay` seconds later, unless
     Riff's volume was changed by hand meanwhile. MPRIS only.
 
@@ -248,10 +252,10 @@ class Ducker:
 
     TOLERANCE = 0.02  # MPRIS volumes come back rounded
 
-    def __init__(self, riff: Riff, level: float = 0.25, restore_delay: float = 0.5,
+    def __init__(self, riff: Riff, step: float = DUCK_STEP, restore_delay: float = 0.5,
                  timer=threading.Timer, run: Callable[[Callable[[], None]], None] | None = None):
         self.riff = riff
-        self.level = level
+        self.step = step
         self.restore_delay = restore_delay
         self._timer_cls = timer
         self._lock = threading.RLock()
@@ -314,9 +318,10 @@ class Ducker:
             if playing is None:
                 return
             saved = playing.volume()
-            playing.set_volume(saved * self.level)
+            ducked = self._ducked(saved)
+            playing.set_volume(ducked)
             self._target = playing
-            self._saved, self._ducked_to = saved, saved * self.level
+            self._saved, self._ducked_to = saved, ducked
 
     def _release(self, reason: str) -> None:
         with self._lock:
@@ -326,6 +331,9 @@ class Ducker:
             self._pending = self._timer_cls(self.restore_delay, self._timer_fired)
             self._pending.daemon = True
             self._pending.start()
+
+    def _ducked(self, volume: float) -> float:
+        return max(0.0, volume - self.step)
 
     def saved_volume(self) -> float | None:
         """The volume Riff goes back to, while ducked; None when it isn't ducked."""
@@ -338,11 +346,11 @@ class Ducker:
             if self._saved is None:
                 return False
             try:
-                self._target.set_volume(level * self.level)
+                self._target.set_volume(self._ducked(level))
             except Exception:  # Riff went away: nothing ducked any more
                 self._saved = self._ducked_to = None
                 return False
-            self._saved, self._ducked_to = level, level * self.level
+            self._saved, self._ducked_to = level, self._ducked(level)
             return True
 
     def restore_now(self) -> None:
