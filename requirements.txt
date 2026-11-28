@@ -4,6 +4,7 @@ python-dotenv
 fastapi
 uvicorn
 httpx
+jeepney  # D-Bus (MPRIS) for Riff
 
 # Speech out (TTS)
 kokoro-onnx
