@@ -472,8 +472,11 @@ _MUSIC_CONTROLS = [
 _PLAY_LIKED = re.compile(r"play\s+(?:my\s+)?(?:liked\s+songs|likes|favou?rites)|"
                          r"play\s+(?:some\s+)?music|play\s+something|play\s+me\s+(?:a\s+song|something)")
 _PLAY_PLAYLIST = re.compile(r"play\s+(?:my|the)\s+(?P<x>.+?)\s+playlist")
-_PLAY_ARTIST = re.compile(r"play\s+(?:some|something(?:\s+(?:different|else))?\s+by|"
-                          r"(?:some\s+)?music\s+by|songs\s+by)\s+(?P<x>.+)")
+_PLAY_ARTIST = re.compile(r"play\s+(?:(?:some\s+)?music\s+by|(?:a\s+)?songs?\s+by|"
+                          r"something(?:\s+(?:different|else))?\s+by|some)\s+(?P<x>.+)")
+# A change of song with no name: the model knows what's playing, a regex guess doesn't
+_VAGUE_CHANGE = re.compile(r"play\s+(?:something\s+(?:different|else)|"
+                           r"(?:a\s+)?different\s+(?:one|song|track))")
 # "play me X" is "play X" (but "play me something" alone stays a generic request)
 _PLAY_ME = re.compile(r"play\s+me\s+(?!(?:a\s+song|something)$)")
 _QUEUE = re.compile(r"(?:queue(?:\s+up)?\s+(?P<x>.+?)(?:\s+next)?|add\s+(?P<y>.+?)\s+to\s+(?:the|my)\s+queue)")
@@ -513,6 +516,8 @@ def music_call(user_text: str, strict: bool = False,
     if m := _PLAY_ME.match(low):
         command = "play " + command[m.end():]
         low = command.lower()
+    if _VAGUE_CHANGE.fullmatch(low):
+        return None
     if _PLAY_LIKED.fullmatch(low):
         return ForcedCall("play_music", {"kind": "liked"})
     for pattern, kind in ((_PLAY_PLAYLIST, "playlist"), (_PLAY_ARTIST, "artist")):

@@ -352,6 +352,26 @@ class MusicForcedCallTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(self.forced(text), expected)
 
+    def test_by_artist_phrasings(self):
+        play = lambda **args: ("play_music", args)  # noqa: E731
+        cases = {
+            "play some music by Queen": play(query="Queen", kind="artist"),
+            "play music by Plini": play(query="Plini", kind="artist"),
+            "play me a song by Kiss": play(query="Kiss", kind="artist"),
+            "play a song by Prince": play(query="Prince", kind="artist"),
+            "play songs by Metallica": play(query="Metallica", kind="artist"),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.forced(text), expected)
+
+    def test_vague_changes_are_left_to_the_model(self):
+        # It knows what's playing; a regex guess would search for "something different"
+        for text in ["play something different", "play me something else",
+                     "play a different song", "play a different one"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+
     def test_music_mentions_do_not_force(self):
         for text in ["I was listening to music earlier", "my sister plays guitar",
                      "what should I play tonight", "let's play a game", "can we play twenty questions",
