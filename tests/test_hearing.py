@@ -105,3 +105,15 @@ class SelfHearingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(filter_transcript is None, "hearing deps unavailable")
+class UtteranceCapTests(unittest.TestCase):
+    """HEARING-WORKAROUND(respeaker): delete with the workaround."""
+
+    def test_over_cap(self):
+        from hearing import over_cap
+
+        self.assertFalse(over_cap(468, 15.0))
+        self.assertTrue(over_cap(469, 15.0))  # 469 x 512 / 16000 >= 15 s
+        self.assertFalse(over_cap(10_000, None))

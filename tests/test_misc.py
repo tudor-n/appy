@@ -333,6 +333,7 @@ class MusicForcedCallTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(self.forced(text))
 
+    # HEARING-WORKAROUND(respeaker): delete with the workaround
     def test_strict_music_rejects_long_lyrics(self):
         lyric = "don't stop, play it again, play it all night long baby"
         self.assertIsNone(self.forced(lyric, strict_music=True))

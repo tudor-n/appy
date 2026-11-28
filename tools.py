@@ -471,7 +471,7 @@ def music_call(user_text: str, strict: bool = False) -> "ForcedCall | None":
     """The music tool a clear command must call, or None. `strict` (the mic hears the
     music) also requires a short message, so a sung lyric doesn't skip the song."""
     text = user_text.replace("’", "'").strip()
-    if strict and len(text.split()) > STRICT_MUSIC_MAX_WORDS:
+    if strict and len(text.split()) > STRICT_MUSIC_MAX_WORDS:  # HEARING-WORKAROUND(respeaker)
         return None
     rest = _MUSIC_PREFIX.sub("", text, count=1)
     rest = _MUSIC_TRAILER.sub("", rest)

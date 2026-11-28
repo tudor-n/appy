@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# HEARING-WORKAROUND(respeaker): turn the echo-cancelled mic for Appy on or off.
+#
+#   appy-echo-cancel install   copy audio/appy-echo-cancel.conf into PipeWire's config
+#   appy-echo-cancel remove    delete it again
+#
+# Both restart PipeWire (audio cuts out for a second). Temporary: see
+# docs/hearing-workaround.md.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d"
+TARGET="$CONF_DIR/appy-echo-cancel.conf"
+
+restart() { systemctl --user restart pipewire pipewire-pulse wireplumber; }
+
+case "${1:-}" in
+    install)
+        mkdir -p "$CONF_DIR"
+        cp "$ROOT/audio/appy-echo-cancel.conf" "$TARGET"
+        restart
+        echo "Installed. In .env set:"
+        echo "  MIC_DEVICE=appy_echo_cancel_source"
+        echo "  APPY_MIC_HEARS_MUSIC=1"
+        ;;
+    remove)
+        rm -f "$TARGET"
+        restart
+        echo "Removed. In .env clear MIC_DEVICE (and APPY_MIC_HEARS_MUSIC)."
+        ;;
+    *)
+        sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+        exit 2
+        ;;
+esac

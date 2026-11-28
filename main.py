@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Must run before importing voice/kokoro so ONNX_PROVIDER is set
 
 from openai import OpenAI
+import hearing_workaround  # HEARING-WORKAROUND(respeaker)
 import tools
 from agent import Agent
 from dj import DJ, Ducker
@@ -115,7 +116,9 @@ def main():
         status.speech_discarded()
         ducker.release("user")
 
-    ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=on_speech_discarded)
+    ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=on_speech_discarded,
+              # HEARING-WORKAROUND(respeaker): cap turns while the mic hears music
+              utterance_cap=lambda: hearing_workaround.utterance_cap(riff))
     ear.start()
 
     def show_tool_card(name: str, result: str):
@@ -243,7 +246,10 @@ def main():
                     user_input,
                     stamp=tools.turn_stamp(now),
                     effort=effort_state["value"],
-                    force=tools.forced_call(user_input, agent.recent_tools),
+                    force=tools.forced_call(
+                        user_input, agent.recent_tools,
+                        # HEARING-WORKAROUND(respeaker): only short music commands count
+                        strict_music=hearing_workaround.strict_music(source, riff)),
                 )
                 speaker.wait()
             finally:

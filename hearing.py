@@ -98,12 +98,20 @@ def parec_cmd(mic_device: str | None) -> list[str]:
     return cmd
 
 
+def over_cap(chunks: int, cap_s: float | None) -> bool:
+    """HEARING-WORKAROUND(respeaker): has an utterance of `chunks` reached `cap_s`?"""
+    return cap_s is not None and chunks * CHUNK_SIZE / SAMPLE_RATE >= cap_s
+
+
 class Ear:
-    def __init__(self, on_speech_start=None, on_speech_discarded=None):
+    def __init__(self, on_speech_start=None, on_speech_discarded=None, utterance_cap=None):
         """on_speech_start fires when speech begins; on_speech_discarded fires if that
-        speech is then thrown away (too quiet, or filtered as a hallucination)."""
+        speech is then thrown away (too quiet, or filtered as a hallucination).
+        utterance_cap() -> seconds or None, asked at each speech start: the longest that
+        utterance may run (HEARING-WORKAROUND(respeaker): leaked song vocals)."""
         self.on_speech_start = on_speech_start
         self.on_speech_discarded = on_speech_discarded
+        self.utterance_cap = utterance_cap  # HEARING-WORKAROUND(respeaker)
         print("[hearing] Loading Silero VAD (ONNX)...", flush=True)
         self.vad = load_silero_vad(onnx=True)
 
@@ -183,6 +191,7 @@ class Ear:
         speech_chunks = 0
         silence_chunks = 0
         checked_pause = False
+        cap = None  # HEARING-WORKAROUND(respeaker): this utterance's length limit
 
         # 200ms pause -> ask Smart Turn; 2.0s pause -> force-close fallback
         smart_turn_chunks = int((SAMPLE_RATE / CHUNK_SIZE) * 0.20)
@@ -232,6 +241,8 @@ class Ear:
                             checked_pause = False
                             buffer = list(ring_buffer)
                             self._utterance += 1
+                            # HEARING-WORKAROUND(respeaker)
+                            cap = self.utterance_cap() if self.utterance_cap else None
                             if self.on_speech_start:
                                 self.on_speech_start()
                     else:
@@ -276,6 +287,21 @@ class Ear:
                                 args=(full_audio, self._utterance),
                                 daemon=True,
                             ).start()
+
+                # HEARING-WORKAROUND(respeaker): song vocals leaking into the mic can
+                # hide the pause that ends a turn; close it at the cap instead
+                if is_speaking and over_cap(len(buffer), cap):
+                    print(f"[turn: {cap:.0f}s cap (music)] ", end="", flush=True)
+                    is_speaking = False
+                    silence_chunks = 0
+                    checked_pause = False
+                    full_audio = np.concatenate(buffer)
+                    buffer = []
+                    threading.Thread(
+                        target=self._transcribe,
+                        args=(full_audio, self._utterance),
+                        daemon=True,
+                    ).start()
         finally:
             self._proc.terminate()
 
