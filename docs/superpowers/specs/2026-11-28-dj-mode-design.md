@@ -161,3 +161,37 @@ today's behaviour, the card payload, and the Rust card parsing the new widget ki
 Exact ducking level and timing, forced-call phrase list and the strict-mode word limit,
 Riff's Connect device name, how long to wait for Riff to start, echo-cancel tuning, card
 layout details, prompt wording.
+
+## Live findings (2026-11-28)
+- Riff's MPRIS works for transport, Volume (read and set), Metadata; while idle it reports
+  the title "Not playing" with no artist.
+- Riff does not register as a Spotify Connect device (`/me/player/devices` is empty while
+  it plays, also with its experimental Device Selector on). Its MPRIS `OpenUri` answers
+  `NotSupported: Not implemented`; `SupportedUriSchemes` is empty. Its `spotify:` link
+  handler (`org.gtk.Application.Open`) only opens the page; launching a second `riff`
+  process to pass a link knocks the running Riff off MPRIS. Its exported GTK actions
+  have nothing that plays a given URI. **Riff can't be told to play a specific song.**
+- Search, `/me/playlists` (25) and `/me` work with the PKCE login.
+
+## Amendment: Appy plays through his own background player (Tudor's pick)
+Riff stays Tudor's app for hands-on listening; Appy gets a headless Spotify Connect
+player, spotifyd, for playing things by name.
+
+- **Player:** spotifyd 0.4.2 (official "full" release binary, sha512-checked), installed
+  at `~/.local/bin/spotifyd` (outside the repo; README says how). Started by Appy at boot
+  and stopped when he quits, so with Appy off nothing changes for Tudor:
+  `spotifyd --no-daemon --use-mpris --device-name Appy --device-type computer
+  --backend pulseaudio --bitrate 320 --volume-normalisation --disable-discovery
+  --cache-path ~/.cache/appy/spotifyd`. Missing binary or login → Appy boots anyway, logs
+  it once, and play_music says the music player isn't set up.
+- **Login:** `appy spotify-login` runs the Web API login and then `spotifyd authenticate`
+  with the same cache path (one-time browser approval each).
+- **Playing by name** (track, artist, album, playlist, liked, queue): Web API on the
+  Connect device named "Appy". Riff auto-launch and the Riff OpenUri fallback are dropped.
+- **Transport, volume, now-playing, ducking, card, forced-call gating** follow the
+  *active* player: whichever of Riff and spotifyd is Playing; if neither, the one that
+  played last; spotifyd's MPRIS name is `org.mpris.MediaPlayer2.spotifyd.instance<PID>`
+  (exposed once it is the playback device).
+- Tudor moves Appy's music into Riff by picking "This Device" in Riff's Device Selector.
+- Unchanged: search, playlists/liked/queue logic, tools' schemas, the card, the hearing
+  workaround.
