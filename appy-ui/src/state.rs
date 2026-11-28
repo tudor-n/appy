@@ -1,6 +1,7 @@
 //! Mutable UI state, grouped by concern. Everything except `ActiveStatus` is plain data
 //! with time passed in explicitly, so the logic is unit-testable without GTK.
 
+use crate::card::CardKind;
 use std::f64::consts::PI;
 use std::time::{Duration, Instant};
 
@@ -86,6 +87,13 @@ impl MonitorMove {
 }
 
 impl SharedState {
+    /// Which cards hold a place in the stack beside Appy: (music, weather). A card that's
+    /// flying back keeps its place until it's gone, so the other doesn't slide through it.
+    pub fn stacked(&self) -> (bool, bool) {
+        let held = |kind: CardKind| self.cards[kind.index()].is_some();
+        (held(CardKind::Music), held(CardKind::Weather))
+    }
+
     pub fn new(now: Instant) -> Self {
         Self {
             // The overlay comes up before the backend, which replays "booting" (continuing
@@ -560,6 +568,19 @@ mod tests {
         assert_eq!(drag.update(10.0, 5.0), (10.0, 5.0));
         assert_eq!(drag.update(15.0, 5.0), (5.0, 0.0));
         assert_eq!(drag.target(-500.0, 20.0), (-400.0, 70.0));
+    }
+
+    #[test]
+    fn a_leaving_card_keeps_its_place_in_the_stack() {
+        // Otherwise the music card slides down through the weather card flying back
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.cards[CardKind::Weather.index()] = Some(Card::new((0.0, 0.0), t0));
+        s.cards[CardKind::Music.index()] = Some(Card::new((0.0, 0.0), t0));
+        s.cards[CardKind::Weather.index()].as_mut().unwrap().dismiss(t0);
+        assert_eq!(s.stacked(), (true, true));
+        s.cards[CardKind::Weather.index()] = None; // gone
+        assert_eq!(s.stacked(), (true, false));
     }
 
     #[test]

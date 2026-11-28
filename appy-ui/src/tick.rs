@@ -152,12 +152,7 @@ impl App {
     /// glass mode (so it never sits on top of it). Cards that are up share one column,
     /// music on top of weather.
     pub fn card_slot(&self, s: &SharedState, kind: CardKind) -> layout::Point {
-        let up = |k: CardKind| {
-            s.cards[k.index()]
-                .as_ref()
-                .is_some_and(|c| c.leaving_since.is_none())
-        };
-        let (music, weather) = (up(CardKind::Music), up(CardKind::Weather));
+        let (music, weather) = s.stacked();
         let count = (music as usize + weather as usize).max(1);
         let body = self.body_on_screen(s);
         let clear_of = if s.locked {
