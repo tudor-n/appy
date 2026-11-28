@@ -12,6 +12,7 @@ BUS_NAME = "org.mpris.MediaPlayer2.dev.diegovsky.Riff"
 OBJECT_PATH = "/org/mpris/MediaPlayer2"
 PLAYER = "org.mpris.MediaPlayer2.Player"
 FLATPAK_ID = "dev.diegovsky.Riff"
+RIFF_IDLE_TITLE = "Not playing"
 
 
 class RiffError(Exception):
@@ -186,9 +187,10 @@ class Riff:
     def now_playing(self) -> dict | None:
         meta = self._get("Metadata") or {}
         title = meta.get("xesam:title")
-        if not title:
-            return None
         artists = meta.get("xesam:artist") or []
+        # Riff's placeholder while nothing is loaded: "Not playing", no artist
+        if not title or (title == RIFF_IDLE_TITLE and not artists):
+            return None
         return {
             "title": str(title),
             "artist": str(artists[0]) if artists else "",

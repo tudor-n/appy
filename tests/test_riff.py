@@ -104,6 +104,12 @@ class RiffTransportTests(unittest.TestCase):
         self.assertEqual(Riff(bus=bus).now_playing(),
                          {"title": "Karma Police", "artist": "Radiohead", "album": "OK Computer"})
 
+    def test_now_playing_placeholder_is_none(self):
+        # Riff fills Metadata with a placeholder while nothing is loaded (seen live)
+        bus = FakeBus(props={"Metadata": {"xesam:title": "Not playing", "xesam:artist": [],
+                                          "xesam:album": ""}})
+        self.assertIsNone(Riff(bus=bus).now_playing())
+
     def test_now_playing_empty_metadata_is_none(self):
         self.assertIsNone(Riff(bus=FakeBus(props={"Metadata": {}})).now_playing())
 
