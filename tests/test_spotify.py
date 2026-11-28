@@ -149,9 +149,13 @@ class PlaybackTests(unittest.TestCase):
         self.assertEqual(tokens.invalidated, 1)
 
     def test_second_401_is_an_auth_error(self):
-        sp, _ = client({("GET", "/v1/me"): (401, {"error": {"status": 401}})})
+        tokens = FakeTokens()
+        tokens.forgotten = 0
+        tokens.forget = lambda: setattr(tokens, "forgotten", tokens.forgotten + 1)
+        sp, _ = client({("GET", "/v1/me"): (401, {"error": {"status": 401}})}, tokens)
         with self.assertRaises(SpotifyAuthError):
             sp.user_id()
+        self.assertEqual(tokens.forgotten, 1)  # re-read the file next time
 
 
 class ErrorMappingTests(unittest.TestCase):

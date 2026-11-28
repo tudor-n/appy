@@ -277,9 +277,19 @@ class ForcedCallTests(unittest.TestCase):
             self.assertEqual(tools.weather_day(text, thursday), day, text)
 
 
+class StateDJ:
+    """A DJ stand-in that only reports Riff's state ("closed", "paused", "playing")."""
+
+    def __init__(self, state="playing"):
+        self.state = state
+
+    def riff_state(self):
+        return self.state
+
+
 class MusicForcedCallTests(unittest.TestCase):
     def setUp(self):
-        tools.set_dj(object())  # any DJ: forcing only checks that music is set up
+        tools.set_dj(StateDJ("playing"))
 
     def tearDown(self):
         tools.set_dj(None)
@@ -347,6 +357,48 @@ class MusicForcedCallTests(unittest.TestCase):
         self.assertEqual(self.forced("play that funky music white boy, play that funky music"),
                          ("play_music", {"query": "that funky music white boy, play that funky music",
                                          "kind": "track"}))
+
+    def test_controls_need_riff_running(self):
+        tools.set_dj(StateDJ("closed"))
+        for text in ["skip", "pause", "turn it up", "what's playing", "play", "resume"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+        self.assertEqual(self.forced("play Karma Police"),
+                         ("play_music", {"query": "Karma Police", "kind": "track"}))
+
+    def test_ambiguous_controls_need_music_playing(self):
+        tools.set_dj(StateDJ("paused"))
+        for text in ["stop", "next", "go back", "what is this", "who is this", "what's this"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+        self.assertEqual(self.forced("skip this song"), ("music_control", {"action": "next"}))
+        self.assertEqual(self.forced("pause"), ("music_control", {"action": "pause"}))
+        self.assertEqual(self.forced("play"), ("music_control", {"action": "resume"}))
+        tools.set_dj(StateDJ("playing"))
+        self.assertEqual(self.forced("next"), ("music_control", {"action": "next"}))
+        self.assertEqual(self.forced("stop"), ("music_control", {"action": "pause"}))
+
+    def test_games_are_not_music(self):
+        for text in ["play chess", "play hangman with me", "play a word game",
+                     "play rock paper scissors", "play the role of a pirate",
+                     "play devil's advocate", "let's play I spy", "play a quiz with me",
+                     "play riddles"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+
+    def test_titles_keep_their_words(self):
+        cases = {
+            "play Happy": "Happy",
+            "play Thanks": "Thanks",
+            "play Please Please Please": "Please Please Please",
+            "play Hello, please": "Hello",
+            "play Hey Appy": "Hey Appy",
+        }
+        for text, query in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.forced(text), ("play_music", {"query": query, "kind": "track"}))
+        self.assertEqual(self.forced("skip please"), ("music_control", {"action": "next"}))
+        self.assertEqual(self.forced("pause, thanks"), ("music_control", {"action": "pause"}))
 
     def test_no_dj_no_music_forcing(self):
         tools.set_dj(None)
@@ -424,6 +476,24 @@ class RunToolTests(unittest.TestCase):
 
     def test_unexpected_argument(self):
         self.assertIn("TypeError", self.error("boom", '{"x": 1}'))
+
+
+class MainShutdownTests(unittest.TestCase):
+    def test_music_is_restored_first_on_shutdown(self):
+        # bin/appy SIGTERMs Appy 5 s after Ctrl+C; the log upload to the Mac can take
+        # longer, so the music must come back up before anything slow
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        final = src[src.rindex("    finally:\n"):]
+        first = final.splitlines()[1].strip()
+        self.assertTrue(first.startswith("ducker.restore_now()"), first)
+
+    def test_volume_steps_use_the_ducker_level(self):
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        self.assertIn("dj.set_volume_hook(ducker.on_volume_change, ducker.saved_volume)", src)
 
 
 class DJToolTests(unittest.TestCase):

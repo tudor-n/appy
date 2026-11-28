@@ -326,6 +326,13 @@ class MusicControlTests(DJTestCase):
         self.assertIn("error", self.run_tool(self.dj().music_control, "rewind"))
 
 
+class RiffStateTests(DJTestCase):
+    def test_riff_state(self):
+        self.assertEqual(self.dj(riff=FakeRiff(running=False)).riff_state(), "closed")
+        self.assertEqual(self.dj(riff=FakeRiff(status="Paused")).riff_state(), "paused")
+        self.assertEqual(self.dj(riff=FakeRiff(status="Playing")).riff_state(), "playing")
+
+
 class MusicCardTests(DJTestCase):
     def test_music_card_for_play_and_now_playing_only(self):
         dj = self.dj(riff=FakeRiff(now={"title": "Hello", "artist": "Adele", "album": "25"}))
@@ -367,7 +374,7 @@ class DuckerTests(unittest.TestCase):
     def setUp(self):
         FakeTimer.made = []
         self.riff = FakeRiff(volume=0.8)
-        self.ducker = Ducker(self.riff, timer=FakeTimer)
+        self.ducker = Ducker(self.riff, timer=FakeTimer, run=lambda fn: fn())
 
     def fire_last(self):
         FakeTimer.made[-1].fire()
@@ -429,6 +436,47 @@ class DuckerTests(unittest.TestCase):
     def test_release_without_hold_is_harmless(self):
         self.ducker.release("user")
         self.assertEqual(FakeTimer.made, [])
+
+    def test_volume_up_while_ducked_steps_from_the_real_level(self):
+        dj = DJ(self.riff, None, sleep=lambda s: None)
+        dj.set_volume_hook(self.ducker.on_volume_change, self.ducker.saved_volume)
+        self.ducker.hold("user")  # Tudor says "turn it up" over the music
+        self.assertTrue(json.loads(dj.music_control("volume_up"))["ok"])
+        self.assertAlmostEqual(self.riff._volume, 0.95 * 0.25)
+        self.ducker.release("user")
+        self.fire_last()
+        self.assertAlmostEqual(self.riff._volume, 0.95)
+
+    def test_saved_volume_only_while_ducked(self):
+        self.assertIsNone(self.ducker.saved_volume())
+        self.ducker.hold("appy")
+        self.assertAlmostEqual(self.ducker.saved_volume(), 0.8)
+
+    def test_unexpected_errors_never_escape(self):
+        class Exploding(FakeRiff):
+            def volume(self):
+                raise RuntimeError("bus exploded")
+
+        ducker = Ducker(Exploding(), timer=FakeTimer, run=lambda fn: fn())
+        ducker.hold("user")  # must not raise on the mic thread
+        ducker.release("user")
+        ducker.restore_now()
+        self.assertFalse(ducker.on_volume_change(0.5))
+
+    def test_hold_and_release_run_on_the_worker(self):
+        queued = []
+        ducker = Ducker(self.riff, timer=FakeTimer, run=queued.append)
+        ducker.hold("appy")  # returns at once: no D-Bus on the caller's thread
+        self.assertEqual(self.riff.calls, [])
+        for fn in queued:
+            fn()
+        self.assertAlmostEqual(self.riff._volume, 0.2)
+
+    def test_default_worker_processes_in_order(self):
+        ducker = Ducker(self.riff, timer=FakeTimer)
+        ducker.hold("appy")
+        ducker.flush()
+        self.assertAlmostEqual(self.riff._volume, 0.2)
 
     def test_riff_errors_are_swallowed(self):
         self.ducker.hold("appy")

@@ -116,6 +116,21 @@ class TokenStoreTests(unittest.TestCase):
         self.assertIn("spotify-login", str(ctx.exception))
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_new_login_works_without_restart(self):
+        self.write(access_token="old", refresh_token="R", expires_at=0)
+        store = self.store((400, {"error": "invalid_grant"}))
+        with self.assertRaises(SpotifyAuthError):
+            store.access_token()
+        # Tudor runs `appy spotify-login`, which writes a fresh token file
+        self.write(access_token="fresh", refresh_token="R2", expires_at=self.now + 3600)
+        self.assertEqual(store.access_token(), "fresh")
+
+    def test_bad_refresh_response_is_an_auth_error(self):
+        self.write(access_token="old", refresh_token="R", expires_at=0)
+        store = self.store((200, {"unexpected": True}))
+        with self.assertRaises(SpotifyAuthError):
+            store.access_token()
+
     def test_no_client_id_raises(self):
         self.write(access_token="A", refresh_token="R", expires_at=0)
         with self.assertRaises(SpotifyAuthError):

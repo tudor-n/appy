@@ -46,27 +46,43 @@ def _variant(value):
 
 
 class JeepneyBus:
-    """The only code that touches D-Bus. One blocking connection, opened lazily."""
+    """The only code that touches D-Bus. One blocking connection, opened lazily. Every
+    failure (an error reply, a timeout, a dropped bus) comes out as a RiffError, because
+    callers include the mic and speaker threads, which must never die of one."""
 
-    def __init__(self):
+    TIMEOUT_S = 0.5  # Riff answers in milliseconds; a stall must not hold up audio threads
+
+    def __init__(self, connect=None):
+        self._connect = connect or self._open
         self._conn = None
         self._lock = threading.Lock()
 
-    def _connection(self):
-        if self._conn is None:
-            from jeepney.io.blocking import open_dbus_connection
-            self._conn = open_dbus_connection(bus="SESSION")
-        return self._conn
+    @staticmethod
+    def _open():
+        from jeepney.io.blocking import open_dbus_connection
+        return open_dbus_connection(bus="SESSION")
 
     def _send(self, msg):
-        from jeepney.wrappers import unwrap_msg
+        from jeepney.wrappers import DBusErrorResponse, unwrap_msg
         with self._lock:
             try:
-                reply = self._connection().send_and_get_reply(msg, timeout=3)
-            except (OSError, ConnectionError):
-                self._conn = None  # the bus went away; reconnect next time
-                raise
-        return unwrap_msg(reply)
+                if self._conn is None:
+                    self._conn = self._connect()
+                reply = self._conn.send_and_get_reply(msg, timeout=self.TIMEOUT_S)
+                return unwrap_msg(reply)
+            except DBusErrorResponse as e:
+                raise RiffError("Riff didn't answer.") from e
+            except (TimeoutError, OSError, ConnectionError, ValueError) as e:
+                self._drop()  # reconnect next time
+                raise RiffError("Riff didn't answer.") from e
+
+    def _drop(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+        self._conn = None
 
     def _address(self):
         from jeepney import DBusAddress
@@ -78,7 +94,8 @@ class JeepneyBus:
 
     def call(self, method: str, *args, signature: str = ""):
         from jeepney import new_method_call
-        return self._send(new_method_call(self._address(), method, signature, args or None))
+        # jeepney needs a tuple body, also an empty one
+        return self._send(new_method_call(self._address(), method, signature, tuple(args)))
 
     def get(self, prop: str):
         from jeepney import Properties
@@ -108,7 +125,10 @@ class Riff:
         """Start Riff if it isn't open, and wait for it to show up on the bus."""
         if self.is_running():
             return
-        self._launch()
+        try:
+            self._launch()
+        except OSError as e:  # e.g. flatpak missing
+            raise RiffError("Riff didn't start.") from e
         deadline = self._clock() + timeout
         while self._clock() < deadline:
             self._sleep(0.25)

@@ -86,11 +86,19 @@ class TokenStore:
         except httpx.TransportError:
             raise SpotifyAuthError("I can't reach Spotify right now.") from None
         if r.status_code == 400:
+            self.forget()  # a new `appy spotify-login` is picked up without a restart
             raise SpotifyAuthError("Spotify logged me out. Run appy spotify-login again.")
-        if r.status_code != 200:
-            raise SpotifyAuthError("Spotify wouldn't refresh my login right now.")
-        self.save(r.json())
+        try:
+            if r.status_code != 200:
+                raise ValueError(r.status_code)
+            self.save(r.json())
+        except (ValueError, KeyError, TypeError):
+            raise SpotifyAuthError("Spotify wouldn't refresh my login right now.") from None
         return self._tokens["access_token"]
+
+    def forget(self) -> None:
+        """Drop the cached tokens; the next access_token() re-reads the file."""
+        self._tokens = None
 
     def invalidate(self) -> None:
         """Make the next access_token() refresh (after a 401)."""

@@ -53,6 +53,7 @@ class Spotify:
                 self._tokens.invalidate()
                 continue
             if r.status_code == 401:
+                self._tokens.forget()  # pick up a new login without a restart
                 raise SpotifyAuthError("Spotify logged me out. Run appy spotify-login again.")
             if r.status_code >= 400:
                 raise _error(r)

@@ -94,7 +94,7 @@ def main():
     tools.set_dj(dj)
     # Riff goes quiet while Tudor talks to Appy and while Appy answers
     ducker = Ducker(riff)
-    dj.set_volume_hook(ducker.on_volume_change)
+    dj.set_volume_hook(ducker.on_volume_change, ducker.saved_volume)
     print(f"[music] Riff via MPRIS; Spotify {'on' if spotify else 'off (SPOTIFY_CLIENT_ID not set)'}")
 
     def on_audio(state: str):
@@ -264,13 +264,13 @@ def main():
         reason = "error"
         raise
     finally:
+        ducker.restore_now()  # first: the launcher SIGTERMs us 5 s after Ctrl+C
         log.end(reason=reason)
         if review_box["review"]:
             review_box["review"].stop()
         if memory:
             uploaded = memory.upload_log(log.path)
             print(f"[memory] log {'uploaded' if uploaded else 'kept locally'}")
-        ducker.restore_now()  # never leave the music turned down
         ear.stop()
         speaker.close()
 

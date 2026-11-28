@@ -6,11 +6,12 @@ doesn't show up as a device, tracks and playlists are handed to Riff's MPRIS Ope
 Tool results are JSON for the LLM and never contain Spotify URIs or device IDs.
 """
 import json
+import queue
 import threading
 import time
 from typing import Callable
 
-from riff import Riff, RiffError
+from riff import Riff, RiffError, RiffNotRunning
 from spotify import Spotify, SpotifyError
 from spotify_auth import NOT_LOGGED_IN, SpotifyAuthError
 
@@ -37,11 +38,21 @@ class DJ:
         self.spotify = spotify
         self._sleep = sleep
         self._volume_hook: Callable[[float], bool] | None = None
+        self._volume_source: Callable[[], float | None] | None = None
 
-    def set_volume_hook(self, fn: Callable[[float], bool]) -> None:
-        """`fn(level)` gets every volume change first and returns True if it handled it
-        (the ducker, while the music is turned down for speech)."""
+    def set_volume_hook(self, fn: Callable[[float], bool],
+                        current: Callable[[], float | None] | None = None) -> None:
+        """`fn(level)` gets every volume change first and returns True if it handled it;
+        `current()` is the real volume to step from, or None to read Riff's (the ducker,
+        while the music is turned down for speech: Riff's own volume is the ducked one)."""
         self._volume_hook = fn
+        self._volume_source = current
+
+    def riff_state(self) -> str:
+        """"closed", "paused" (open, not playing) or "playing"; for tools.forced_call."""
+        if not self.riff.is_running():
+            return "closed"
+        return "playing" if self.riff.is_playing() else "paused"
 
     # play_music
 
@@ -162,7 +173,8 @@ class DJ:
                 self.riff.previous()
             elif action in ("volume_up", "volume_down"):
                 step = VOLUME_STEP if action == "volume_up" else -VOLUME_STEP
-                self._set_volume(self.riff.volume() + step)
+                base = self._volume_source() if self._volume_source else None
+                self._set_volume((self.riff.volume() if base is None else base) + step)
             elif action == "set_volume":
                 if value is None:
                     return _error("set_volume needs a value from 0 to 100.")
@@ -214,13 +226,17 @@ class Ducker:
 
     The first reason to duck saves Riff's volume and sets `level` of it; once the last
     reason is gone, the saved volume comes back `restore_delay` seconds later, unless
-    Riff's volume was changed by hand meanwhile. MPRIS only; Riff errors are ignored.
+    Riff's volume was changed by hand meanwhile. MPRIS only.
+
+    hold/release are called from the mic and speaker threads, so their D-Bus work runs
+    on a worker thread (`run`), and no error ever escapes: a hiccup talking to Riff must
+    never make Appy deaf or mute.
     """
 
     TOLERANCE = 0.02  # MPRIS volumes come back rounded
 
     def __init__(self, riff: Riff, level: float = 0.25, restore_delay: float = 0.5,
-                 timer=threading.Timer):
+                 timer=threading.Timer, run: Callable[[Callable[[], None]], None] | None = None):
         self.riff = riff
         self.level = level
         self.restore_delay = restore_delay
@@ -230,30 +246,64 @@ class Ducker:
         self._saved: float | None = None  # the volume to restore; None = not ducked
         self._ducked_to: float | None = None
         self._pending = None
+        if run is None:
+            self._jobs: queue.Queue = queue.Queue()
+            threading.Thread(target=self._worker, daemon=True, name="ducker").start()
+            run = self._jobs.put
+        self._run = run
+
+    def _worker(self):
+        while True:
+            job = self._jobs.get()
+            try:
+                job()
+            finally:
+                self._jobs.task_done()
+
+    def flush(self) -> None:
+        """Wait for queued hold/release work (tests, shutdown)."""
+        if hasattr(self, "_jobs"):
+            self._jobs.join()
 
     def hold(self, reason: str) -> None:
+        self._run(lambda: self._safely(self._hold, reason))
+
+    def release(self, reason: str) -> None:
+        self._run(lambda: self._safely(self._release, reason))
+
+    @staticmethod
+    def _safely(fn, *args):
+        try:
+            return fn(*args)
+        except RiffNotRunning:
+            return None  # Riff was closed meanwhile; nothing to duck or restore
+        except Exception as e:  # never kill the caller's thread over the music
+            print(f"[music] ducking failed: {type(e).__name__}: {e}", flush=True)
+            return None
+
+    def _hold(self, reason: str) -> None:
         with self._lock:
             self._cancel_pending()
             self._reasons.add(reason)
-            if self._saved is not None:
+            if self._saved is not None or not self.riff.is_playing():
                 return
-            try:
-                if not self.riff.is_playing():
-                    return
-                saved = self.riff.volume()
-                self.riff.set_volume(saved * self.level)
-            except RiffError:
-                return
+            saved = self.riff.volume()
+            self.riff.set_volume(saved * self.level)
             self._saved, self._ducked_to = saved, saved * self.level
 
-    def release(self, reason: str) -> None:
+    def _release(self, reason: str) -> None:
         with self._lock:
             self._reasons.discard(reason)
             if self._reasons or self._saved is None or self._pending is not None:
                 return
-            self._pending = self._timer_cls(self.restore_delay, self._restore)
+            self._pending = self._timer_cls(self.restore_delay, self._timer_fired)
             self._pending.daemon = True
             self._pending.start()
+
+    def saved_volume(self) -> float | None:
+        """The volume Riff goes back to, while ducked; None when it isn't ducked."""
+        with self._lock:
+            return self._saved
 
     def on_volume_change(self, level: float) -> bool:
         """A volume command while ducked: remember it for the restore. True = handled."""
@@ -262,7 +312,7 @@ class Ducker:
                 return False
             try:
                 self.riff.set_volume(level * self.level)
-            except RiffError:
+            except Exception:  # Riff went away: nothing ducked any more
                 self._saved = self._ducked_to = None
                 return False
             self._saved, self._ducked_to = level, level * self.level
@@ -272,12 +322,15 @@ class Ducker:
         with self._lock:
             self._cancel_pending()
             self._reasons.clear()
-            self._restore()
+            self._safely(self._restore)
 
     def _cancel_pending(self) -> None:
         if self._pending is not None:
             self._pending.cancel()
             self._pending = None
+
+    def _timer_fired(self) -> None:
+        self._safely(self._restore)
 
     def _restore(self) -> None:
         with self._lock:
@@ -286,8 +339,5 @@ class Ducker:
                 return
             saved, ducked_to = self._saved, self._ducked_to
             self._saved = self._ducked_to = None
-            try:
-                if abs(self.riff.volume() - ducked_to) <= self.TOLERANCE:
-                    self.riff.set_volume(saved)
-            except RiffError:
-                pass
+            if abs(self.riff.volume() - ducked_to) <= self.TOLERANCE:
+                self.riff.set_volume(saved)

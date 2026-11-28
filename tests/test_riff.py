@@ -1,7 +1,7 @@
 """Riff's MPRIS client, against a fake session bus."""
 import unittest
 
-from riff import BUS_NAME, Riff, RiffError, RiffNotRunning, _variant
+from riff import BUS_NAME, JeepneyBus, Riff, RiffError, RiffNotRunning, _variant
 
 
 class FakeBus:
@@ -146,6 +146,65 @@ class VariantTests(unittest.TestCase):
 
     def test_unwraps_plain_variant(self):
         self.assertEqual(_variant(("d", 0.5)), 0.5)
+
+
+class FakeConnection:
+    """jeepney blocking connection stand-in: answers or raises as scripted."""
+
+    def __init__(self, reply=None, raises=None):
+        self.reply, self.raises = reply, raises
+        self.sent = []
+        self.closed = False
+
+    def send_and_get_reply(self, msg, timeout=None):
+        msg.serialise(serial=1)  # what the real connection does first
+        self.sent.append(msg)
+        if self.raises:
+            raise self.raises
+        return self.reply(msg) if callable(self.reply) else self.reply
+
+    def close(self):
+        self.closed = True
+
+
+def ok_reply(msg):
+    from jeepney import new_method_return
+    return new_method_return(msg)
+
+
+class JeepneyBusTests(unittest.TestCase):
+    def test_method_calls_without_arguments_serialise(self):
+        conn = FakeConnection(reply=ok_reply)
+        bus = JeepneyBus(connect=lambda: conn)
+        for method in ("Play", "Pause", "Next", "Previous"):
+            bus.call(method)
+        bus.call("OpenUri", "spotify:track:x", signature="s")
+        self.assertEqual(len(conn.sent), 5)
+
+    def test_dbus_error_reply_becomes_riff_error(self):
+        from jeepney import new_error
+
+        conn = FakeConnection(reply=lambda m: new_error(m, "org.freedesktop.DBus.Error.ServiceUnknown"))
+        with self.assertRaises(RiffError):
+            JeepneyBus(connect=lambda: conn).call("Play")
+
+    def test_timeout_becomes_riff_error_and_reconnects(self):
+        conns = [FakeConnection(raises=TimeoutError()), FakeConnection(reply=ok_reply)]
+        made = list(conns)
+        bus = JeepneyBus(connect=lambda: made.pop(0))
+        with self.assertRaises(RiffError):
+            bus.call("Play")
+        self.assertTrue(conns[0].closed)
+        bus.call("Play")  # a fresh connection
+        self.assertEqual(len(conns[1].sent), 1)
+
+    def test_launch_failure_is_a_riff_error(self):
+        def no_flatpak():
+            raise FileNotFoundError("flatpak")
+
+        riff = Riff(bus=FakeBus(owner=False), launcher=no_flatpak)
+        with self.assertRaises(RiffError):
+            riff.ensure_running()
 
 
 if __name__ == "__main__":

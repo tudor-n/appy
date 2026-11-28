@@ -4,6 +4,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass
+from typing import Callable
 import time
 import httpx
 
@@ -431,67 +432,92 @@ _FORGET_TRAILER = re.compile(r"(\s+(anymore|any more|please))?[\s.!?]*$", re.IGN
 # play my gym playlist", "can you turn it up"). Forced like weather, because Gemma tends
 # to answer "skipped!" without calling anything. Matched against the whole message (after
 # the same filler/"appy"/"can you" prefix as _FORGET), so a sentence that merely mentions
-# music ("I was listening to music") or games ("let's play a game") isn't forced.
+# music ("I was listening to music") or a game ("let's play chess") isn't forced. Controls
+# are only forced while Riff is open, and the words that also mean something else in a
+# conversation ("stop", "next", "go back", "what is this") only while music is playing.
 _MUSIC_PREFIX = re.compile(
     r"^\s*(?:(?:ok(?:ay)?|so|and|also|hey|well|yo)[,.!]?\s+)*(?:appy[,.:!]?\s+)?"
     r"(?:please\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?)?",
     re.IGNORECASE,
 )
-_MUSIC_TRAILER = re.compile(r"[\s,]*(?:please|appy|thanks)?[\s.!?]*$", re.IGNORECASE)
+_PUNCT_TRAILER = re.compile(r"[\s.!?]*$")
+# After a control, "please" may just follow ("skip please"); otherwise only a comma'd
+# "please"/"thanks"/"appy" is dropped, so titles like "Happy", "Thanks" or "Please Please
+# Please" keep their words
+_POLITE_TRAILER = re.compile(r"\s+please$", re.IGNORECASE)
+_COMMA_TRAILER = re.compile(r",\s*(?:please|thanks|appy)$", re.IGNORECASE)
 _SONG = r"(?:the\s+)?(?:song|track|one|music|tune)"
+# (pattern, action, when): "running" = Riff open, "playing" = music playing right now
 _MUSIC_CONTROLS = [
-    (re.compile(rf"(?:pause|stop)(?:\s+(?:it|this|that|{_SONG}|the\s+music))?"), "pause"),
-    (re.compile(r"pause"), "pause"),
-    (re.compile(rf"(?:resume|unpause)(?:\s+(?:it|{_SONG}|playing))?"), "resume"),
-    (re.compile(r"play|play\s+(?:it|the\s+music)\s+again|keep\s+playing"), "resume"),
-    (re.compile(rf"(?:skip|next)(?:\s+(?:it|this|that|{_SONG}|this\s+(?:song|track|one)))?|"
-                rf"play\s+the\s+next\s+(?:song|track|one)"), "next"),
-    (re.compile(rf"previous(?:\s+(?:song|track|one))?|go\s+back(?:\s+(?:a|one)(?:\s+(?:song|track))?)?|"
-                rf"last\s+(?:song|track)|play\s+the\s+(?:previous|last)\s+(?:song|track|one)"), "previous"),
+    (re.compile(rf"pause(?:\s+(?:it|this|that|{_SONG}|the\s+music))?"), "pause", "running"),
+    (re.compile(rf"stop\s+(?:{_SONG}|the\s+music)"), "pause", "running"),
+    (re.compile(r"stop(?:\s+(?:it|this|that))?"), "pause", "playing"),
+    (re.compile(rf"(?:resume|unpause)(?:\s+(?:it|{_SONG}|playing))?"), "resume", "running"),
+    (re.compile(r"play|play\s+(?:it|the\s+music)\s+again|keep\s+playing"), "resume", "running"),
+    (re.compile(rf"(?:skip|next)\s+(?:{_SONG}|this\s+(?:song|track|one))|skip(?:\s+(?:it|this|that))?|"
+                rf"play\s+the\s+next\s+(?:song|track|one)"), "next", "running"),
+    (re.compile(r"next"), "next", "playing"),
+    (re.compile(r"previous(?:\s+(?:song|track|one))?|go\s+back\s+(?:a|one)(?:\s+(?:song|track))?|"
+                r"last\s+(?:song|track)|play\s+the\s+(?:previous|last)\s+(?:song|track|one)"),
+     "previous", "running"),
+    (re.compile(r"go\s+back"), "previous", "playing"),
     (re.compile(r"turn\s+(?:it|this|the\s+music|the\s+volume)\s+up|turn\s+up\s+the\s+(?:music|volume)|"
-                r"louder|volume\s+up"), "volume_up"),
+                r"louder|volume\s+up"), "volume_up", "running"),
     (re.compile(r"turn\s+(?:it|this|the\s+music|the\s+volume)\s+down|turn\s+down\s+the\s+(?:music|volume)|"
-                r"quieter|softer|volume\s+down"), "volume_down"),
-    (re.compile(r"what(?:'s|\s+is)\s+(?:this(?:\s+song)?|playing|the\s+song(?:\s+playing)?)|"
-                r"what\s+song\s+is\s+(?:this|playing)|who(?:'s|\s+is)\s+(?:this|singing)"), "now_playing"),
+                r"quieter|softer|volume\s+down"), "volume_down", "running"),
+    (re.compile(r"what(?:'s|\s+is)\s+(?:this\s+song|playing|the\s+song(?:\s+playing)?)|"
+                r"what\s+song\s+is\s+(?:this|playing)|who(?:'s|\s+is)\s+singing"), "now_playing", "running"),
+    (re.compile(r"what(?:'s|\s+is)\s+this|who(?:'s|\s+is)\s+this"), "now_playing", "playing"),
 ]
 _PLAY_LIKED = re.compile(r"play\s+(?:my\s+)?(?:liked\s+songs|likes|favou?rites)|"
-                         r"play\s+(?:some\s+)?music|play\s+something")
+                         r"play\s+(?:some\s+)?music|play\s+something|play\s+me\s+(?:a\s+song|something)")
 _PLAY_PLAYLIST = re.compile(r"play\s+(?:my|the)\s+(?P<x>.+?)\s+playlist")
 _PLAY_ARTIST = re.compile(r"play\s+(?:some|something\s+by|some\s+music\s+by|songs\s+by)\s+(?P<x>.+)")
 _QUEUE = re.compile(r"(?:queue(?:\s+up)?\s+(?P<x>.+?)(?:\s+next)?|add\s+(?P<y>.+?)\s+to\s+(?:the|my)\s+queue)")
 _PLAY_TRACK = re.compile(r"play\s+(?P<x>.+)")
-_NOT_MUSIC = re.compile(r"play\s+(?:a\s+|an\s+)?(?:game|games|round|with|around|along|trivia|"
-                        r"twenty\s+questions|20\s+questions|it\s+cool)\b")
+# "play" that's about a game or a part, not a song
+_NOT_MUSIC = re.compile(
+    r"\bgames?\b|\bwith\s+me\b|\bwith\s+you\b|\brole\b|\bpretend\b|devil'?s\s+advocate|\bchess\b|"
+    r"\bcheckers\b|\bhangman\b|rock\s*,?\s*paper\s*,?\s*scissors|\btrivia\b|\b(?:twenty|20)\s+questions\b|"
+    r"\briddles?\b|\bquiz\b|\bi\s+spy\b|\btic\s*-?\s*tac\s*-?\s*toe\b|\bcards\b|\bdumb\b|"
+    r"^play\s+(?:a\s+|an\s+)?(?:round|around|along|it\s+cool|it\s+safe|nice|fair)\b"
+)
 # HEARING-WORKAROUND(respeaker): while the mic hears music, only short commands count
 STRICT_MUSIC_MAX_WORDS = 6
 
 
-def music_call(user_text: str, strict: bool = False) -> "ForcedCall | None":
-    """The music tool a clear command must call, or None. `strict` (the mic hears the
-    music) also requires a short message, so a sung lyric doesn't skip the song."""
+def music_call(user_text: str, strict: bool = False,
+               riff_state: Callable[[], str] = lambda: "playing") -> "ForcedCall | None":
+    """The music tool a clear command must call, or None. `riff_state()` ("closed",
+    "paused", "playing") is only asked when a control matches. `strict` (the mic hears
+    the music) also requires a short message, so a sung lyric doesn't skip the song."""
     text = user_text.replace("’", "'").strip()
     if strict and len(text.split()) > STRICT_MUSIC_MAX_WORDS:  # HEARING-WORKAROUND(respeaker)
         return None
-    rest = _MUSIC_PREFIX.sub("", text, count=1)
-    rest = _MUSIC_TRAILER.sub("", rest)
-    low = rest.lower()
-    for pattern, action in _MUSIC_CONTROLS:
-        if pattern.fullmatch(low):
-            return ForcedCall("music_control", {"action": action})
-    if _NOT_MUSIC.match(low):
+    rest = _PUNCT_TRAILER.sub("", _MUSIC_PREFIX.sub("", text, count=1))
+    command = _PUNCT_TRAILER.sub("", _COMMA_TRAILER.sub("", rest))  # "play X" requests
+    control = _POLITE_TRAILER.sub("", command).lower()  # "skip please"
+    low = command.lower()
+    state = None
+    for pattern, action, when in _MUSIC_CONTROLS:
+        if pattern.fullmatch(control):
+            state = state or riff_state()
+            if state == "playing" or (when == "running" and state != "closed"):
+                return ForcedCall("music_control", {"action": action})
+            return None
+    if _NOT_MUSIC.search(low):
         return None
     if _PLAY_LIKED.fullmatch(low):
         return ForcedCall("play_music", {"kind": "liked"})
     for pattern, kind in ((_PLAY_PLAYLIST, "playlist"), (_PLAY_ARTIST, "artist")):
         if m := pattern.fullmatch(low):
-            return ForcedCall("play_music", {"query": rest[m.start("x"):m.end("x")], "kind": kind})
+            return ForcedCall("play_music", {"query": command[m.start("x"):m.end("x")], "kind": kind})
     if m := _QUEUE.fullmatch(low):
         group = "x" if m.group("x") else "y"
-        query = rest[m.start(group):m.end(group)]
+        query = command[m.start(group):m.end(group)]
         return ForcedCall("play_music", {"query": query, "kind": "track", "queue": True})
     if m := _PLAY_TRACK.fullmatch(low):
-        return ForcedCall("play_music", {"query": rest[m.start("x"):m.end("x")], "kind": "track"})
+        return ForcedCall("play_music", {"query": command[m.start("x"):m.end("x")], "kind": "track"})
     return None
 
 
@@ -543,7 +569,8 @@ def forced_call(user_text: str, recent_tools: frozenset[str],
     if _memory is not None and (forget := _FORGET.match(user_text.replace("\u2019", "'"))):
         what = _FORGET_TRAILER.sub("", forget.group("what")).strip()
         return ForcedCall("memory_forget", {"slug": "core", "text": what})
-    if _dj is not None and (music := music_call(user_text, strict=strict_music)):
+    if _dj is not None and (music := music_call(user_text, strict=strict_music,
+                                                riff_state=_dj.riff_state)):
         return music
     weather = bool(_WEATHER_WORDS.search(user_text)) or (
         "get_weather" in recent_tools and bool(_TIME_FOLLOW_UP.search(user_text))
