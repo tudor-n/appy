@@ -245,8 +245,9 @@ button.effort-opt.active:hover {
     background-color: #ffffff;
 }
 
-/* Weather card: Appy's reply-bubble colors; pops out with a little overshoot */
-.weather-card {
+/* Pop-out cards (weather, now playing): Appy's reply-bubble colors; pop out with a
+   little overshoot */
+.card {
     background-color: rgba(232, 230, 230, 0.91);
     border-radius: 22px;
     opacity: 0;
@@ -255,7 +256,7 @@ button.effort-opt.active:hover {
         transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1.0),
         opacity 180ms ease;
 }
-.weather-card.shown {
+.card.shown {
     opacity: 1;
     transform: scale(1.0) rotate(0deg);
 }

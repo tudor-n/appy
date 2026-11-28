@@ -1,5 +1,5 @@
 //! The weather card: a small square Appy "throws" out next to himself when he checks
-//! the weather. Its position is driven by tick.rs; the pop-in/out is CSS.
+//! the weather (card.rs has the shared square and its pop-in/out; tick.rs moves it).
 //!
 //! The icon is painted with cairo in the mascot's own palette (ink black and the app's
 //! grays) rather than using emoji, so it matches the rest of the UI.
@@ -10,13 +10,10 @@ use std::rc::Rc;
 
 use gtk4::cairo::{Context, LineCap, Operator};
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, DrawingArea, Label, Orientation, Stack};
+use gtk4::{Align, Box as GtkBox, DrawingArea, Label, Orientation};
 
-use crate::music::MusicFace;
-use crate::protocol::{MusicReport, WeatherIcon, WeatherReport};
-
-/// Card edge length in px (it's square).
-pub const CARD_SIZE: f64 = 104.0;
+use crate::card::CardShell;
+use crate::protocol::{WeatherIcon, WeatherReport};
 const ICON_W: i32 = 48;
 const ICON_H: i32 = 40;
 
@@ -26,14 +23,11 @@ const DARK_GRAY: (f64, f64, f64) = (99.0 / 255.0, 99.0 / 255.0, 102.0 / 255.0);
 const GRAY: (f64, f64, f64) = (142.0 / 255.0, 142.0 / 255.0, 147.0 / 255.0);
 
 pub struct WeatherCard {
-    pub root: GtkBox,
+    pub shell: CardShell,
     icon: DrawingArea,
     current_icon: Rc<Cell<WeatherIcon>>,
     temp: Label,
     place: Label,
-    /// The weather face or the now-playing face (music.rs); one card slot for both.
-    faces: Stack,
-    music: MusicFace,
 }
 
 impl WeatherCard {
@@ -64,31 +58,19 @@ impl WeatherCard {
         inner.append(&temp);
         inner.append(&place);
 
-        let music = MusicFace::new();
-        let faces = Stack::new();
-        faces.set_vexpand(true);
-        faces.add_named(&inner, Some("weather"));
-        faces.add_named(&music.root, Some("music"));
-
-        let root = GtkBox::new(Orientation::Vertical, 0);
-        root.add_css_class("weather-card");
-        root.set_size_request(CARD_SIZE as i32, CARD_SIZE as i32);
-        root.append(&faces);
-        root.set_visible(false);
+        let shell = CardShell::new();
+        shell.root.append(&inner);
 
         Self {
-            root,
+            shell,
             icon,
             current_icon,
             temp,
             place,
-            faces,
-            music,
         }
     }
 
     pub fn set(&self, report: &WeatherReport) {
-        self.faces.set_visible_child_name("weather");
         self.current_icon.set(report.icon);
         self.icon.queue_draw();
         self.temp
@@ -102,36 +84,9 @@ impl WeatherCard {
             Some(low) => format!("{} / {}", format_temp(report.temp_c), format_temp(low)),
             None => format_temp(report.temp_c),
         };
-        self.root
+        self.shell
+            .root
             .set_tooltip_text(Some(&format!("{place}: {}, {temps}", report.condition)));
-    }
-
-    /// Show what Riff is playing instead of the weather.
-    pub fn set_music(&self, track: &MusicReport) {
-        self.music.set(track);
-        self.faces.set_visible_child_name("music");
-        self.root.set_tooltip_text(Some(&MusicFace::tooltip(track)));
-    }
-
-    /// Make the card present but still scaled down; adding the "shown" class a frame
-    /// later runs the CSS pop-in.
-    pub fn appear(&self) {
-        self.root.remove_css_class("shown");
-        self.root.set_visible(true);
-    }
-
-    /// Start the exit animation; `hide` once it has run.
-    pub fn pop_out(&self) {
-        self.root.remove_css_class("shown");
-    }
-
-    pub fn hide(&self) {
-        self.root.set_visible(false);
-    }
-
-    /// On screen and not on its way out: it should catch the pointer.
-    pub fn is_present(&self) -> bool {
-        self.root.is_visible() && self.root.has_css_class("shown")
     }
 }
 

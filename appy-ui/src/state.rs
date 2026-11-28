@@ -16,7 +16,7 @@ const VOICE_COOLDOWN: Duration = Duration::from_secs(8);
 /// cross the gap to the messages without them collapsing.
 const HOVER_GRACE: Duration = Duration::from_millis(300);
 const BLINK_DURATION_MS: f64 = 160.0;
-/// How long the weather card stays up (unless hovered).
+/// How long a pop-out card stays up (unless hovered).
 const CARD_LIFETIME: Duration = Duration::from_secs(14);
 /// How long the card's exit animation runs before it's hidden.
 pub const CARD_EXIT: Duration = Duration::from_millis(320);
@@ -46,8 +46,8 @@ pub struct SharedState {
     pub placement: Placement,
     pub wobble: Wobble,
     pub blink: Blink,
-    /// The weather card, while it's on screen.
-    pub card: Option<Card>,
+    /// The pop-out cards while they're on screen, by `CardKind::index` (weather, music).
+    pub cards: [Option<Card>; 2],
     /// The memory service's auto-approve setting; None until the brain says.
     pub auto_approve: Option<bool>,
     /// Whether the memory panel sits above or below the chat.
@@ -109,7 +109,7 @@ impl SharedState {
             placement: Placement::default(),
             wobble: Wobble::default(),
             blink: Blink::new(now),
-            card: None,
+            cards: [None, None],
             auto_approve: None,
             memory_side: VSide::default(),
             memory_pos: None,
@@ -303,7 +303,7 @@ impl Drag {
     }
 }
 
-/// The weather card Appy pops out next to himself.
+/// A pop-out card (weather, now playing) beside Appy.
 #[derive(Debug)]
 pub struct Card {
     /// Current top-left, eased toward its slot each frame.
@@ -324,7 +324,7 @@ impl Card {
         }
     }
 
-    /// A new weather report while the card is up: stay longer (and come back if leaving).
+    /// New content while the card is up: stay longer (and come back if leaving).
     pub fn refresh(&mut self, now: Instant) {
         self.dismiss_at = now + CARD_LIFETIME;
         self.leaving_since = None;

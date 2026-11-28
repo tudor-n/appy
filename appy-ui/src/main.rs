@@ -17,6 +17,7 @@
 //! - `protocol` wire types
 
 mod app;
+mod card;
 mod chat;
 mod controls;
 mod events;

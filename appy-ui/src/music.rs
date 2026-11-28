@@ -1,6 +1,6 @@
-//! The now-playing face of Appy's card: what Riff is playing, shown when Appy starts
-//! music or is asked what's on. It lives in the weather card's slot (weather.rs swaps
-//! between the two), so it flies out and back exactly like the weather does.
+//! The now-playing card: what's playing, shown when Appy starts music or is asked what's
+//! on. Its own card (card.rs), so it can be up together with the weather card: they stack
+//! beside Appy, music on top.
 //!
 //! The glyph is cairo in the mascot's ink, like the weather icons: an eighth note while
 //! playing, two bars while paused. No album art, so the card stays in the UI's palette.
@@ -13,21 +13,22 @@ use gtk4::cairo::{Context, LineCap};
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, DrawingArea, Label, Orientation};
 
+use crate::card::CardShell;
 use crate::protocol::{MusicReport, PlaybackState};
 use crate::weather::INK;
 
 const GLYPH_W: i32 = 40;
 const GLYPH_H: i32 = 30;
 
-pub struct MusicFace {
-    pub root: GtkBox,
+pub struct MusicCard {
+    pub shell: CardShell,
     glyph: DrawingArea,
     state: Rc<Cell<PlaybackState>>,
     title: Label,
     artist: Label,
 }
 
-impl MusicFace {
+impl MusicCard {
     pub fn new() -> Self {
         let state = Rc::new(Cell::new(PlaybackState::Playing));
         let glyph = DrawingArea::new();
@@ -61,9 +62,11 @@ impl MusicFace {
         root.append(&glyph);
         root.append(&title);
         root.append(&artist);
+        let shell = CardShell::new();
+        shell.root.append(&root);
 
         Self {
-            root,
+            shell,
             glyph,
             state,
             title,
@@ -77,6 +80,7 @@ impl MusicFace {
         self.title.set_text(&track.title);
         self.artist.set_text(&track.artist);
         self.artist.set_visible(!track.artist.is_empty());
+        self.shell.root.set_tooltip_text(Some(&Self::tooltip(track)));
     }
 
     /// "Karma Police by Radiohead" (paused) for the card's tooltip.
@@ -151,11 +155,11 @@ mod tests {
     #[test]
     fn tooltip_names_track_and_pause() {
         assert_eq!(
-            MusicFace::tooltip(&track(PlaybackState::Playing, "Radiohead")),
+            MusicCard::tooltip(&track(PlaybackState::Playing, "Radiohead")),
             "Karma Police by Radiohead"
         );
         assert_eq!(
-            MusicFace::tooltip(&track(PlaybackState::Paused, "")),
+            MusicCard::tooltip(&track(PlaybackState::Paused, "")),
             "Karma Police (paused)"
         );
     }

@@ -6,7 +6,7 @@
 //! - Double left-click the mascot to hide the overlay (the panel pill brings it back).
 //! - Double right-click to toggle glass mode (pinned open, dark backdrop); Esc leaves it.
 //! - Enter sends, Shift+Enter inserts a newline.
-//! - Click the weather card to send it back; hovering it keeps it up.
+//! - Click a card (weather, now playing) to send it back; hovering it keeps it up.
 
 use std::time::Instant;
 
@@ -21,6 +21,7 @@ use crate::app::App;
 use crate::input::set_class;
 use crate::layout;
 use crate::mascot;
+use crate::card::CardKind;
 use crate::state::Card;
 
 const WHEEL_STEP: f64 = 64.0;
@@ -267,20 +268,23 @@ fn connect_input(app: &'static App) {
 }
 
 fn connect_card(app: &'static App) {
-    let update_card = move |f: fn(&mut Card)| {
-        app.with_state(move |s| {
-            if let Some(card) = s.card.as_mut() {
-                f(card);
-            }
-        });
-    };
+    for kind in CardKind::ALL {
+        let update_card = move |f: fn(&mut Card)| {
+            app.with_state(move |s| {
+                if let Some(card) = s.cards[kind.index()].as_mut() {
+                    f(card);
+                }
+            });
+        };
+        let root = &app.ui.card_shell(kind).root;
 
-    let click = GestureClick::new();
-    click.connect_released(move |_, _, _, _| update_card(|card| card.dismiss(Instant::now())));
-    app.ui.card.root.add_controller(click);
+        let click = GestureClick::new();
+        click.connect_released(move |_, _, _, _| update_card(|card| card.dismiss(Instant::now())));
+        root.add_controller(click);
 
-    let motion = EventControllerMotion::new();
-    motion.connect_enter(move |_, _, _| update_card(|card| card.hovered = true));
-    motion.connect_leave(move |_| update_card(|card| card.hovered = false));
-    app.ui.card.root.add_controller(motion);
+        let motion = EventControllerMotion::new();
+        motion.connect_enter(move |_, _, _| update_card(|card| card.hovered = true));
+        motion.connect_leave(move |_| update_card(|card| card.hovered = false));
+        root.add_controller(motion);
+    }
 }

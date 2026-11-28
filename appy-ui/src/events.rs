@@ -10,7 +10,7 @@ use crate::app::App;
 use crate::chat::format_live_dots;
 use crate::protocol::{AppyState, BackendEvent, ClientEvent, Widget};
 use crate::state::{ActiveStatus, Card, SharedState};
-use crate::weather::CARD_SIZE;
+use crate::card::{CardKind, CARD_SIZE};
 
 /// Lets the card render scaled-down for a couple of frames so its CSS pop-in runs.
 const CARD_POP_DELAY: Duration = Duration::from_millis(30);
@@ -78,11 +78,11 @@ impl App {
             }
             BackendEvent::Widget(Widget::Weather(report)) => {
                 self.ui.card.set(&report);
-                self.show_card(&mut s, now);
+                self.show_card(&mut s, CardKind::Weather, now);
             }
             BackendEvent::Widget(Widget::Music(track)) => {
-                self.ui.card.set_music(&track);
-                self.show_card(&mut s, now);
+                self.ui.music_card.set(&track);
+                self.show_card(&mut s, CardKind::Music, now);
             }
             BackendEvent::MemoryProposals { items } => self.ui.memory.set_items(&items),
             BackendEvent::MemoryCommitted {
@@ -106,26 +106,27 @@ impl App {
         self.ui.mascot.queue_draw();
     }
 
-    /// Pop the weather card out of Appy (or keep the current one up longer).
-    fn show_card(&self, s: &mut SharedState, now: Instant) {
-        if let Some(card) = s.card.as_mut() {
+    /// Pop a card out of Appy (or keep the current one up longer).
+    fn show_card(&self, s: &mut SharedState, kind: CardKind, now: Instant) {
+        let shell = self.ui.card_shell(kind);
+        if let Some(card) = s.cards[kind.index()].as_mut() {
             card.refresh(now);
         } else {
             // Start inside the mascot and fly out to its slot (see tick.rs)
             let body = self.body_on_screen(s);
             let (cx, cy) = body.center();
             let start = (cx - CARD_SIZE * 0.5, cy - CARD_SIZE * 0.5);
-            s.card = Some(Card::new(start, now));
-            self.ui.move_card(start);
-            self.ui.card.appear();
+            s.cards[kind.index()] = Some(Card::new(start, now));
+            self.ui.move_card(kind, start);
+            shell.appear();
 
             // A little recoil, as if Appy tossed it
-            let toward_left = self.card_slot(s).0 < body.x;
+            let toward_left = self.card_slot(s, kind).0 < body.x;
             s.wobble.kick(if toward_left { -7.0 } else { 7.0 }, 5.0);
         }
 
-        let card = self.ui.card.root.clone();
-        glib::timeout_add_local_once(CARD_POP_DELAY, move || card.add_css_class("shown"));
+        let root = shell.root.clone();
+        glib::timeout_add_local_once(CARD_POP_DELAY, move || root.add_css_class("shown"));
         s.last_input_region = None;
     }
 
