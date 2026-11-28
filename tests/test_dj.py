@@ -252,10 +252,31 @@ class PlayMusicTests(DJTestCase):
         self.assertEqual(self.spotify_calls("play") + self.spotify_calls("queue"), [])
         self.assertEqual(self.riff.calls, [])
 
+    def test_device_name_must_match_exactly(self):
+        sp = FakeSpotify(devices=[{"id": "x", "name": "Happy Speaker", "is_active": False}],
+                         search={"track": [HELLO]})
+        result = self.run_tool(self.dj(spotify=sp).play_music, "hello", "track")
+        self.assertEqual(result["error"], "My music player isn't running.")
+
+    def test_restarts_a_player_that_died(self):
+        # spotifyd exited mid-session: start it again instead of saying "not set up"
+        state = {"running": False, "starts": 0}
+
+        def start():
+            state["starts"] += 1
+            state["running"] = True
+            return True
+
+        dj = DJ(FakeRiff(), FakeSpotify(search={"track": [HELLO]}), sleep=lambda s: None,
+                player_running=lambda: state["running"], start_player=start)
+        result = json.loads(dj.play_music("hello", "track"))
+        self.assertEqual(state["starts"], 1)
+        self.assertEqual(result["playing"], "Hello by Adele")
+
     def test_player_not_set_up_skips_the_wait(self):
         sp = FakeSpotify(devices=[], search={"track": [HELLO]})
         dj = DJ(FakeRiff(), sp, sleep=lambda s: self.fail("must not wait"),
-                player_running=lambda: False)
+                player_running=lambda: False, start_player=lambda: False)
         result = json.loads(dj.play_music("hello", "track"))
         self.assertEqual(result["error"], "My music player isn't set up.")
         self.assertEqual(sp.device_polls, 0)

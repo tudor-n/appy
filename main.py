@@ -101,8 +101,22 @@ def main():
     # Music: Appy's own background player (spotifyd) for playing things by name; transport
     # follows whichever player is playing, his or Riff
     background = BackgroundPlayer()
-    if not background.start():
+    have_spotify = bool(os.getenv("SPOTIFY_CLIENT_ID", "").strip())
+    if not have_spotify:
+        # Without the Web API nothing can start songs on it: don't put an idle "Appy"
+        # device on Tudor's account
+        print("[music] background player off: SPOTIFY_CLIENT_ID not set")
+    elif not background.start():
         print(f"[music] background player off: {background.problem}")
+
+    def restart_player() -> bool:
+        """spotifyd died mid-session: bring it back for the next play request."""
+        if not have_spotify:
+            return False
+        started = background.start()
+        print(f"[music] background player {'restarted' if started else 'off: ' + str(background.problem)}")
+        return started
+
     # Pause/skip/volume/ducking go to whichever is playing (his player first when both are)
     riff = Riff()
     appy_player = SpotifydPlayer(pid=background.pid)  # his own instance only
@@ -118,7 +132,7 @@ def main():
 
     spotify = Spotify(TokenStore()) if os.getenv("SPOTIFY_CLIENT_ID", "").strip() else None
     dj = DJ(music, spotify, player_running=background.running, pause_others=pause_riff,
-            own_player=appy_player)
+            own_player=appy_player, start_player=restart_player)
     tools.set_dj(dj)
     # Riff goes quiet while Tudor talks to Appy and while Appy answers
     ducker = Ducker(music)

@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Callable
 
+from player import DEVICE_NAME
 from riff import Riff, RiffError, RiffNotRunning
 from spotify import Spotify, SpotifyError
 from spotify_auth import NOT_LOGGED_IN, SpotifyAuthError
@@ -19,8 +20,8 @@ from spotify_auth import NOT_LOGGED_IN, SpotifyAuthError
 PLAY_KINDS = ("track", "artist", "album", "playlist", "liked")
 CONTROL_ACTIONS = ("pause", "resume", "next", "previous", "volume_up", "volume_down",
                    "set_volume", "shuffle_on", "shuffle_off", "now_playing")
-# Appy's background player is found among Spotify's devices by this part of its name
-PLAYER_DEVICE_HINT = "appy"
+# Appy's background player, among Spotify's devices (exactly; "Happy Speaker" isn't it)
+PLAYER_DEVICE_NAME = DEVICE_NAME
 VOLUME_STEP = 0.15
 DEVICE_POLLS = 5  # spotifyd may still be connecting: look this many times, 1 s apart
 NOW_PLAYING_WAIT_S = 4.0  # a playlist can take >2 s to load on spotifyd (seen live)
@@ -44,11 +45,13 @@ class DJ:
                  sleep: Callable[[float], None] = time.sleep,
                  player_running: Callable[[], bool] = lambda: True,
                  pause_others: Callable[[], None] = lambda: None,
-                 own_player=None):
+                 own_player=None,
+                 start_player: Callable[[], bool] = lambda: False):
         """`riff`: the MPRIS side (an ActivePlayer in main); `player_running()`: whether
         the background player process is up (no point waiting for its device if not)."""
         self.riff = riff
         self._player_running = player_running
+        self._start_player = start_player  # brings spotifyd back if it died mid-session
         # Spotify doesn't stop Riff when Appy's player starts (seen live), so Appy does
         self._pause_others = pause_others
         # What "did the song change?" is judged on: Appy's own player, not whichever
@@ -85,7 +88,7 @@ class DJ:
             return _error("I can only queue single songs.")
         if self.spotify is None:
             return _error(NOT_LOGGED_IN)
-        if not self._player_running():
+        if not self._player_running() and not self._start_player():
             return _error("My music player isn't set up.")
         try:
             device = self._player_device()
@@ -119,7 +122,7 @@ class DJ:
             if attempt:
                 self._sleep(1.0)
             for d in self.spotify.devices():
-                if PLAYER_DEVICE_HINT in d["name"].lower() and d.get("id"):
+                if d["name"].strip().lower() == PLAYER_DEVICE_NAME.lower() and d.get("id"):
                     return d["id"]
         return None
 
