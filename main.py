@@ -13,6 +13,7 @@ import hearing_workaround  # HEARING-WORKAROUND(respeaker)
 import tools
 from agent import Agent
 from dj import DJ, Ducker
+from player import BackgroundPlayer
 from hearing import Ear
 from memory_client import MemoryClient, system_prompt
 from memory_review import MemoryReview
@@ -87,7 +88,11 @@ def main():
         api_key=os.getenv("API_KEY", "ollama"),
     )
 
-    # Music: transport over MPRIS always; playing by name once Spotify is set up
+    # Music: Appy's own background player (spotifyd) for playing things by name; transport
+    # follows whichever player is playing, his or Riff
+    background = BackgroundPlayer()
+    if not background.start():
+        print(f"[music] background player off: {background.problem}")
     riff = Riff()
     spotify = Spotify(TokenStore()) if os.getenv("SPOTIFY_CLIENT_ID", "").strip() else None
     dj = DJ(riff, spotify)
@@ -271,6 +276,7 @@ def main():
         if memory:
             uploaded = memory.upload_log(log.path)
             print(f"[memory] log {'uploaded' if uploaded else 'kept locally'}")
+        background.stop()
         ear.stop()
         speaker.close()
 

@@ -1,7 +1,10 @@
-"""One-time Spotify login for Appy's music tools: `appy spotify-login`.
+"""One-time Spotify logins for Appy's music tools: `appy spotify-login`.
 
-Opens Spotify's consent page in the browser, catches the redirect on 127.0.0.1:8898 and
-saves the refresh token to ~/.config/appy/spotify.json (readable only by you).
+1. The Web API (search, playlists, starting songs): opens Spotify's consent page, catches
+   the redirect on 127.0.0.1:8898 and saves the refresh token to
+   ~/.config/appy/spotify.json (readable only by you). Skipped if that login still works.
+2. Appy's background player (spotifyd, player.py): `spotifyd authenticate`, another
+   browser approval, saved in its cache.
 """
 import os
 import secrets
@@ -14,7 +17,9 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from dotenv import load_dotenv
 
-from spotify_auth import REDIRECT_URI, TOKEN_URL, TokenStore, authorize_url, pkce_pair
+from player import BackgroundPlayer
+from spotify_auth import (REDIRECT_URI, TOKEN_URL, SpotifyAuthError, TokenStore,
+                          authorize_url, pkce_pair)
 
 
 def main() -> int:
@@ -23,7 +28,23 @@ def main() -> int:
     if not client_id:
         print("Set SPOTIFY_CLIENT_ID in .env first (see README, 'Music').")
         return 1
+    try:
+        TokenStore(client_id=client_id).access_token()
+        print("Spotify Web API: already logged in.")
+    except SpotifyAuthError:
+        if web_api_login(client_id) != 0:
+            return 1
+    player = BackgroundPlayer()
+    print("Now Appy's background player (spotifyd): approve it in the browser too.")
+    if not player.authenticate():
+        print(f"spotifyd isn't installed at {player.binary} (see README, 'Music'), or its login failed.")
+        return 1
+    print("Logged in. Appy can play music by name now.")
+    return 0
 
+
+def web_api_login(client_id: str) -> int:
+    """The PKCE browser login for the Web API; 0 on success."""
     verifier, challenge = pkce_pair()
     state = secrets.token_urlsafe(16)
     result: dict = {}
@@ -73,7 +94,7 @@ def main() -> int:
         print(f"Login failed: Spotify answered {r.status_code}.")
         return 1
     TokenStore(client_id=client_id).save(r.json())
-    print("Logged in to Spotify.")
+    print("Spotify Web API: logged in.")
     return 0
 
 
