@@ -118,7 +118,7 @@ started, from the tool result, in one short sentence. Never read out links or ID
 ```
 
 While the mic can hear the speakers, music leaks into what Appy hears. A temporary
-workaround (echo cancellation plus stricter rules) is described in
+workaround (stricter rules while music plays) is described in
 [docs/hearing-workaround.md](docs/hearing-workaround.md).
 
 ## Long-term memory
