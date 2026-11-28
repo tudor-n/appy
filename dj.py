@@ -262,33 +262,37 @@ class DJ:
 
 
 class Ducker:
-    """Turns Riff down while someone talks: Tudor (from the moment the mic hears him
-    until his turn is over) or Appy (while his voice is queued or playing).
+    """Turns the music down while someone talks: Tudor (from the moment the mic hears
+    him until his turn is over) or Appy (while his voice is queued or playing).
 
-    The first reason to duck saves the player's volume and lowers it by `step`; once the last
-    reason is gone, the saved volume comes back `restore_delay` seconds later, unless
-    Riff's volume was changed by hand meanwhile. MPRIS only.
+    Every player that's playing gets its volume saved and lowered by a step (deeper
+    while Tudor talks); once the last reason is gone, each saved volume comes back
+    `restore_delay` seconds later, unless it was changed by hand meanwhile. A player
+    that stops playing while ducked (playback moved to the other one) gets its volume
+    back right away. MPRIS only.
 
     hold/release are called from the mic and speaker threads, so their D-Bus work runs
-    on a worker thread (`run`), and no error ever escapes: a hiccup talking to Riff must
-    never make Appy deaf or mute.
+    on a worker thread (`run`), and no error ever escapes: a hiccup talking to a player
+    must never make Appy deaf or mute. The saved volumes are also written to
+    `state_file`, so a crash can't leave the music turned down (see `recover`).
     """
 
     TOLERANCE = 0.02  # MPRIS volumes come back rounded
+    RESTORE_RETRIES = 3
 
     def __init__(self, riff: Riff, step: float = DUCK_STEP,
                  listen_step: float = LISTEN_DUCK_STEP, restore_delay: float = 0.5,
-                 timer=threading.Timer, run: Callable[[Callable[[], None]], None] | None = None):
+                 timer=threading.Timer, run: Callable[[Callable[[], None]], None] | None = None,
+                 state_file=None):
         self.riff = riff
         self.step = step  # while Appy talks
         self.listen_step = listen_step  # while Tudor talks
         self.restore_delay = restore_delay
         self._timer_cls = timer
+        self._state_file = state_file
         self._lock = threading.RLock()
         self._reasons: set[str] = set()
-        self._saved: float | None = None  # the volume to restore; None = not ducked
-        self._ducked_to: float | None = None
-        self._target = None  # the player that was turned down
+        self._ducked: dict = {}  # player -> [saved volume, volume we set]
         self._closed = False
         self._restore_retries = 0
         self._pending = None
@@ -322,15 +326,19 @@ class Ducker:
         try:
             return fn(*args)
         except RiffNotRunning:
-            return None  # Riff was closed meanwhile; nothing to duck or restore
+            return None  # the player was closed meanwhile; nothing to duck or restore
         except Exception as e:  # never kill the caller's thread over the music
             print(f"[music] ducking failed: {type(e).__name__}: {e}", flush=True)
             return None
 
-    def _playing_player(self):
-        """The player making sound now (one of an ActivePlayer's), or None."""
-        players = getattr(self.riff, "players", [self.riff])
-        return next((p for p in players if p.is_playing()), None)
+    def _players(self) -> list:
+        return list(getattr(self.riff, "players", [self.riff]))
+
+    def _is_playing(self, player) -> bool:
+        try:
+            return player.is_playing()
+        except Exception:
+            return False
 
     def _hold(self, reason: str) -> None:
         with self._lock:
@@ -338,62 +346,70 @@ class Ducker:
                 return
             self._cancel_pending()
             self._reasons.add(reason)
-            playing = self._playing_player()
-            if self._saved is not None:
-                if playing is None or playing is self._target:
-                    self._relevel()
-                    return
-                # Playback moved to the other player (Appy started a song over Riff):
-                # give the old one its volume back and duck the new one
-                if not self._restore_target():
-                    self._target = self._saved = self._ducked_to = None
-            if playing is None:
-                return
-            saved = playing.volume()
-            ducked = self._ducked(saved)
-            playing.set_volume(ducked)
-            self._target = playing
-            self._saved, self._ducked_to = saved, ducked
+            for player in self._players():
+                playing = self._is_playing(player)
+                if player in self._ducked:
+                    if playing:
+                        self._relevel(player)
+                    else:
+                        # Playback moved off it (Appy started a song over Riff): give it
+                        # its volume back now
+                        self._restore_player(player, forget_on_error=True)
+                elif playing:
+                    saved = player.volume()
+                    ducked = self._depth(saved)
+                    player.set_volume(ducked)
+                    self._ducked[player] = [saved, ducked]
+            self._save_state()
 
     def _release(self, reason: str) -> None:
         with self._lock:
             self._reasons.discard(reason)
-            if self._saved is not None and self._reasons:
-                self._relevel()  # e.g. Tudor done, Appy still talking: back to gentle
+            if self._ducked and self._reasons:
+                for player in list(self._ducked):
+                    self._relevel(player)  # e.g. Tudor done, Appy still talking: softer
                 return
-            if self._reasons or self._saved is None or self._pending is not None:
+            if self._reasons or not self._ducked or self._pending is not None:
                 return
-            self._pending = self._timer_cls(self.restore_delay, self._timer_fired)
-            self._pending.daemon = True
-            self._pending.start()
+            self._schedule_restore()
 
-    def _ducked(self, volume: float) -> float:
+    def _depth(self, volume: float) -> float:
         step = self.listen_step if "user" in self._reasons else self.step
         return max(0.0, volume - step)
 
-    def _relevel(self) -> None:
-        """Move the ducked player to the depth the current reasons call for."""
-        ducked = self._ducked(self._saved)
-        if abs(ducked - self._ducked_to) > 1e-9:
-            self._target.set_volume(ducked)
-            self._ducked_to = ducked
+    def _relevel(self, player) -> None:
+        """Move a ducked player to the depth the current reasons call for."""
+        saved, ducked_to = self._ducked[player]
+        ducked = self._depth(saved)
+        if abs(ducked - ducked_to) > 1e-9:
+            player.set_volume(ducked)
+            self._ducked[player][1] = ducked
+
+    def _volume_target(self):
+        """The ducked player a volume command means: the one playing, else any."""
+        playing = [p for p in self._ducked if self._is_playing(p)]
+        return (playing or list(self._ducked) or [None])[0]
 
     def saved_volume(self) -> float | None:
-        """The volume Riff goes back to, while ducked; None when it isn't ducked."""
+        """The volume the playing player goes back to, while ducked; else None."""
         with self._lock:
-            return self._saved
+            target = self._volume_target()
+            return self._ducked[target][0] if target is not None else None
 
     def on_volume_change(self, level: float) -> bool:
         """A volume command while ducked: remember it for the restore. True = handled."""
         with self._lock:
-            if self._saved is None:
+            target = self._volume_target()
+            if target is None:
                 return False
             try:
-                self._target.set_volume(self._ducked(level))
-            except Exception:  # Riff went away: nothing ducked any more
-                self._saved = self._ducked_to = None
+                target.set_volume(self._depth(level))
+            except Exception:  # it went away: nothing ducked there any more
+                self._ducked.pop(target, None)
+                self._save_state()
                 return False
-            self._saved, self._ducked_to = level, self._ducked(level)
+            self._ducked[target] = [level, self._depth(level)]
+            self._save_state()
             return True
 
     def restore_now(self) -> None:
@@ -414,36 +430,75 @@ class Ducker:
             self._pending.cancel()
             self._pending = None
 
+    def _schedule_restore(self) -> None:
+        self._pending = self._timer_cls(self.restore_delay, self._timer_fired)
+        self._pending.daemon = True
+        self._pending.start()
+
     def _timer_fired(self) -> None:
         self._safely(self._restore)
-
-    RESTORE_RETRIES = 3
 
     def _restore(self) -> None:
         with self._lock:
             self._pending = None
-            if self._reasons or self._saved is None:
+            if self._reasons or not self._ducked:
                 return
-            if self._restore_target():
+            for player in list(self._ducked):
+                self._restore_player(player)
+            self._save_state()
+            if not self._ducked:
                 self._restore_retries = 0
             elif self._restore_retries < self.RESTORE_RETRIES and not self._closed:
-                # Riff didn't answer: keep the saved volume and try again shortly, so a
-                # hiccup never makes the ducked level the new normal
+                # A player didn't answer: keep its saved volume and try again shortly,
+                # so a hiccup never makes the ducked level the new normal
                 self._restore_retries += 1
-                self._pending = self._timer_cls(self.restore_delay, self._timer_fired)
-                self._pending.daemon = True
-                self._pending.start()
+                self._schedule_restore()
 
-    def _restore_target(self) -> bool:
-        """Give the ducked player its volume back, unless it was changed by hand. False
-        (state kept) if the player didn't answer; True once done or moot."""
-        target, saved, ducked_to = self._target, self._saved, self._ducked_to
+    def _restore_player(self, player, forget_on_error: bool = False) -> None:
+        """Give a player its volume back, unless it was changed by hand. On no answer
+        its record is kept (to retry), unless `forget_on_error`."""
+        saved, ducked_to = self._ducked[player]
         try:
-            if abs(target.volume() - ducked_to) <= self.TOLERANCE:
-                target.set_volume(saved)
+            if abs(player.volume() - ducked_to) <= self.TOLERANCE:
+                player.set_volume(saved)
         except RiffNotRunning:
             pass  # closed meanwhile: nothing to give back
         except RiffError:
-            return False
-        self._target = self._saved = self._ducked_to = None
-        return True
+            if not forget_on_error:
+                return
+        del self._ducked[player]
+
+    # crash safety
+
+    def _save_state(self) -> None:
+        if self._state_file is None:
+            return
+        try:
+            if self._ducked:
+                state = {type(p).__name__: saved for p, (saved, _) in self._ducked.items()}
+                self._state_file.parent.mkdir(parents=True, exist_ok=True)
+                self._state_file.write_text(json.dumps(state))
+            else:
+                self._state_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def recover(self) -> None:
+        """At startup: an earlier run died with the music ducked; put it back."""
+        if self._state_file is None:
+            return
+        try:
+            state = json.loads(self._state_file.read_text())
+        except (OSError, ValueError):
+            return
+        for player in self._players():
+            saved = state.get(type(player).__name__)
+            if saved is None:
+                continue
+            try:
+                if player.volume() < saved:
+                    player.set_volume(saved)
+                    print(f"[music] put {type(player).__name__}'s volume back after a crash")
+            except Exception:
+                pass
+        self._state_file.unlink(missing_ok=True)

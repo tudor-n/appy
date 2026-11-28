@@ -645,6 +645,59 @@ class DuckerTests(unittest.TestCase):
         self.ducker.hold("appy")
         self.assertAlmostEqual(self.riff._volume, 0.8)
 
+    def test_ducks_every_player_that_is_playing(self):
+        from riff import ActivePlayer
+
+        riff, appy = FakeRiff(volume=0.8), FakeRiff(volume=0.6)
+        ducker = Ducker(ActivePlayer([appy, riff]), timer=FakeTimer, run=lambda fn: fn())
+        ducker.hold("appy")
+        self.assertAlmostEqual(appy._volume, 0.3)
+        self.assertAlmostEqual(riff._volume, 0.5)
+        ducker.release("appy")
+        self.fire_last()
+        self.assertAlmostEqual(appy._volume, 0.6)
+        self.assertAlmostEqual(riff._volume, 0.8)
+
+    def test_volume_command_goes_to_the_player_now_playing(self):
+        # Mid-turn takeover: Riff was ducked, then Appy's player started
+        from riff import ActivePlayer
+
+        riff, appy = FakeRiff(volume=0.8), FakeRiff(status="Paused", volume=0.6)
+        active = ActivePlayer([appy, riff])
+        ducker = Ducker(active, timer=FakeTimer, run=lambda fn: fn())
+        ducker.hold("appy")
+        riff._status, appy._status = "Paused", "Playing"
+        ducker.hold("appy")  # Appy talks on over his own player
+        self.assertAlmostEqual(ducker.saved_volume(), 0.6)
+        self.assertTrue(ducker.on_volume_change(0.9))
+        self.assertAlmostEqual(appy._volume, 0.6)
+        self.assertAlmostEqual(riff._volume, 0.8)  # untouched, back where it was
+
+    def test_crash_while_ducked_is_undone_at_the_next_start(self):
+        import tempfile
+        from pathlib import Path
+
+        state = Path(tempfile.mkdtemp()) / "ducked.json"
+        riff = FakeRiff(volume=0.8)
+        Ducker(riff, timer=FakeTimer, run=lambda fn: fn(), state_file=state).hold("user")
+        self.assertAlmostEqual(riff._volume, 0.05)
+        self.assertTrue(state.exists())  # ...and Appy dies here
+        riff._status = "Paused"
+        Ducker(riff, timer=FakeTimer, run=lambda fn: fn(), state_file=state).recover()
+        self.assertAlmostEqual(riff._volume, 0.8)
+        self.assertFalse(state.exists())
+
+    def test_normal_restore_clears_the_state_file(self):
+        import tempfile
+        from pathlib import Path
+
+        state = Path(tempfile.mkdtemp()) / "ducked.json"
+        ducker = Ducker(self.riff, timer=FakeTimer, run=lambda fn: fn(), state_file=state)
+        ducker.hold("appy")
+        ducker.release("appy")
+        self.fire_last()
+        self.assertFalse(state.exists())
+
     def test_riff_errors_are_swallowed(self):
         self.ducker.hold("appy")
         self.riff.running = False  # Riff quit while ducked

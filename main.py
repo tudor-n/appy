@@ -136,7 +136,9 @@ def main():
             own_player=appy_player, start_player=restart_player)
     tools.set_dj(dj)
     # Riff goes quiet while Tudor talks to Appy and while Appy answers
-    ducker = Ducker(music)
+    # The saved volumes live on disk while ducked, so a crash can't leave the music down
+    ducker = Ducker(music, state_file=Path.home() / ".cache" / "appy" / "ducked.json")
+    ducker.recover()
     dj.set_volume_hook(ducker.on_volume_change, ducker.saved_volume)
     print(f"[music] Riff + background player via MPRIS; Spotify "
           f"{'on' if spotify else 'off (SPOTIFY_CLIENT_ID not set)'}")
