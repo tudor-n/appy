@@ -399,6 +399,17 @@ class DuckerTests(unittest.TestCase):
     def fire_last(self):
         FakeTimer.made[-1].fire()
 
+    def test_music_nearly_silent_while_tudor_talks(self):
+        # Over music the laptop mic needs quiet; Appy's own replies only need it softer
+        self.ducker.hold("user")
+        self.assertAlmostEqual(self.riff._volume, 0.05)
+        self.ducker.hold("appy")
+        self.ducker.release("user")  # Appy started answering: back to the gentle level
+        self.assertAlmostEqual(self.riff._volume, 0.5)
+        self.ducker.release("appy")
+        self.fire_last()
+        self.assertAlmostEqual(self.riff._volume, 0.8)
+
     def test_ducks_by_a_fixed_step_on_the_log_volume_scale(self):
         # Riff and spotifyd map volume logarithmically (~60 dB range): a quarter of the
         # volume is ~45 dB down, i.e. silent (seen live). A 0.3 step is ~18 dB down.
@@ -410,11 +421,11 @@ class DuckerTests(unittest.TestCase):
 
     def test_ducks_and_restores_after_both_release(self):
         self.ducker.hold("user")
-        self.assertAlmostEqual(self.riff._volume, 0.5)
+        self.assertAlmostEqual(self.riff._volume, 0.05)
         self.ducker.hold("appy")
         self.ducker.release("appy")
         self.assertEqual(FakeTimer.made, [])  # Tudor's turn is still open
-        self.assertAlmostEqual(self.riff._volume, 0.5)
+        self.assertAlmostEqual(self.riff._volume, 0.05)
         self.ducker.release("user")
         self.assertEqual(FakeTimer.made[-1].delay, 0.5)
         self.fire_last()
@@ -471,7 +482,7 @@ class DuckerTests(unittest.TestCase):
         dj.set_volume_hook(self.ducker.on_volume_change, self.ducker.saved_volume)
         self.ducker.hold("user")  # Tudor says "turn it up" over the music
         self.assertTrue(json.loads(dj.music_control("volume_up"))["ok"])
-        self.assertAlmostEqual(self.riff._volume, 0.65)
+        self.assertAlmostEqual(self.riff._volume, 0.2)  # 0.95, still nearly silent
         self.ducker.release("user")
         self.fire_last()
         self.assertAlmostEqual(self.riff._volume, 0.95)
@@ -513,9 +524,10 @@ class DuckerTests(unittest.TestCase):
         riff, appy = FakeRiff(volume=0.8), FakeRiff(status="Paused", volume=0.6)
         ducker = Ducker(ActivePlayer([appy, riff]), timer=FakeTimer, run=lambda fn: fn())
         ducker.hold("user")  # Tudor: "play Karma Police" over Riff
-        self.assertAlmostEqual(riff._volume, 0.5)
+        self.assertAlmostEqual(riff._volume, 0.05)
         riff._status, appy._status = "Paused", "Playing"  # Spotify moved playback to Appy
         ducker.hold("appy")  # Appy answers over his own player
+        ducker.release("user")  # (main releases Tudor's hold as Appy starts talking)
         self.assertAlmostEqual(riff._volume, 0.8)  # Riff is back where it was
         self.assertAlmostEqual(appy._volume, 0.3)
         ducker.release("appy")

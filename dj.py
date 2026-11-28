@@ -30,6 +30,9 @@ CARD_STATES = ("playing", "paused")  # the `state` values of the music card
 # logarithmically over ~60 dB, so a step (not a fraction) is a fixed loudness drop:
 # 0.3 ~ 18 dB, background but audible. (A quarter of the volume was ~45 dB: silent.)
 DUCK_STEP = 0.3
+# While Tudor talks the laptop mic needs the music almost gone (~45 dB down); it's only
+# for the few seconds of his sentence, then Appy's reply uses DUCK_STEP.
+LISTEN_DUCK_STEP = 0.75
 
 
 def _error(message: str) -> str:
@@ -252,10 +255,12 @@ class Ducker:
 
     TOLERANCE = 0.02  # MPRIS volumes come back rounded
 
-    def __init__(self, riff: Riff, step: float = DUCK_STEP, restore_delay: float = 0.5,
+    def __init__(self, riff: Riff, step: float = DUCK_STEP,
+                 listen_step: float = LISTEN_DUCK_STEP, restore_delay: float = 0.5,
                  timer=threading.Timer, run: Callable[[Callable[[], None]], None] | None = None):
         self.riff = riff
-        self.step = step
+        self.step = step  # while Appy talks
+        self.listen_step = listen_step  # while Tudor talks
         self.restore_delay = restore_delay
         self._timer_cls = timer
         self._lock = threading.RLock()
@@ -311,6 +316,7 @@ class Ducker:
             playing = self._playing_player()
             if self._saved is not None:
                 if playing is None or playing is self._target:
+                    self._relevel()
                     return
                 # Playback moved to the other player (Appy started a song over Riff):
                 # give the old one its volume back and duck the new one
@@ -326,6 +332,9 @@ class Ducker:
     def _release(self, reason: str) -> None:
         with self._lock:
             self._reasons.discard(reason)
+            if self._saved is not None and self._reasons:
+                self._relevel()  # e.g. Tudor done, Appy still talking: back to gentle
+                return
             if self._reasons or self._saved is None or self._pending is not None:
                 return
             self._pending = self._timer_cls(self.restore_delay, self._timer_fired)
@@ -333,7 +342,15 @@ class Ducker:
             self._pending.start()
 
     def _ducked(self, volume: float) -> float:
-        return max(0.0, volume - self.step)
+        step = self.listen_step if "user" in self._reasons else self.step
+        return max(0.0, volume - step)
+
+    def _relevel(self) -> None:
+        """Move the ducked player to the depth the current reasons call for."""
+        ducked = self._ducked(self._saved)
+        if abs(ducked - self._ducked_to) > 1e-9:
+            self._target.set_volume(ducked)
+            self._ducked_to = ducked
 
     def saved_volume(self) -> float | None:
         """The volume Riff goes back to, while ducked; None when it isn't ducked."""

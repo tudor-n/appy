@@ -120,6 +120,28 @@ class Spotify:
                 break
         return uris[:limit]
 
+    def music_vocabulary(self, liked: int = 200) -> list[str]:
+        """Names Whisper should expect: the artists of his newest `liked` saved tracks,
+        most frequent first, then his playlist names."""
+        counts: dict[str, int] = {}
+        offset = 0
+        while offset < liked:
+            body = self._request("GET", "/me/tracks",
+                                 params={"limit": min(50, liked - offset), "offset": offset}) or {}
+            items = body.get("items") or []
+            for item in items:
+                for artist in ((item or {}).get("track") or {}).get("artists") or []:
+                    if name := artist.get("name"):
+                        counts[name] = counts.get(name, 0) + 1
+            offset += len(items)
+            if not items or not body.get("next"):
+                break
+        names = sorted(counts, key=lambda n: -counts[n])
+        for playlist in self.my_playlists():
+            if playlist["name"] and playlist["name"] not in names:
+                names.append(playlist["name"])
+        return names
+
     def user_id(self) -> str:
         if self._user_id is None:
             self._user_id = (self._request("GET", "/me") or {}).get("id", "")

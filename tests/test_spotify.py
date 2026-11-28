@@ -104,6 +104,17 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(uris[-1], "spotify:track:99")
         self.assertEqual(len(api.requests), 2)
 
+    def test_music_vocabulary_lists_liked_artists_by_count_then_playlists(self):
+        def tracks(req):
+            items = [{"track": {"uri": f"spotify:track:{i}", "artists": [{"name": name}]}}
+                     for i, name in enumerate(["Prince", "Kiss", "Prince", "Radiohead", "Prince", "Kiss"])]
+            return 200, {"items": items, "next": None}
+
+        sp, _ = client({("GET", "/v1/me/tracks"): tracks,
+                        ("GET", "/v1/me/playlists"): (200, {"items": [{"name": "Gym", "uri": "u"}],
+                                                            "next": None})})
+        self.assertEqual(sp.music_vocabulary(), ["Prince", "Kiss", "Radiohead", "Gym"])
+
     def test_user_id_is_cached(self):
         sp, api = client({("GET", "/v1/me"): (200, {"id": "tudor"})})
         self.assertEqual(sp.user_id(), "tudor")

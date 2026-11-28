@@ -26,6 +26,8 @@ from status import StatusTracker
 from voice import Speaker
 from ui_bridge import UiBridge, VALID_EFFORTS
 
+# How many of Tudor's artist/playlist names Whisper gets as hints (its prompt is ~224 tokens)
+MUSIC_HOTWORDS = 40
 # Keep the mic shut this long after Appy's last sound: speaker latency + room echo
 ECHO_GRACE_S = 0.3
 QUIT_WORDS = {"quit", "exit", "shutdown"}
@@ -120,6 +122,7 @@ def main():
             ducker.release("appy")
         else:
             ducker.hold("appy")
+            ducker.release("user")  # Tudor's done: his music comes back up to "softer"
 
     speaker = Speaker(on_audio=on_audio)
     # A wake flips the UI to "listening"; if that speech is then discarded as noise,
@@ -137,6 +140,19 @@ def main():
               # HEARING-WORKAROUND(respeaker): cap turns while the mic hears music
               utterance_cap=lambda: hearing_workaround.utterance_cap(music))
     ear.start()
+
+    def load_music_names():
+        """Teach Whisper the names in Tudor's library ("Kiss" was heard as "give me a
+        kiss", "Prince" as "grace")."""
+        try:
+            names = spotify.music_vocabulary()[:MUSIC_HOTWORDS]
+        except Exception as e:
+            print(f"[music] couldn't read the library for Whisper: {e}")
+            return
+        ear.set_hotwords(", ".join(names))
+        print(f"[music] Whisper knows {len(names)} artist/playlist names")
+    if spotify:
+        threading.Thread(target=load_music_names, daemon=True).start()
 
     def show_tool_card(name: str, result: str):
         """Pop a card out next to Appy for tools that have one."""
