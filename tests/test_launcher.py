@@ -172,5 +172,17 @@ class LauncherUpdateTests(unittest.TestCase):
         self.assertTrue(any(c.startswith("cargo build") for c in self.tool_calls()))
 
 
+    def test_spotify_login_runs_the_login_script(self):
+        # A stand-in venv python that records what it was asked to run
+        py = self.app / ".venv" / "bin" / "python"
+        py.parent.mkdir(parents=True)
+        py.write_text(f'#!/bin/sh\necho "python $*" >> "{self.calls}"\n')
+        py.chmod(0o755)
+        code, out = self.run_launcher("spotify-login")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.tool_calls(), [f"python {self.app / 'spotify_login.py'}"])
+        self.assertEqual(self.head(), self.origin_head())  # no update, no build
+
+
 if __name__ == "__main__":
     unittest.main()

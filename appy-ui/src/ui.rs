@@ -18,6 +18,8 @@ use crate::memory::MemoryPanel;
 use crate::input::{ChatInput, set_class};
 use crate::layout::{self, HSide, Rect, Shell};
 use crate::mascot;
+use crate::card::{CardKind, CardShell};
+use crate::music::MusicCard;
 use crate::weather::WeatherCard;
 
 const STYLE: &str = include_str!("style.css");
@@ -42,11 +44,12 @@ pub struct Ui {
     pub memory: MemoryPanel,
     pub input: ChatInput,
     pub card: WeatherCard,
+    pub music_card: MusicCard,
     shell_pos: Rc<Cell<(i32, i32)>>,
     /// The shell's rect (x, y, w, h) in the last layout. Widget bounds on the stage are
     /// from that layout, which lags `shell_pos` by a frame while the shell moves.
     shell_laid_out: Rc<Cell<(i32, i32, i32, i32)>>,
-    card_pos: Rc<Cell<(i32, i32)>>,
+    card_pos: [Rc<Cell<(i32, i32)>>; 2],
     memory_pos: Rc<Cell<(i32, i32)>>,
     /// Rewritten every frame while wobbling; layered above the static stylesheet.
     pub wobble_css: CssProvider,
@@ -100,6 +103,7 @@ impl Ui {
         root.append(&chat_panel);
 
         let card = WeatherCard::new();
+        let music_card = MusicCard::new();
 
         let filler = GtkBox::new(Orientation::Vertical, 0);
         filler.set_hexpand(true);
@@ -110,16 +114,21 @@ impl Ui {
         stage.add_css_class("stage");
         stage.set_child(Some(&filler));
         stage.add_overlay(&root);
-        stage.add_overlay(&card.root);
+        stage.add_overlay(&card.shell.root);
+        stage.add_overlay(&music_card.shell.root);
         stage.add_overlay(&memory.root);
 
         let shell_pos = Rc::new(Cell::new((0, 0)));
         let shell_laid_out = Rc::new(Cell::new((0, 0, 0, 0)));
-        let card_pos = Rc::new(Cell::new((0, 0)));
+        let card_pos = [Rc::new(Cell::new((0, 0))), Rc::new(Cell::new((0, 0)))];
         let memory_pos = Rc::new(Cell::new((0, 0)));
         stage.connect_get_child_position({
-            let (root, card_root, memory_root) =
-                (root.clone(), card.root.clone(), memory.root.clone());
+            let (root, card_root, music_root, memory_root) = (
+                root.clone(),
+                card.shell.root.clone(),
+                music_card.shell.root.clone(),
+                memory.root.clone(),
+            );
             let (shell_pos, card_pos, memory_pos) =
                 (shell_pos.clone(), card_pos.clone(), memory_pos.clone());
             let shell_laid_out = shell_laid_out.clone();
@@ -127,7 +136,9 @@ impl Ui {
                 let (x, y) = if child == root.upcast_ref::<gtk4::Widget>() {
                     shell_pos.get()
                 } else if child == card_root.upcast_ref::<gtk4::Widget>() {
-                    card_pos.get()
+                    card_pos[CardKind::Weather.index()].get()
+                } else if child == music_root.upcast_ref::<gtk4::Widget>() {
+                    card_pos[CardKind::Music.index()].get()
                 } else if child == memory_root.upcast_ref::<gtk4::Widget>() {
                     memory_pos.get()
                 } else {
@@ -159,6 +170,7 @@ impl Ui {
             memory,
             input,
             card,
+            music_card,
             shell_pos,
             shell_laid_out,
             card_pos,
@@ -178,9 +190,17 @@ impl Ui {
         }
     }
 
-    pub fn move_card(&self, (x, y): (f64, f64)) {
+    /// The card of that kind (its square, pop-in/out and position).
+    pub fn card_shell(&self, kind: CardKind) -> &CardShell {
+        match kind {
+            CardKind::Weather => &self.card.shell,
+            CardKind::Music => &self.music_card.shell,
+        }
+    }
+
+    pub fn move_card(&self, kind: CardKind, (x, y): (f64, f64)) {
         let pos = (x.round() as i32, y.round() as i32);
-        if self.card_pos.replace(pos) != pos {
+        if self.card_pos[kind.index()].replace(pos) != pos {
             self.stage.queue_allocate();
         }
     }
@@ -364,7 +384,7 @@ impl Ui {
 
     /// Rectangles that should catch the pointer: the whole surface while dragging (so
     /// the pointer can't escape the drag); otherwise the shell when the chat is open,
-    /// or just the mascot, plus the weather card when it's up. Everything else is
+    /// or just the mascot, plus the cards that are up. Everything else is
     /// click-through.
     pub fn input_rects(&self, chat_open: bool, locked: bool, dragging: bool) -> Vec<IntRect> {
         if dragging {
@@ -376,8 +396,11 @@ impl Ui {
             self.mascot.clone().upcast()
         };
         let mut rects: Vec<IntRect> = self.bounds_of(&main).into_iter().collect();
-        if self.card.is_present() {
-            rects.extend(self.bounds_of(self.card.root.upcast_ref()));
+        for kind in CardKind::ALL {
+            let card = self.card_shell(kind);
+            if card.is_present() {
+                rects.extend(self.bounds_of(card.root.upcast_ref()));
+            }
         }
         if self.memory.is_shown() {
             rects.extend(self.bounds_of(self.memory.root.upcast_ref()));

@@ -220,6 +220,28 @@ pub enum Decision {
 #[serde(tag = "widget", rename_all = "snake_case")]
 pub enum Widget {
     Weather(WeatherReport),
+    Music(MusicReport),
+}
+
+/// What Riff is playing, for the now-playing card (music.rs).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MusicReport {
+    pub title: String,
+    pub artist: String,
+    pub state: PlaybackState,
+    /// The playlist or album it plays from, if any (a small third line on the card).
+    #[serde(default)]
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackState {
+    Playing,
+    Paused,
+    /// Anything newer than this UI: drawn like paused rather than dropping the card.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One day's weather for the card: right now, or a forecast day (`when` set, with the
@@ -415,6 +437,48 @@ mod tests {
         assert!(
             serde_json::from_str::<BackendEvent>(r#"{"type":"widget","widget":"stocks"}"#).is_err()
         );
+    }
+
+    #[test]
+    fn parses_music_widget() {
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"music","title":"Karma Police","artist":"Radiohead","state":"playing"}"#,
+        )
+        .unwrap();
+        let BackendEvent::Widget(Widget::Music(track)) = ev else {
+            panic!("wrong variant: {ev:?}");
+        };
+        assert_eq!(
+            (track.title.as_str(), track.artist.as_str(), track.state),
+            ("Karma Police", "Radiohead", PlaybackState::Playing)
+        );
+    }
+
+    #[test]
+    fn music_widget_context_is_optional() {
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"music","title":"Pain","artist":"Three Days Grace","state":"playing","context":"Gym"}"#,
+        )
+        .unwrap();
+        let BackendEvent::Widget(Widget::Music(track)) = ev else {
+            panic!("wrong variant: {ev:?}");
+        };
+        assert_eq!(track.context.as_deref(), Some("Gym"));
+    }
+
+    #[test]
+    fn unknown_playback_state_still_parses() {
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"music","title":"A","artist":"","state":"buffering"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            ev,
+            BackendEvent::Widget(Widget::Music(MusicReport {
+                state: PlaybackState::Unknown,
+                ..
+            }))
+        ));
     }
 
     #[test]

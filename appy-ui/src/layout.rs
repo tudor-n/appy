@@ -167,6 +167,28 @@ pub fn clamp_mascot(anchor: Point, win: Size, body: Rect) -> Point {
     )
 }
 
+/// Space between two cards stacked beside Appy (music above weather).
+pub const STACK_GAP: f64 = 10.0;
+
+/// How tall the column of `count` stacked cards is.
+pub fn stack_height(card: f64, count: usize) -> f64 {
+    if count >= 2 {
+        card * 2.0 + STACK_GAP
+    } else {
+        card
+    }
+}
+
+/// Where the music and weather cards go in a column whose top-left is `column`: music
+/// on top when both are up; a lone card takes the column's spot.
+pub fn stack_slots(column: Point, card: f64, music: bool, weather: bool) -> (Point, Point) {
+    if music && weather {
+        (column, (column.0, column.1 + card + STACK_GAP))
+    } else {
+        (column, column)
+    }
+}
+
 /// Where the weather card should sit. `body` is the mascot body in window coordinates;
 /// the card stays clear of `clear_of` (the body itself, or the whole glass panel in
 /// glass mode) and is bottom-aligned with the body.
@@ -375,6 +397,19 @@ mod tests {
         assert_eq!(side_after(edge - 10.0, HSide::Left), HSide::Left);
         assert_eq!(side_after(edge - 20.0, HSide::Left), HSide::Right);
         assert_eq!(side_after(900.0, HSide::Left), HSide::Right);
+    }
+
+    #[test]
+    fn stacked_cards_share_one_column() {
+        // Both up: music on top, weather below it; the column is two cards tall
+        assert_eq!(stack_height(104.0, 2), 104.0 * 2.0 + STACK_GAP);
+        assert_eq!(stack_height(104.0, 1), 104.0);
+        let (music, weather) = stack_slots((50.0, 200.0), 104.0, true, true);
+        assert_eq!(music, (50.0, 200.0));
+        assert_eq!(weather, (50.0, 200.0 + 104.0 + STACK_GAP));
+        // Only one up: it takes the column's spot
+        assert_eq!(stack_slots((50.0, 200.0), 104.0, false, true).1, (50.0, 200.0));
+        assert_eq!(stack_slots((50.0, 200.0), 104.0, true, false).0, (50.0, 200.0));
     }
 
     #[test]

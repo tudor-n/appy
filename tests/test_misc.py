@@ -277,6 +277,174 @@ class ForcedCallTests(unittest.TestCase):
             self.assertEqual(tools.weather_day(text, thursday), day, text)
 
 
+class StateDJ:
+    """A DJ stand-in that only reports Riff's state ("closed", "paused", "playing")."""
+
+    def __init__(self, state="playing"):
+        self.state = state
+
+    def riff_state(self):
+        return self.state
+
+
+class MusicForcedCallTests(unittest.TestCase):
+    def setUp(self):
+        tools.set_dj(StateDJ("playing"))
+
+    def tearDown(self):
+        tools.set_dj(None)
+
+    def forced(self, text, **kw):
+        call = tools.forced_call(text, frozenset(), **kw)
+        return (call.name, call.fallback_args) if call else None
+
+    def test_music_commands(self):
+        control = lambda action: ("music_control", {"action": action})  # noqa: E731
+        play = lambda **args: ("play_music", args)  # noqa: E731
+        cases = {
+            "Pause.": control("pause"),
+            "pause the music": control("pause"),
+            "Appy, stop the music please": control("pause"),
+            "resume": control("resume"),
+            "unpause it": control("resume"),
+            "Play.": control("resume"),
+            "Skip.": control("next"),
+            "skip this song": control("next"),
+            "next song": control("next"),
+            "next track please": control("next"),
+            "previous song": control("previous"),
+            "go back a song": control("previous"),
+            "turn it up": control("volume_up"),
+            "louder!": control("volume_up"),
+            "turn it down": control("volume_down"),
+            "quieter please": control("volume_down"),
+            "what's playing?": control("now_playing"),
+            "What song is this?": control("now_playing"),
+            "what's this song": control("now_playing"),
+            "play my liked songs": play(kind="liked"),
+            "play some music": play(kind="liked"),
+            "Play my gym playlist.": play(query="gym", kind="playlist"),
+            "play the late night coding playlist": play(query="late night coding", kind="playlist"),
+            "play some Radiohead": play(query="Radiohead", kind="artist"),
+            "play something by Daft Punk": play(query="Daft Punk", kind="artist"),
+            "queue Paranoid Android": play(query="Paranoid Android", kind="track", queue=True),
+            "add Hello by Adele to the queue": play(query="Hello by Adele", kind="track", queue=True),
+            "Play Karma Police.": play(query="Karma Police", kind="track"),
+            "hey appy, can you play Bohemian Rhapsody": play(query="Bohemian Rhapsody", kind="track"),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.forced(text), expected)
+
+    def test_play_me_phrasings(self):
+        # Seen live: "play me some Prince", "play me something different by Prince"
+        play = lambda **args: ("play_music", args)  # noqa: E731
+        cases = {
+            "Play me some Prince.": play(query="Prince", kind="artist"),
+            "play me something different by Prince": play(query="Prince", kind="artist"),
+            "play something else by Metallica": play(query="Metallica", kind="artist"),
+            "play music by Plini": play(query="Plini", kind="artist"),
+            "play me Kiss": play(query="Kiss", kind="track"),
+            "Can you play me Karma Police?": play(query="Karma Police", kind="track"),
+            "play me my gym playlist": play(query="gym", kind="playlist"),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.forced(text), expected)
+
+    def test_by_artist_phrasings(self):
+        play = lambda **args: ("play_music", args)  # noqa: E731
+        cases = {
+            "play some music by Queen": play(query="Queen", kind="artist"),
+            "play music by Plini": play(query="Plini", kind="artist"),
+            "play me a song by Kiss": play(query="Kiss", kind="artist"),
+            "play a song by Prince": play(query="Prince", kind="artist"),
+            "play songs by Metallica": play(query="Metallica", kind="artist"),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.forced(text), expected)
+
+    def test_vague_changes_are_left_to_the_model(self):
+        # It knows what's playing; a regex guess would search for "something different"
+        for text in ["play something different", "play me something else",
+                     "play a different song", "play a different one"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+
+    def test_music_mentions_do_not_force(self):
+        for text in ["I was listening to music earlier", "my sister plays guitar",
+                     "what should I play tonight", "let's play a game", "can we play twenty questions",
+                     "the next step is hard", "don't stop believing in yourself", "skip the small talk"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+
+    # HEARING-WORKAROUND(respeaker): delete with the workaround
+    def test_strict_music_rejects_long_lyrics(self):
+        lyric = "don't stop, play it again, play it all night long baby"
+        self.assertIsNone(self.forced(lyric, strict_music=True))
+        self.assertIsNone(self.forced("play that funky music white boy, play that funky music",
+                                      strict_music=True))
+        self.assertEqual(self.forced("skip", strict_music=True), ("music_control", {"action": "next"}))
+        self.assertEqual(self.forced("play my gym playlist", strict_music=True),
+                         ("play_music", {"query": "gym", "kind": "playlist"}))
+
+    def test_long_requests_are_fine_when_not_strict(self):
+        self.assertEqual(self.forced("play that funky music white boy, play that funky music"),
+                         ("play_music", {"query": "that funky music white boy, play that funky music",
+                                         "kind": "track"}))
+
+    def test_controls_need_riff_running(self):
+        tools.set_dj(StateDJ("closed"))
+        for text in ["skip", "pause", "turn it up", "what's playing", "play", "resume"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+        self.assertEqual(self.forced("play Karma Police"),
+                         ("play_music", {"query": "Karma Police", "kind": "track"}))
+
+    def test_ambiguous_controls_need_music_playing(self):
+        tools.set_dj(StateDJ("paused"))
+        for text in ["stop", "next", "go back", "what is this", "who is this", "what's this"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+        self.assertEqual(self.forced("skip this song"), ("music_control", {"action": "next"}))
+        self.assertEqual(self.forced("pause"), ("music_control", {"action": "pause"}))
+        self.assertEqual(self.forced("play"), ("music_control", {"action": "resume"}))
+        tools.set_dj(StateDJ("playing"))
+        self.assertEqual(self.forced("next"), ("music_control", {"action": "next"}))
+        self.assertEqual(self.forced("stop"), ("music_control", {"action": "pause"}))
+
+    def test_games_are_not_music(self):
+        for text in ["play chess", "play hangman with me", "play a word game",
+                     "play rock paper scissors", "play the role of a pirate",
+                     "play devil's advocate", "let's play I spy", "play a quiz with me",
+                     "play riddles"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+
+    def test_titles_keep_their_words(self):
+        cases = {
+            "play Happy": "Happy",
+            "play Thanks": "Thanks",
+            "play Please Please Please": "Please Please Please",
+            "play Hello, please": "Hello",
+            "play Hey Appy": "Hey Appy",
+        }
+        for text, query in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.forced(text), ("play_music", {"query": query, "kind": "track"}))
+        self.assertEqual(self.forced("skip please"), ("music_control", {"action": "next"}))
+        self.assertEqual(self.forced("pause, thanks"), ("music_control", {"action": "pause"}))
+
+    def test_no_dj_no_music_forcing(self):
+        tools.set_dj(None)
+        self.assertIsNone(self.forced("skip"))
+        self.assertIsNone(self.forced("play Karma Police"))
+
+    def test_weather_still_forced_with_dj(self):
+        self.assertEqual(self.forced("what's the weather")[0], "get_weather")
+
+
 class WeatherCardTests(unittest.TestCase):
     def result(self, **current):
         cur = {"temp_c": 21.4, "condition": "clear sky", "code": 0, "is_day": True, **current}
@@ -344,6 +512,83 @@ class RunToolTests(unittest.TestCase):
 
     def test_unexpected_argument(self):
         self.assertIn("TypeError", self.error("boom", '{"x": 1}'))
+
+
+class MainShutdownTests(unittest.TestCase):
+    def test_music_is_restored_first_on_shutdown(self):
+        # bin/appy SIGTERMs Appy 5 s after Ctrl+C; the log upload to the Mac can take
+        # longer, so the music must come back up before anything slow
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        final = src[src.rindex("    finally:\n"):]
+        first, second = (line.strip() for line in final.splitlines()[1:3])
+        self.assertTrue(first.startswith("ducker.close()"), first)
+        self.assertTrue(second.startswith("background.stop()"), second)
+
+    def test_sigterm_runs_the_shutdown(self):
+        # bin/appy's SIGTERM would otherwise skip `finally` and leave spotifyd running
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        self.assertIn("signal.signal(signal.SIGTERM", src)
+
+    def test_appys_player_is_found_by_its_pid(self):
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        self.assertIn("SpotifydPlayer(pid=background.pid)", src)
+        self.assertIn("own_player=appy_player", src)
+
+    def test_volume_steps_use_the_ducker_level(self):
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        self.assertIn("dj.set_volume_hook(ducker.on_volume_change, ducker.saved_volume)", src)
+
+
+class DJToolTests(unittest.TestCase):
+    def tearDown(self):
+        tools.set_dj(None)
+
+    def test_dj_tools_without_dj_return_error(self):
+        tools.set_dj(None)
+        for name in ("play_music", "music_control"):
+            with self.subTest(name=name):
+                self.assertEqual(json.loads(tools.run_tool(name, "{}")),
+                                 {"error": "Music isn't set up."})
+
+    def test_dj_tools_route_to_the_dj(self):
+        calls = []
+
+        class FakeDJ:
+            def play_music(self, query="", kind="track", queue=False):
+                calls.append(("play", query, kind, queue))
+                return "{}"
+
+            def music_control(self, action="", value=None):
+                calls.append(("control", action, value))
+                return "{}"
+
+        tools.set_dj(FakeDJ())
+        tools.run_tool("play_music", json.dumps({"query": "gym", "kind": "playlist"}))
+        tools.run_tool("music_control", json.dumps({"action": "set_volume", "value": 40}))
+        self.assertEqual(calls, [("play", "gym", "playlist", False), ("control", "set_volume", 40)])
+
+    def test_music_schemas_are_registered(self):
+        names = [s["function"]["name"] for s in tools.TOOL_SCHEMAS]
+        self.assertIn("play_music", names)
+        self.assertIn("music_control", names)
+        play = next(s for s in tools.TOOL_SCHEMAS if s["function"]["name"] == "play_music")
+        self.assertEqual(play["function"]["parameters"]["properties"]["kind"]["enum"],
+                         ["track", "artist", "album", "playlist", "liked"])
+        control = next(s for s in tools.TOOL_SCHEMAS if s["function"]["name"] == "music_control")
+        self.assertEqual(control["function"]["parameters"]["properties"]["action"]["enum"],
+                         ["pause", "resume", "next", "previous", "volume_up", "volume_down",
+                          "set_volume", "shuffle_on", "shuffle_off", "now_playing"])
+
+    def test_music_control_results_go_stale(self):
+        self.assertIn("music_control", tools.STALE_TOOLS)
 
 
 class ModeTests(unittest.TestCase):

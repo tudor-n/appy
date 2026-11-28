@@ -30,7 +30,8 @@ class MemoryToolTests(unittest.TestCase):
 
     def test_tool_names_with_memory(self):
         names = [t["function"]["name"] for t in tools.TOOL_SCHEMAS + tools.MEMORY_TOOL_SCHEMAS]
-        self.assertEqual(names, ["get_weather", "set_mode", "memory_read", "memory_remember", "memory_forget"])
+        self.assertEqual(names, ["get_weather", "set_mode", "play_music", "music_control",
+                                 "memory_read", "memory_remember", "memory_forget"])
         required = {t["function"]["name"]: t["function"]["parameters"]["required"]
                     for t in tools.MEMORY_TOOL_SCHEMAS}
         self.assertEqual(required, {"memory_read": ["slug"], "memory_remember": ["text"],
@@ -65,7 +66,7 @@ class MemoryToolTests(unittest.TestCase):
         agent.preheat()
         self.assertEqual(client.calls[0]["messages"][0]["content"], prompt)
         self.assertIn("[Long-term memory]\n- a", prompt)
-        self.assertEqual(len(client.calls[0]["tools"]), 5)
+        self.assertEqual(len(client.calls[0]["tools"]), 7)
 
 
 class ForcedForgetTests(unittest.TestCase):

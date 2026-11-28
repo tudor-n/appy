@@ -1,6 +1,7 @@
 //! Mutable UI state, grouped by concern. Everything except `ActiveStatus` is plain data
 //! with time passed in explicitly, so the logic is unit-testable without GTK.
 
+use crate::card::CardKind;
 use std::f64::consts::PI;
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ const VOICE_COOLDOWN: Duration = Duration::from_secs(8);
 /// cross the gap to the messages without them collapsing.
 const HOVER_GRACE: Duration = Duration::from_millis(300);
 const BLINK_DURATION_MS: f64 = 160.0;
-/// How long the weather card stays up (unless hovered).
+/// How long a pop-out card stays up (unless hovered).
 const CARD_LIFETIME: Duration = Duration::from_secs(14);
 /// How long the card's exit animation runs before it's hidden.
 pub const CARD_EXIT: Duration = Duration::from_millis(320);
@@ -46,8 +47,8 @@ pub struct SharedState {
     pub placement: Placement,
     pub wobble: Wobble,
     pub blink: Blink,
-    /// The weather card, while it's on screen.
-    pub card: Option<Card>,
+    /// The pop-out cards while they're on screen, by `CardKind::index` (weather, music).
+    pub cards: [Option<Card>; 2],
     /// The memory service's auto-approve setting; None until the brain says.
     pub auto_approve: Option<bool>,
     /// Whether the memory panel sits above or below the chat.
@@ -86,6 +87,13 @@ impl MonitorMove {
 }
 
 impl SharedState {
+    /// Which cards hold a place in the stack beside Appy: (music, weather). A card that's
+    /// flying back keeps its place until it's gone, so the other doesn't slide through it.
+    pub fn stacked(&self) -> (bool, bool) {
+        let held = |kind: CardKind| self.cards[kind.index()].is_some();
+        (held(CardKind::Music), held(CardKind::Weather))
+    }
+
     pub fn new(now: Instant) -> Self {
         Self {
             // The overlay comes up before the backend, which replays "booting" (continuing
@@ -109,7 +117,7 @@ impl SharedState {
             placement: Placement::default(),
             wobble: Wobble::default(),
             blink: Blink::new(now),
-            card: None,
+            cards: [None, None],
             auto_approve: None,
             memory_side: VSide::default(),
             memory_pos: None,
@@ -303,7 +311,7 @@ impl Drag {
     }
 }
 
-/// The weather card Appy pops out next to himself.
+/// A pop-out card (weather, now playing) beside Appy.
 #[derive(Debug)]
 pub struct Card {
     /// Current top-left, eased toward its slot each frame.
@@ -324,7 +332,7 @@ impl Card {
         }
     }
 
-    /// A new weather report while the card is up: stay longer (and come back if leaving).
+    /// New content while the card is up: stay longer (and come back if leaving).
     pub fn refresh(&mut self, now: Instant) {
         self.dismiss_at = now + CARD_LIFETIME;
         self.leaving_since = None;
@@ -560,6 +568,19 @@ mod tests {
         assert_eq!(drag.update(10.0, 5.0), (10.0, 5.0));
         assert_eq!(drag.update(15.0, 5.0), (5.0, 0.0));
         assert_eq!(drag.target(-500.0, 20.0), (-400.0, 70.0));
+    }
+
+    #[test]
+    fn a_leaving_card_keeps_its_place_in_the_stack() {
+        // Otherwise the music card slides down through the weather card flying back
+        let t0 = Instant::now();
+        let mut s = SharedState::new(t0);
+        s.cards[CardKind::Weather.index()] = Some(Card::new((0.0, 0.0), t0));
+        s.cards[CardKind::Music.index()] = Some(Card::new((0.0, 0.0), t0));
+        s.cards[CardKind::Weather.index()].as_mut().unwrap().dismiss(t0);
+        assert_eq!(s.stacked(), (true, true));
+        s.cards[CardKind::Weather.index()] = None; // gone
+        assert_eq!(s.stacked(), (true, false));
     }
 
     #[test]

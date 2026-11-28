@@ -2,6 +2,7 @@ import collections
 import math
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -68,6 +69,33 @@ class SmartTurnDetector:
         return prob > 0.5, prob
 
 
+# Whisper's context: names it should expect. Over noise it sometimes just repeats this
+# (or the hotwords) back, which is_prompt_echo catches.
+WHISPER_PROMPT = "Hey Appy, this is Tudor talking about Dummy, Fifi, Sibiu, Atlas, and Jarvis."
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def is_prompt_echo(text: str, prompt: str, hotwords: str | None = None) -> bool:
+    """Is this transcript just Whisper repeating its prompt or its hotwords (it does that
+    when it can't make out the audio)? Three or more words that are a run of the prompt,
+    or a run of the hotword list spanning at least two of its names: a single name on its
+    own ("The Rolling Stones") is real speech."""
+    words = _words(text)
+    if len(words) < 3:
+        return False
+    joined = f" {' '.join(words)} "
+    if joined in f" {' '.join(_words(prompt))} ":
+        return True
+    names = [" ".join(_words(n)) for n in (hotwords or "").split(",")]
+    names = [n for n in names if n]
+    if not names or joined not in f" {' '.join(names)} ":
+        return False
+    return not any(joined in f" {n} " for n in names)  # within one name: not an echo
+
+
 def filter_transcript(text: str) -> str | None:
     """Return the cleaned transcript, or None if it looks like a Whisper hallucination."""
     text = text.strip()
@@ -98,12 +126,22 @@ def parec_cmd(mic_device: str | None) -> list[str]:
     return cmd
 
 
+def over_cap(chunks: int, cap_s: float | None) -> bool:
+    """HEARING-WORKAROUND(respeaker): has an utterance of `chunks` reached `cap_s`?"""
+    return cap_s is not None and chunks * CHUNK_SIZE / SAMPLE_RATE >= cap_s
+
+
 class Ear:
-    def __init__(self, on_speech_start=None, on_speech_discarded=None):
+    def __init__(self, on_speech_start=None, on_speech_discarded=None, utterance_cap=None):
         """on_speech_start fires when speech begins; on_speech_discarded fires if that
-        speech is then thrown away (too quiet, or filtered as a hallucination)."""
+        speech is then thrown away (too quiet, or filtered as a hallucination).
+        utterance_cap() -> seconds or None, asked at each speech start: the longest that
+        utterance may run (HEARING-WORKAROUND(respeaker): leaked song vocals)."""
         self.on_speech_start = on_speech_start
         self.on_speech_discarded = on_speech_discarded
+        self.utterance_cap = utterance_cap  # HEARING-WORKAROUND(respeaker)
+        # Names Whisper should expect (artists, playlists), set once the music library is read
+        self.hotwords: str | None = None
         print("[hearing] Loading Silero VAD (ONNX)...", flush=True)
         self.vad = load_silero_vad(onnx=True)
 
@@ -183,6 +221,7 @@ class Ear:
         speech_chunks = 0
         silence_chunks = 0
         checked_pause = False
+        cap = None  # HEARING-WORKAROUND(respeaker): this utterance's length limit
 
         # 200ms pause -> ask Smart Turn; 2.0s pause -> force-close fallback
         smart_turn_chunks = int((SAMPLE_RATE / CHUNK_SIZE) * 0.20)
@@ -232,6 +271,8 @@ class Ear:
                             checked_pause = False
                             buffer = list(ring_buffer)
                             self._utterance += 1
+                            # HEARING-WORKAROUND(respeaker)
+                            cap = self.utterance_cap() if self.utterance_cap else None
                             if self.on_speech_start:
                                 self.on_speech_start()
                     else:
@@ -276,6 +317,21 @@ class Ear:
                                 args=(full_audio, self._utterance),
                                 daemon=True,
                             ).start()
+
+                # HEARING-WORKAROUND(respeaker): song vocals leaking into the mic can
+                # hide the pause that ends a turn; close it at the cap instead
+                if is_speaking and over_cap(len(buffer), cap):
+                    print(f"[turn: {cap:.0f}s cap (music)] ", end="", flush=True)
+                    is_speaking = False
+                    silence_chunks = 0
+                    checked_pause = False
+                    full_audio = np.concatenate(buffer)
+                    buffer = []
+                    threading.Thread(
+                        target=self._transcribe,
+                        args=(full_audio, self._utterance),
+                        daemon=True,
+                    ).start()
         finally:
             self._proc.terminate()
 
@@ -293,6 +349,10 @@ class Ear:
         if utterance == self._utterance and self.on_speech_discarded:
             self.on_speech_discarded()
 
+    def set_hotwords(self, hotwords: str | None) -> None:
+        """Bias Whisper towards these names (comma-separated), e.g. Tudor's artists."""
+        self.hotwords = hotwords or None
+
     def _recognize(self, audio_array: np.ndarray) -> str | None:
         if np.abs(audio_array).mean() < 0.004:
             return None
@@ -305,9 +365,13 @@ class Ear:
             condition_on_previous_text=False,
             no_speech_threshold=0.6,
             log_prob_threshold=-1.0,
-            initial_prompt="Hey Appy, this is Tudor talking about Dummy, Fifi, Sibiu, Atlas, and Jarvis.",
+            initial_prompt=WHISPER_PROMPT,
+            hotwords=self.hotwords,
         )
         text = filter_transcript(" ".join(s.text.strip() for s in segments))
+        if text is not None and is_prompt_echo(text, WHISPER_PROMPT, self.hotwords):
+            print(f"[hearing] dropped a prompt echo: {text!r}", flush=True)
+            text = None
         dt_ms = (time.monotonic() - t0) * 1000
         if text is not None:
             print(f"[stt: {dt_ms:.0f}ms]")

@@ -1,5 +1,5 @@
 //! The weather card: a small square Appy "throws" out next to himself when he checks
-//! the weather. Its position is driven by tick.rs; the pop-in/out is CSS.
+//! the weather (card.rs has the shared square and its pop-in/out; tick.rs moves it).
 //!
 //! The icon is painted with cairo in the mascot's own palette (ink black and the app's
 //! grays) rather than using emoji, so it matches the rest of the UI.
@@ -12,20 +12,18 @@ use gtk4::cairo::{Context, LineCap, Operator};
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, DrawingArea, Label, Orientation};
 
+use crate::card::CardShell;
 use crate::protocol::{WeatherIcon, WeatherReport};
-
-/// Card edge length in px (it's square).
-pub const CARD_SIZE: f64 = 104.0;
 const ICON_W: i32 = 48;
 const ICON_H: i32 = 40;
 
 /// The mascot's ink and the chat's grays (#141418, #636366, #8e8e93).
-const INK: (f64, f64, f64) = (20.0 / 255.0, 20.0 / 255.0, 24.0 / 255.0);
+pub(crate) const INK: (f64, f64, f64) = (20.0 / 255.0, 20.0 / 255.0, 24.0 / 255.0);
 const DARK_GRAY: (f64, f64, f64) = (99.0 / 255.0, 99.0 / 255.0, 102.0 / 255.0);
 const GRAY: (f64, f64, f64) = (142.0 / 255.0, 142.0 / 255.0, 147.0 / 255.0);
 
 pub struct WeatherCard {
-    pub root: GtkBox,
+    pub shell: CardShell,
     icon: DrawingArea,
     current_icon: Rc<Cell<WeatherIcon>>,
     temp: Label,
@@ -60,14 +58,11 @@ impl WeatherCard {
         inner.append(&temp);
         inner.append(&place);
 
-        let root = GtkBox::new(Orientation::Vertical, 0);
-        root.add_css_class("weather-card");
-        root.set_size_request(CARD_SIZE as i32, CARD_SIZE as i32);
-        root.append(&inner);
-        root.set_visible(false);
+        let shell = CardShell::new();
+        shell.root.append(&inner);
 
         Self {
-            root,
+            shell,
             icon,
             current_icon,
             temp,
@@ -89,29 +84,9 @@ impl WeatherCard {
             Some(low) => format!("{} / {}", format_temp(report.temp_c), format_temp(low)),
             None => format_temp(report.temp_c),
         };
-        self.root
+        self.shell
+            .root
             .set_tooltip_text(Some(&format!("{place}: {}, {temps}", report.condition)));
-    }
-
-    /// Make the card present but still scaled down; adding the "shown" class a frame
-    /// later runs the CSS pop-in.
-    pub fn appear(&self) {
-        self.root.remove_css_class("shown");
-        self.root.set_visible(true);
-    }
-
-    /// Start the exit animation; `hide` once it has run.
-    pub fn pop_out(&self) {
-        self.root.remove_css_class("shown");
-    }
-
-    pub fn hide(&self) {
-        self.root.set_visible(false);
-    }
-
-    /// On screen and not on its way out: it should catch the pointer.
-    pub fn is_present(&self) -> bool {
-        self.root.is_visible() && self.root.has_css_class("shown")
     }
 }
 

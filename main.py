@@ -1,6 +1,7 @@
 import math
 import os
 import queue
+import signal
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -9,17 +10,25 @@ from dotenv import load_dotenv
 load_dotenv()  # Must run before importing voice/kokoro so ONNX_PROVIDER is set
 
 from openai import OpenAI
+import hearing_workaround  # HEARING-WORKAROUND(respeaker)
 import tools
 from agent import Agent
+from dj import DJ, Ducker
+from player import BackgroundPlayer
 from hearing import Ear
 from memory_client import MemoryClient, system_prompt
 from memory_review import MemoryReview
 from note_attach import NoteAttacher
+from riff import ActivePlayer, Riff, RiffError, SpotifydPlayer
+from spotify import Spotify
+from spotify_auth import TokenStore
 from session_log import SessionLogger, default_logs_dir
 from status import StatusTracker
 from voice import Speaker
 from ui_bridge import UiBridge, VALID_EFFORTS
 
+# How many of Tudor's artist/playlist names Whisper gets as hints (its prompt is ~224 tokens)
+MUSIC_HOTWORDS = 40
 # Keep the mic shut this long after Appy's last sound: speaker latency + room echo
 ECHO_GRACE_S = 0.3
 QUIT_WORDS = {"quit", "exit", "shutdown"}
@@ -30,7 +39,14 @@ def load_system_prompt() -> str:
     return prompt_path.read_text(encoding="utf-8").strip()
 
 
+def _sigterm_as_interrupt(signum, frame):
+    raise KeyboardInterrupt  # so `finally` runs: music back up, spotifyd stopped
+
+
 def main():
+    # bin/appy sends SIGTERM if Ctrl+C takes more than 5 s; the default handler would
+    # skip the cleanup below and leave the "Appy" player running
+    signal.signal(signal.SIGTERM, _sigterm_as_interrupt)
     turn_queue: queue.Queue[tuple[str, str]] = queue.Queue()
 
     # Reasoning effort is switchable at runtime from the UI's effort picker
@@ -82,19 +98,94 @@ def main():
         api_key=os.getenv("API_KEY", "ollama"),
     )
 
-    speaker = Speaker(on_audio=status.set_audio)
+    # Music: Appy's own background player (spotifyd) for playing things by name; transport
+    # follows whichever player is playing, his or Riff
+    background = BackgroundPlayer()
+    have_spotify = bool(os.getenv("SPOTIFY_CLIENT_ID", "").strip())
+    if not have_spotify:
+        # Without the Web API nothing can start songs on it: don't put an idle "Appy"
+        # device on Tudor's account
+        print("[music] background player off: SPOTIFY_CLIENT_ID not set")
+    elif not background.start():
+        print(f"[music] background player off: {background.problem}")
+
+    def restart_player() -> bool:
+        """spotifyd died mid-session: bring it back for the next play request."""
+        if not have_spotify:
+            return False
+        started = background.start()
+        print(f"[music] background player {'restarted' if started else 'off: ' + str(background.problem)}")
+        return started
+
+    # Pause/skip/volume/ducking go to whichever is playing (his player first when both are)
+    riff = Riff()
+    appy_player = SpotifydPlayer(pid=background.pid)  # his own instance only
+    music = ActivePlayer([appy_player, riff])
+    music.watch()  # so "resume" follows what Tudor last played, also by hand in Riff
+
+    def pause_riff():
+        """Appy's player took over; Spotify doesn't stop Riff by itself."""
+        try:
+            if riff.is_playing():
+                riff.pause()
+        except RiffError:
+            pass
+
+    spotify = Spotify(TokenStore()) if os.getenv("SPOTIFY_CLIENT_ID", "").strip() else None
+    dj = DJ(music, spotify, player_running=background.running, pause_others=pause_riff,
+            own_player=appy_player, start_player=restart_player)
+    tools.set_dj(dj)
+    # Riff goes quiet while Tudor talks to Appy and while Appy answers
+    # The saved volumes live on disk while ducked, so a crash can't leave the music down
+    ducker = Ducker(music, state_file=Path.home() / ".cache" / "appy" / "ducked.json")
+    ducker.recover()
+    dj.set_volume_hook(ducker.on_volume_change, ducker.saved_volume)
+    print(f"[music] Riff + background player via MPRIS; Spotify "
+          f"{'on' if spotify else 'off (SPOTIFY_CLIENT_ID not set)'}")
+
+    def on_audio(state: str):
+        status.set_audio(state)
+        if state == "silent":
+            ducker.release("appy")
+        else:
+            ducker.hold("appy")
+            ducker.release("user")  # Tudor's done: his music comes back up to "softer"
+
+    speaker = Speaker(on_audio=on_audio)
     # A wake flips the UI to "listening"; if that speech is then discarded as noise,
     # re-send the real state so the mascot doesn't stay stuck listening.
     def on_speech_start():
         status.heard_speech()
         ui.wake()
+        ducker.hold("user")
 
-    ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=status.speech_discarded)
+    def on_speech_discarded():
+        status.speech_discarded()
+        ducker.release("user")
+
+    ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=on_speech_discarded,
+              # HEARING-WORKAROUND(respeaker): cap turns while the mic hears music
+              utterance_cap=lambda: hearing_workaround.utterance_cap(music))
     ear.start()
+
+    def load_music_names():
+        """Teach Whisper the names in Tudor's library ("Kiss" was heard as "give me a
+        kiss", "Prince" as "grace")."""
+        try:
+            names = spotify.music_vocabulary()[:MUSIC_HOTWORDS]
+        except Exception as e:
+            print(f"[music] couldn't read the library for Whisper: {e}")
+            return
+        ear.set_hotwords(", ".join(names))
+        print(f"[music] Whisper knows {len(names)} artist/playlist names")
+    if spotify:
+        threading.Thread(target=load_music_names, daemon=True).start()
 
     def show_tool_card(name: str, result: str):
         """Pop a card out next to Appy for tools that have one."""
         if name == "get_weather" and (card := tools.weather_card(result)):
+            ui.widget(card)
+        if card := dj.music_card(name, result):
             ui.widget(card)
         if name == "set_mode":  # the mascot's resting face shows the mode
             ui.mode(tools.current_mode())
@@ -215,11 +306,15 @@ def main():
                     user_input,
                     stamp=tools.turn_stamp(now),
                     effort=effort_state["value"],
-                    force=tools.forced_call(user_input, agent.recent_tools),
+                    force=tools.forced_call(
+                        user_input, agent.recent_tools,
+                        # HEARING-WORKAROUND(respeaker): only short music commands count
+                        strict_music=hearing_workaround.strict_music(source, music)),
                 )
                 speaker.wait()
             finally:
                 ear.resume(grace=ECHO_GRACE_S)
+                ducker.release("user")  # Tudor's turn is over; Appy's voice holds its own
             # Between turns, once Appy has finished speaking; anything said meanwhile is
             # queued in turn_queue, not lost
             agent.maybe_compact()
@@ -229,6 +324,8 @@ def main():
         reason = "error"
         raise
     finally:
+        ducker.close()  # first: the launcher SIGTERMs us 5 s after Ctrl+C
+        background.stop()  # before the slow parts (log upload), so no "Appy" device lingers
         log.end(reason=reason)
         if review_box["review"]:
             review_box["review"].stop()

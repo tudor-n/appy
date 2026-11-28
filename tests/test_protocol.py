@@ -57,6 +57,31 @@ class ProtocolDriftTests(unittest.TestCase):
             self.assertEqual(card.pop("widget"), "weather")
             self.assertEqual(set(card), fields)
 
+    def test_music_card_matches_rust_widget(self):
+        import json
+
+        from dj import DJ
+
+        class Riff:
+            def is_running(self):
+                return True
+
+            def status(self):
+                return "Playing"
+
+            def now_playing(self):
+                return {"title": "Karma Police", "artist": "Radiohead", "album": "OK Computer"}
+
+        card = DJ(Riff(), None).music_card("music_control", json.dumps(
+            {"title": "Karma Police", "artist": "Radiohead", "album": "OK Computer", "state": "playing"}))
+        self.assertEqual(card.pop("widget"), "music")
+        self.assertEqual(set(card), rust_struct_fields("MusicReport"))
+
+    def test_playback_states_known_to_ui(self):
+        import dj
+
+        self.assertLessEqual(set(dj.CARD_STATES), set(rust_enum("PlaybackState").values()))
+
     def test_weather_icons_are_known_to_ui(self):
         import tools
 

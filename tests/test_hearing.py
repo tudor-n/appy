@@ -105,3 +105,84 @@ class SelfHearingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(filter_transcript is None, "hearing deps unavailable")
+class UtteranceCapTests(unittest.TestCase):
+    """HEARING-WORKAROUND(respeaker): delete with the workaround."""
+
+    def test_over_cap(self):
+        from hearing import over_cap
+
+        self.assertFalse(over_cap(468, 15.0))
+        self.assertTrue(over_cap(469, 15.0))  # 469 x 512 / 16000 >= 15 s
+        self.assertFalse(over_cap(10_000, None))
+
+
+@unittest.skipIf(filter_transcript is None, "hearing deps unavailable")
+class PromptEchoTests(unittest.TestCase):
+    """Whisper repeats its prompt when it can't make out the audio (seen live over music:
+    "Tudor talking about Dummy, Fifi, Sibiu, Atlas, and Jarvis.")."""
+
+    def test_prompt_echoes_are_recognised(self):
+        from hearing import WHISPER_PROMPT, is_prompt_echo
+
+        self.assertTrue(is_prompt_echo("Tudor talking about Dummy, Fifi, Sibiu, Atlas, and Jarvis.",
+                                       WHISPER_PROMPT))
+        self.assertTrue(is_prompt_echo("this is Tudor talking", WHISPER_PROMPT))
+        self.assertTrue(is_prompt_echo("Radiohead, Prince, Kiss.", WHISPER_PROMPT,
+                                       hotwords="Radiohead, Prince, Kiss, Scorpions"))
+        for real in ["Hey Appy.", "Play Karma Police.", "Can you pause it?", "Play Kiss."]:
+            with self.subTest(real=real):
+                self.assertFalse(is_prompt_echo(real, WHISPER_PROMPT, hotwords="Kiss, Prince"))
+
+    def test_library_names_said_alone_are_real_speech(self):
+        # "Which artist?" "The Rolling Stones." must not be thrown away as an echo
+        from hearing import WHISPER_PROMPT, is_prompt_echo
+
+        hot = "Rage Against the Machine, The Rolling Stones, Of Monsters and Men, Queen, Prince"
+        for real in ["The Rolling Stones.", "Rage Against the Machine.", "bring me the stones",
+                     "the queen and the prince", "Of Monsters and Men"]:
+            with self.subTest(real=real):
+                self.assertFalse(is_prompt_echo(real, WHISPER_PROMPT, hotwords=hot))
+        self.assertTrue(is_prompt_echo("The Rolling Stones, Of Monsters and Men, Queen.",
+                                       WHISPER_PROMPT, hotwords=hot))
+
+
+@unittest.skipIf(filter_transcript is None, "hearing deps unavailable")
+class HotwordTests(unittest.TestCase):
+    def make_ear(self, text):
+        import numpy as np
+        from types import SimpleNamespace
+
+        from hearing import Ear
+
+        ear = Ear.__new__(Ear)
+        ear.hotwords = None
+        self.calls = []
+
+        def transcribe(audio, **kwargs):
+            self.calls.append(kwargs)
+            return [SimpleNamespace(text=text)], None
+
+        ear.asr = SimpleNamespace(transcribe=transcribe)
+        self.audio = np.full(16000, 0.1, dtype=np.float32)
+        return ear
+
+    def test_hotwords_reach_whisper(self):
+        ear = self.make_ear("Play Kiss.")
+        ear.set_hotwords("Kiss, Prince, Radiohead")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ear._recognize(self.audio), "Play Kiss.")
+        self.assertEqual(self.calls[0]["hotwords"], "Kiss, Prince, Radiohead")
+
+    def test_no_hotwords_by_default(self):
+        ear = self.make_ear("Hello.")
+        with contextlib.redirect_stdout(io.StringIO()):
+            ear._recognize(self.audio)
+        self.assertIsNone(self.calls[0].get("hotwords"))
+
+    def test_prompt_echo_is_dropped(self):
+        ear = self.make_ear("Tudor talking about Dummy, Fifi, Sibiu, Atlas, and Jarvis.")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(ear._recognize(self.audio))

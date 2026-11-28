@@ -7,7 +7,8 @@ Run: .venv/bin/python dev/mock_backend.py [--memory] [--busy]
 answers the review panel's buttons and the pill's auto-approve toggle.
 `--busy` holds the "thinking" status, which keeps the chat (and the memory panel) open.
 `--demo` replays a short made-up conversation on connect (bubbles, status pills, a
-weather card, a memory pill and a part-filled compact ring), for looking at the UI.
+weather card, a now-playing card, a memory pill and a part-filled compact ring), for
+looking at the UI. MOCK_MUSIC=paused shows the now-playing card paused.
 MOCK_PORT picks the port (default 8001); pair it with the overlay's APPY_WS_URL.
 """
 import asyncio
@@ -181,6 +182,10 @@ DEMO_TURNS = [
        "when": "Sat", "condition": "light rain", "icon": "rain"}],
      "Rainy and cold tomorrow: 9 degrees at best, 2 overnight. Bring the good jacket.",
      "focused"),
+    ("play Karma Police",
+     [{"type": "widget", "widget": "music", "title": os.getenv("MOCK_TITLE", "Karma Police"), "artist": "Radiohead",
+       "state": os.getenv("MOCK_MUSIC", "playing"), "context": os.getenv("MOCK_CONTEXT") or None}],
+     "Karma Police, coming up.", "happy"),
     ("ugh. ok, remind me what PSU I have on the bench?", [],
      "A Riden RD6024: 60 volts, 24 amps, the one you control over USB.", "happy"),
     ("I swapped it for a Korad KA3005P last week",

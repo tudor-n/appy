@@ -80,6 +80,49 @@ Set `APPY_DUMP_COMPACTION=1` to also write each compaction's exact prompt and th
 came back to `<session>.compaction-N.txt` next to the log; `COMPACT_AT=2500` makes it happen
 sooner when testing.
 
+## Music (Spotify, Riff)
+
+Appy is a DJ: "play Karma Police", "put on some Radiohead", "play my gym playlist", "play my
+liked songs", "queue Paranoid Android", "skip", "pause", "turn it up", "what's playing?".
+
+- **Playing by name** goes to Appy's own background player,
+  [spotifyd](https://github.com/Spotifyd/spotifyd), which shows up in Spotify as the device
+  **Appy**. It starts with Appy and stops when he quits. (Riff, the GTK Spotify client,
+  can't be told to play a specific song.)
+- **Pause, skip, volume and "what's playing"** go over MPRIS to whichever player is
+  playing: Appy's, or [Riff](https://flathub.org/apps/dev.diegovsky.Riff) when you've put
+  something on yourself. To move Appy's music into Riff, pick "This Device" in Riff's
+  Device Selector (Preferences > Experimental Features).
+
+Setup, once:
+
+1. Install spotifyd: download `spotifyd-linux-x86_64-full.tar.gz` and its `.sha512` from
+   the [latest release](https://github.com/Spotifyd/spotifyd/releases), check it with
+   `sha512sum -c`, and put the `spotifyd` binary at `~/.local/bin/spotifyd`.
+2. At [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), create an
+   app (any name; tick "Web API") with the redirect URI `http://127.0.0.1:8898/callback`.
+   Put its client ID in `.env` as `SPOTIFY_CLIENT_ID` (no secret needed).
+3. Run `appy spotify-login` and approve twice in the browser: once for search and playing
+   (saved to `~/.config/appy/spotify.json`), once for the background player (saved in
+   `~/.cache/appy/spotifyd/`).
+
+Spotify-made playlists (Discover Weekly, Daily Mixes, ...) can't be played: Spotify doesn't
+give new apps access to them.
+
+The music is turned down to a quarter while you talk to Appy and while he answers. Add this to
+`prompt.txt` (it's gitignored, so it isn't in the repo):
+
+```
+Music: for anything about music, use play_music or music_control. Say what actually
+started, from the tool result, in one short sentence. Never read out links or IDs. Never
+say you played, skipped, paused or changed the music unless you called the tool for it
+this turn; if Tudor says you got it wrong, call play_music again.
+```
+
+While the mic can hear the speakers, music leaks into what Appy hears. A temporary
+workaround (stricter rules while music plays) is described in
+[docs/hearing-workaround.md](docs/hearing-workaround.md).
+
 ## Long-term memory
 
 Durable facts live on the Mac mini, in a git repo at `~/appy-data` (`memory/core.md` plus one

@@ -17,6 +17,7 @@
 //! - `protocol` wire types
 
 mod app;
+mod card;
 mod chat;
 mod controls;
 mod events;
@@ -24,6 +25,7 @@ mod input;
 mod layout;
 mod mascot;
 mod memory;
+mod music;
 mod net;
 mod protocol;
 mod state;

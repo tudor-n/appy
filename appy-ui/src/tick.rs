@@ -17,14 +17,14 @@ use crate::layout::{self, Rect};
 use crate::mascot::BUSY_PHASE_WRAP;
 use crate::protocol::AppyState;
 use crate::state::{FRAME_SECS, SharedState, per_frame};
-use crate::weather::CARD_SIZE;
+use crate::card::{CardKind, CARD_SIZE};
 
 /// After a stall (or the window coming back from hidden), catch up at most this many
 /// 60 Hz frames, so nothing leaps.
 const MAX_FRAMES: f64 = 4.0;
 /// Live status pills cycle "." -> ".." -> "..." at this pace.
 const DOTS_STEP_MS: u128 = 400;
-/// Per-frame easing of the weather card toward its spot (and back into Appy).
+/// Per-frame easing of the cards toward their spots (and back into Appy).
 const CARD_EASE: f64 = 0.2;
 const CARD_EASE_LEAVING: f64 = 0.3;
 /// Per-frame easing of the memory panel toward a new slot.
@@ -51,7 +51,10 @@ impl App {
 
         self.layout_shell(&mut s);
         self.place_memory(&mut s, now, frames);
-        let card_gone = self.step_card(&mut s, now, frames);
+        let cards_gone: Vec<CardKind> = CardKind::ALL
+            .into_iter()
+            .filter(|&kind| self.step_card(&mut s, kind, now, frames))
+            .collect();
         self.sync_input_region(&mut s);
 
         let wobbling = s.wobble.step(frames);
@@ -75,8 +78,8 @@ impl App {
         // Hiding a widget under the pointer emits `leave` synchronously, so only do it
         // once the state is released.
         drop(s);
-        if card_gone {
-            self.ui.card.hide();
+        for kind in cards_gone {
+            self.ui.card_shell(kind).hide();
         }
     }
 
@@ -122,10 +125,12 @@ impl App {
             // Everything that floats beside him starts out in place, not flying in from
             // where it was on the other monitor; then fade in, with a little hop
             s.memory_pos = None;
-            let slot = self.card_slot(s);
-            if let Some(card) = s.card.as_mut() {
-                card.pos = slot;
-                ui.move_card(slot);
+            for kind in CardKind::ALL {
+                let slot = self.card_slot(s, kind);
+                if let Some(card) = s.cards[kind.index()].as_mut() {
+                    card.pos = slot;
+                    ui.move_card(kind, slot);
+                }
             }
             s.wobble.kick(0.0, -9.0);
             ui.stage.remove_css_class("moving");
@@ -143,24 +148,32 @@ impl App {
         }
     }
 
-    /// Where the weather card belongs right now: beside Appy, or beside the whole glass
-    /// panel in glass mode (so it never sits on top of it).
-    pub fn card_slot(&self, s: &SharedState) -> layout::Point {
+    /// Where a card belongs right now: beside Appy, or beside the whole glass panel in
+    /// glass mode (so it never sits on top of it). Cards that are up share one column,
+    /// music on top of weather.
+    pub fn card_slot(&self, s: &SharedState, kind: CardKind) -> layout::Point {
+        let (music, weather) = s.stacked();
+        let count = (music as usize + weather as usize).max(1);
         let body = self.body_on_screen(s);
         let clear_of = if s.locked {
             self.ui.shell_bounds().unwrap_or(body)
         } else {
             body
         };
-        layout::card_slot(
+        let column = layout::card_slot(
             body,
             clear_of,
-            (CARD_SIZE, CARD_SIZE),
+            (CARD_SIZE, layout::stack_height(CARD_SIZE, count)),
             self.ui.window_size(),
             s.placement.side,
             s.chat_open,
             self.ui.memory_bounds(),
-        )
+        );
+        let (music_slot, weather_slot) = layout::stack_slots(column, CARD_SIZE, music, weather);
+        match kind {
+            CardKind::Music => music_slot,
+            CardKind::Weather => weather_slot,
+        }
     }
 
     /// Show the memory panel while the chat is open and there's something to review,
@@ -202,27 +215,28 @@ impl App {
         ui.move_memory(pos);
     }
 
-    /// Ease the weather card toward its spot beside Appy, or back into him when it's
-    /// leaving. Returns true once the exit animation is done and the card should be
-    /// hidden (by the caller, after releasing the state).
-    fn step_card(&self, s: &mut SharedState, now: Instant, frames: f64) -> bool {
+    /// Ease a card toward its spot beside Appy, or back into him when it's leaving.
+    /// Returns true once the exit animation is done and the card should be hidden (by
+    /// the caller, after releasing the state).
+    fn step_card(&self, s: &mut SharedState, kind: CardKind, now: Instant, frames: f64) -> bool {
         let body = self.body_on_screen(s);
-        let slot = self.card_slot(s);
-        let Some(card) = s.card.as_mut() else {
+        let slot = self.card_slot(s, kind);
+        let Some(card) = s.cards[kind.index()].as_mut() else {
             return false;
         };
 
         card.expire(now);
         if card.is_gone(now) {
-            s.card = None;
+            s.cards[kind.index()] = None;
             s.last_input_region = None;
             return true;
         }
 
+        let shell = self.ui.card_shell(kind);
         let size = (CARD_SIZE, CARD_SIZE);
         let (target, rate) = if card.leaving_since.is_some() {
-            if self.ui.card.is_present() {
-                self.ui.card.pop_out();
+            if shell.is_present() {
+                shell.pop_out();
             }
             let (cx, cy) = body.center();
             ((cx - size.0 * 0.5, cy - size.1 * 0.5), CARD_EASE_LEAVING)
@@ -231,7 +245,7 @@ impl App {
         };
         let (pos, _) = layout::ease_point(card.pos, target, per_frame(rate, frames));
         card.pos = pos;
-        self.ui.move_card(pos);
+        self.ui.move_card(kind, pos);
         false
     }
 
