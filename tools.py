@@ -472,7 +472,10 @@ _MUSIC_CONTROLS = [
 _PLAY_LIKED = re.compile(r"play\s+(?:my\s+)?(?:liked\s+songs|likes|favou?rites)|"
                          r"play\s+(?:some\s+)?music|play\s+something|play\s+me\s+(?:a\s+song|something)")
 _PLAY_PLAYLIST = re.compile(r"play\s+(?:my|the)\s+(?P<x>.+?)\s+playlist")
-_PLAY_ARTIST = re.compile(r"play\s+(?:some|something\s+by|some\s+music\s+by|songs\s+by)\s+(?P<x>.+)")
+_PLAY_ARTIST = re.compile(r"play\s+(?:some|something(?:\s+(?:different|else))?\s+by|"
+                          r"(?:some\s+)?music\s+by|songs\s+by)\s+(?P<x>.+)")
+# "play me X" is "play X" (but "play me something" alone stays a generic request)
+_PLAY_ME = re.compile(r"play\s+me\s+(?!(?:a\s+song|something)$)")
 _QUEUE = re.compile(r"(?:queue(?:\s+up)?\s+(?P<x>.+?)(?:\s+next)?|add\s+(?P<y>.+?)\s+to\s+(?:the|my)\s+queue)")
 _PLAY_TRACK = re.compile(r"play\s+(?P<x>.+)")
 # "play" that's about a game or a part, not a song
@@ -507,6 +510,9 @@ def music_call(user_text: str, strict: bool = False,
             return None
     if _NOT_MUSIC.search(low):
         return None
+    if m := _PLAY_ME.match(low):
+        command = "play " + command[m.end():]
+        low = command.lower()
     if _PLAY_LIKED.fullmatch(low):
         return ForcedCall("play_music", {"kind": "liked"})
     for pattern, kind in ((_PLAY_PLAYLIST, "playlist"), (_PLAY_ARTIST, "artist")):

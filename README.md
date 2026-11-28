@@ -114,7 +114,9 @@ The music is turned down to a quarter while you talk to Appy and while he answer
 
 ```
 Music: for anything about music, use play_music or music_control. Say what actually
-started, from the tool result, in one short sentence. Never read out links or IDs.
+started, from the tool result, in one short sentence. Never read out links or IDs. Never
+say you played, skipped, paused or changed the music unless you called the tool for it
+this turn; if Tudor says you got it wrong, call play_music again.
 ```
 
 While the mic can hear the speakers, music leaks into what Appy hears. A temporary

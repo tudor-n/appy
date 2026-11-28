@@ -336,6 +336,22 @@ class MusicForcedCallTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(self.forced(text), expected)
 
+    def test_play_me_phrasings(self):
+        # Seen live: "play me some Prince", "play me something different by Prince"
+        play = lambda **args: ("play_music", args)  # noqa: E731
+        cases = {
+            "Play me some Prince.": play(query="Prince", kind="artist"),
+            "play me something different by Prince": play(query="Prince", kind="artist"),
+            "play something else by Metallica": play(query="Metallica", kind="artist"),
+            "play music by Plini": play(query="Plini", kind="artist"),
+            "play me Kiss": play(query="Kiss", kind="track"),
+            "Can you play me Karma Police?": play(query="Karma Police", kind="track"),
+            "play me my gym playlist": play(query="gym", kind="playlist"),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.forced(text), expected)
+
     def test_music_mentions_do_not_force(self):
         for text in ["I was listening to music earlier", "my sister plays guitar",
                      "what should I play tonight", "let's play a game", "can we play twenty questions",
