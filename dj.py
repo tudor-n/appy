@@ -192,7 +192,9 @@ class DJ:
                 self._set_volume(float(value) / 100.0)
             elif action in ("shuffle_on", "shuffle_off"):
                 self.riff.shuffle(action == "shuffle_on")
-            return json.dumps({"ok": True, "state": self.riff.status().lower()})
+            # The player reports a pause/resume a moment later; say what was just done
+            state = {"pause": "paused", "resume": "playing"}.get(action) or self.riff.status().lower()
+            return json.dumps({"ok": True, "state": state})
         except (RiffError, ValueError, TypeError) as e:
             return _error(str(e) if isinstance(e, RiffError) else f"Bad value for {action}.")
 

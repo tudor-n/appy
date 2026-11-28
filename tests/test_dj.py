@@ -288,6 +288,16 @@ class MusicControlTests(DJTestCase):
                 self.assertEqual(self.riff.calls[-1], (call,))
         self.assertEqual(self.spotify.calls, [])  # transport never touches the Web API
 
+    def test_pause_and_resume_report_the_state_they_set(self):
+        # MPRIS reports the new state a moment later (seen live: "playing" right after a pause)
+        class Laggy(FakeRiff):
+            def pause(self):
+                self._record("pause")  # status stays "Playing" for now
+
+        dj = self.dj(riff=Laggy(status="Playing"))
+        self.assertEqual(self.run_tool(dj.music_control, "pause")["state"], "paused")
+        self.assertEqual(self.run_tool(dj.music_control, "resume")["state"], "playing")
+
     def test_control_without_riff_is_friendly_and_does_not_launch(self):
         dj = self.dj(riff=FakeRiff(running=False))
         for action in ("pause", "next", "now_playing", "volume_up"):
