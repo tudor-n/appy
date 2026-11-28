@@ -98,6 +98,18 @@ which needs a one-time setup:
 Spotify-made playlists (Discover Weekly, Daily Mixes, ...) can't be played: Spotify doesn't
 give new apps access to them.
 
+Riff is turned down to a quarter while you talk to Appy and while he answers. Add this to
+`prompt.txt` (it's gitignored, so it isn't in the repo):
+
+```
+Music: for anything about music, use play_music or music_control. Say what actually
+started, from the tool result, in one short sentence. Never read out links or IDs.
+```
+
+While the mic can hear the speakers, music leaks into what Appy hears. A temporary
+workaround (echo cancellation plus stricter rules) is described in
+[docs/hearing-workaround.md](docs/hearing-workaround.md).
+
 ## Long-term memory
 
 Durable facts live on the Mac mini, in a git repo at `~/appy-data` (`memory/core.md` plus one
