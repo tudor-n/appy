@@ -1,7 +1,8 @@
 """Riff's MPRIS client, against a fake session bus."""
 import unittest
 
-from riff import BUS_NAME, JeepneyBus, Riff, RiffError, RiffNotRunning, _variant
+from riff import (BUS_NAME, ActivePlayer, JeepneyBus, Riff, RiffError, RiffNotRunning,
+                  SpotifydPlayer, _variant)
 
 
 class FakeBus:
@@ -211,6 +212,95 @@ class JeepneyBusTests(unittest.TestCase):
         riff = Riff(bus=FakeBus(owner=False), launcher=no_flatpak)
         with self.assertRaises(RiffError):
             riff.ensure_running()
+
+
+class SpotifydBus(FakeBus):
+    """A bus where spotifyd's MPRIS name carries its PID."""
+
+    def __init__(self, names, **kw):
+        super().__init__(**kw)
+        self.names = names
+        self.bus_name = None
+
+    def list_names(self):
+        return list(self.names)
+
+    def has_owner(self, name):
+        return name in self.names
+
+
+class SpotifydPlayerTests(unittest.TestCase):
+    def test_finds_its_instance_name(self):
+        bus = SpotifydBus(["org.freedesktop.DBus", "org.mpris.MediaPlayer2.spotifyd.instance4242"],
+                          props={"PlaybackStatus": "Playing"})
+        player = SpotifydPlayer(bus=bus)
+        self.assertTrue(player.is_running())
+        self.assertEqual(bus.bus_name, "org.mpris.MediaPlayer2.spotifyd.instance4242")
+        self.assertTrue(player.is_playing())
+
+    def test_not_running_without_the_name(self):
+        player = SpotifydPlayer(bus=SpotifydBus(["rs.spotifyd.instance4242"]))
+        self.assertFalse(player.is_running())
+        with self.assertRaises(RiffNotRunning) as ctx:
+            player.pause()
+        self.assertEqual(str(ctx.exception), "My music player isn't playing anything.")
+
+
+class StubPlayer:
+    def __init__(self, name, running=True, status="Paused"):
+        self.name, self.running, self._status = name, running, status
+        self.calls = []
+
+    def is_running(self):
+        return self.running
+
+    def is_playing(self):
+        return self.running and self._status == "Playing"
+
+    def status(self):
+        if not self.running:
+            raise RiffNotRunning()
+        return self._status
+
+    def pause(self):
+        self.calls.append("pause")
+
+    def volume(self):
+        return 0.5
+
+
+class ActivePlayerTests(unittest.TestCase):
+    def test_prefers_the_one_playing(self):
+        appy, riff = StubPlayer("appy"), StubPlayer("riff", status="Playing")
+        active = ActivePlayer([appy, riff])
+        self.assertIs(active.current(), riff)
+        active.pause()
+        self.assertEqual(riff.calls, ["pause"])
+        self.assertTrue(active.is_playing())
+
+    def test_remembers_the_last_one_that_played(self):
+        appy, riff = StubPlayer("appy"), StubPlayer("riff", status="Playing")
+        active = ActivePlayer([appy, riff])
+        active.current()
+        riff._status = "Paused"  # Tudor paused Riff; "resume" should go back to Riff
+        self.assertIs(active.current(), riff)
+        self.assertFalse(active.is_playing())
+
+    def test_falls_back_to_first_running(self):
+        appy, riff = StubPlayer("appy", running=False), StubPlayer("riff")
+        self.assertIs(ActivePlayer([appy, riff]).current(), riff)
+
+    def test_nothing_running(self):
+        active = ActivePlayer([StubPlayer("appy", running=False), StubPlayer("riff", running=False)])
+        self.assertFalse(active.is_running())
+        self.assertFalse(active.is_playing())
+        with self.assertRaises(RiffNotRunning) as ctx:
+            active.pause()
+        self.assertEqual(str(ctx.exception), "No music player is open.")
+
+    def test_delegates_reads(self):
+        self.assertEqual(ActivePlayer([StubPlayer("riff")]).volume(), 0.5)
+        self.assertEqual(ActivePlayer([StubPlayer("riff")]).status(), "Paused")
 
 
 if __name__ == "__main__":

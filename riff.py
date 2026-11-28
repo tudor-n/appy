@@ -1,4 +1,6 @@
-"""Riff (dev.diegovsky.Riff, a GTK Spotify client) over MPRIS on the session bus.
+"""Music players over MPRIS on the session bus: Riff (dev.diegovsky.Riff, Tudor's GTK
+Spotify client) and spotifyd (Appy's own background player), plus ActivePlayer, which
+follows whichever of them is playing.
 
 Transport, volume and "what's playing" go through here: local, instant, and no Spotify
 login needed. Searching and starting something specific goes through spotify.py.
@@ -13,6 +15,8 @@ OBJECT_PATH = "/org/mpris/MediaPlayer2"
 PLAYER = "org.mpris.MediaPlayer2.Player"
 FLATPAK_ID = "dev.diegovsky.Riff"
 RIFF_IDLE_TITLE = "Not playing"
+# spotifyd takes this name (+ its PID) once it is the playback device
+SPOTIFYD_PREFIX = "org.mpris.MediaPlayer2.spotifyd."
 
 
 class RiffError(Exception):
@@ -20,8 +24,8 @@ class RiffError(Exception):
 
 
 class RiffNotRunning(RiffError):
-    def __init__(self):
-        super().__init__("Riff isn't open.")
+    def __init__(self, message: str = "Riff isn't open."):
+        super().__init__(message)
 
 
 def _launch_riff():
@@ -53,7 +57,8 @@ class JeepneyBus:
 
     TIMEOUT_S = 0.5  # Riff answers in milliseconds; a stall must not hold up audio threads
 
-    def __init__(self, connect=None):
+    def __init__(self, bus_name: str = BUS_NAME, connect=None):
+        self.bus_name = bus_name  # whose MPRIS interface call/get/set talk to
         self._connect = connect or self._open
         self._conn = None
         self._lock = threading.Lock()
@@ -87,11 +92,15 @@ class JeepneyBus:
 
     def _address(self):
         from jeepney import DBusAddress
-        return DBusAddress(OBJECT_PATH, bus_name=BUS_NAME, interface=PLAYER)
+        return DBusAddress(OBJECT_PATH, bus_name=self.bus_name, interface=PLAYER)
 
     def has_owner(self, name: str) -> bool:
         from jeepney.bus_messages import message_bus
         return bool(self._send(message_bus.NameHasOwner(name))[0])
+
+    def list_names(self) -> list[str]:
+        from jeepney.bus_messages import message_bus
+        return list(self._send(message_bus.ListNames())[0])
 
     def call(self, method: str, *args, signature: str = ""):
         from jeepney import new_method_call
@@ -107,39 +116,31 @@ class JeepneyBus:
         self._send(Properties(self._address()).set(prop, signature, value))
 
 
-class Riff:
-    def __init__(self, bus=None, launcher: Callable[[], None] | None = None,
-                 clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep):
-        self._bus = bus if bus is not None else JeepneyBus()
-        self._launch = launcher or _launch_riff
-        self._clock = clock
-        self._sleep = sleep
+class MprisPlayer:
+    """One MPRIS player. Every call raises RiffNotRunning if it isn't on the bus."""
+
+    BUS_NAME: str | None = None
+    NOT_RUNNING = "My music player isn't open."
+
+    def __init__(self, bus=None):
+        self._bus = bus if bus is not None else JeepneyBus(self.BUS_NAME or "")
+
+    def _resolve(self) -> str | None:
+        return self.BUS_NAME
 
     def is_running(self) -> bool:
         try:
-            return self._bus.has_owner(BUS_NAME)
+            name = self._resolve()
+            if not name or not self._bus.has_owner(name):
+                return False
+            self._bus.bus_name = name
+            return True
         except Exception:
             return False
 
-    def ensure_running(self, timeout: float = 10.0) -> None:
-        """Start Riff if it isn't open, and wait for it to show up on the bus."""
-        if self.is_running():
-            return
-        try:
-            self._launch()
-        except OSError as e:  # e.g. flatpak missing
-            raise RiffError("Riff didn't start.") from e
-        deadline = self._clock() + timeout
-        while self._clock() < deadline:
-            self._sleep(0.25)
-            if self.is_running():
-                return
-        raise RiffError("Riff didn't start.")
-
     def _require(self):
         if not self.is_running():
-            raise RiffNotRunning()
+            raise RiffNotRunning(self.NOT_RUNNING)
 
     def _call(self, method: str, *args, signature: str = ""):
         self._require()
@@ -196,3 +197,95 @@ class Riff:
             "artist": str(artists[0]) if artists else "",
             "album": str(meta.get("xesam:album") or ""),
         }
+
+
+class Riff(MprisPlayer):
+    BUS_NAME = BUS_NAME
+    NOT_RUNNING = "Riff isn't open."
+
+    def __init__(self, bus=None, launcher: Callable[[], None] | None = None,
+                 clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep):
+        super().__init__(bus)
+        self._launch = launcher or _launch_riff
+        self._clock = clock
+        self._sleep = sleep
+
+    def ensure_running(self, timeout: float = 10.0) -> None:
+        """Start Riff if it isn't open, and wait for it to show up on the bus."""
+        if self.is_running():
+            return
+        try:
+            self._launch()
+        except OSError as e:  # e.g. flatpak missing
+            raise RiffError("Riff didn't start.") from e
+        deadline = self._clock() + timeout
+        while self._clock() < deadline:
+            self._sleep(0.25)
+            if self.is_running():
+                return
+        raise RiffError("Riff didn't start.")
+
+
+class SpotifydPlayer(MprisPlayer):
+    """Appy's background player. Its MPRIS name carries spotifyd's PID and only exists
+    while it is the playback device, so it's looked up on every check."""
+
+    NOT_RUNNING = "My music player isn't playing anything."
+
+    def _resolve(self) -> str | None:
+        return next((n for n in self._bus.list_names() if n.startswith(SPOTIFYD_PREFIX)), None)
+
+
+class ActivePlayer:
+    """Whichever player Tudor means: the one playing; else the one that played last (so
+    "resume" goes back to it); else the first one that's open."""
+
+    def __init__(self, players: list):
+        self.players = players
+        self._last = None
+
+    def current(self):
+        for p in self.players:
+            if p.is_playing():
+                self._last = p
+                return p
+        if self._last is not None and self._last.is_running():
+            return self._last
+        for p in self.players:
+            if p.is_running():
+                return p
+        raise RiffNotRunning("No music player is open.")
+
+    def is_running(self) -> bool:
+        return any(p.is_running() for p in self.players)
+
+    def is_playing(self) -> bool:
+        return any(p.is_playing() for p in self.players)
+
+    def status(self) -> str:
+        return self.current().status()
+
+    def play(self):
+        self.current().play()
+
+    def pause(self):
+        self.current().pause()
+
+    def next(self):
+        self.current().next()
+
+    def previous(self):
+        self.current().previous()
+
+    def volume(self) -> float:
+        return self.current().volume()
+
+    def set_volume(self, v: float):
+        self.current().set_volume(v)
+
+    def shuffle(self, on: bool):
+        self.current().shuffle(on)
+
+    def now_playing(self) -> dict | None:
+        return self.current().now_playing()
