@@ -43,13 +43,17 @@ class DJ:
     def __init__(self, riff, spotify: Spotify | None,
                  sleep: Callable[[float], None] = time.sleep,
                  player_running: Callable[[], bool] = lambda: True,
-                 pause_others: Callable[[], None] = lambda: None):
+                 pause_others: Callable[[], None] = lambda: None,
+                 own_player=None):
         """`riff`: the MPRIS side (an ActivePlayer in main); `player_running()`: whether
         the background player process is up (no point waiting for its device if not)."""
         self.riff = riff
         self._player_running = player_running
         # Spotify doesn't stop Riff when Appy's player starts (seen live), so Appy does
         self._pause_others = pause_others
+        # What "did the song change?" is judged on: Appy's own player, not whichever
+        # player was active before (Riff's track differs from his stale one, too)
+        self._own = own_player
         self.spotify = spotify
         self._sleep = sleep
         self._volume_hook: Callable[[float], bool] | None = None
@@ -153,7 +157,7 @@ class DJ:
 
     def _now(self) -> dict | None:
         try:
-            return self.riff.now_playing()
+            return (self._own or self.riff).now_playing()
         except RiffError:
             return None
 
@@ -282,6 +286,8 @@ class Ducker:
         self._saved: float | None = None  # the volume to restore; None = not ducked
         self._ducked_to: float | None = None
         self._target = None  # the player that was turned down
+        self._closed = False
+        self._restore_retries = 0
         self._pending = None
         if run is None:
             self._jobs: queue.Queue = queue.Queue()
@@ -325,6 +331,8 @@ class Ducker:
 
     def _hold(self, reason: str) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._cancel_pending()
             self._reasons.add(reason)
             playing = self._playing_player()
@@ -334,7 +342,8 @@ class Ducker:
                     return
                 # Playback moved to the other player (Appy started a song over Riff):
                 # give the old one its volume back and duck the new one
-                self._restore_target()
+                if not self._restore_target():
+                    self._target = self._saved = self._ducked_to = None
             if playing is None:
                 return
             saved = playing.volume()
@@ -390,6 +399,13 @@ class Ducker:
             self._reasons.clear()
             self._safely(self._restore)
 
+    def close(self) -> None:
+        """Appy is quitting: put the music back and never duck again (a sentence still
+        queued in the speaker could otherwise turn it down after this)."""
+        with self._lock:
+            self._closed = True
+            self.restore_now()
+
     def _cancel_pending(self) -> None:
         if self._pending is not None:
             self._pending.cancel()
@@ -398,19 +414,33 @@ class Ducker:
     def _timer_fired(self) -> None:
         self._safely(self._restore)
 
+    RESTORE_RETRIES = 3
+
     def _restore(self) -> None:
         with self._lock:
             self._pending = None
             if self._reasons or self._saved is None:
                 return
-            self._restore_target()
+            if self._restore_target():
+                self._restore_retries = 0
+            elif self._restore_retries < self.RESTORE_RETRIES and not self._closed:
+                # Riff didn't answer: keep the saved volume and try again shortly, so a
+                # hiccup never makes the ducked level the new normal
+                self._restore_retries += 1
+                self._pending = self._timer_cls(self.restore_delay, self._timer_fired)
+                self._pending.daemon = True
+                self._pending.start()
 
-    def _restore_target(self) -> None:
-        """Give the ducked player its volume back, unless it was changed by hand."""
+    def _restore_target(self) -> bool:
+        """Give the ducked player its volume back, unless it was changed by hand. False
+        (state kept) if the player didn't answer; True once done or moot."""
         target, saved, ducked_to = self._target, self._saved, self._ducked_to
-        self._target = self._saved = self._ducked_to = None
         try:
             if abs(target.volume() - ducked_to) <= self.TOLERANCE:
                 target.set_volume(saved)
         except RiffNotRunning:
-            pass  # closed meanwhile
+            pass  # closed meanwhile: nothing to give back
+        except RiffError:
+            return False
+        self._target = self._saved = self._ducked_to = None
+        return True

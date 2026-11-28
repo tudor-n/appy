@@ -193,5 +193,9 @@ player, spotifyd, for playing things by name.
   played last; spotifyd's MPRIS name is `org.mpris.MediaPlayer2.spotifyd.instance<PID>`
   (exposed once it is the playback device).
 - Tudor moves Appy's music into Riff by picking "This Device" in Riff's Device Selector.
-- Unchanged: search, playlists/liked/queue logic, tools' schemas, the card, the hearing
-  workaround.
+- Unchanged: search, playlists/liked/queue logic, tools' schemas, the card.
+- Later, from the live voice test: the echo-cancellation part of the hearing workaround was
+  dropped (it garbled speech: 5/5 vs 0/5 in a side-by-side recording; see
+  docs/hearing-workaround.md); ducking became two depths (near-silent while Tudor talks,
+  softer while Appy talks); Whisper gets the library's artist and playlist names; the
+  weather and music cards stack instead of sharing one slot.

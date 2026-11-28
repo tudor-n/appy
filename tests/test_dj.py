@@ -363,6 +363,17 @@ class PlayResultTests(DJTestCase):
         self.assertEqual(result["context"], "Japanese TikTok Songs")
         self.assertNotIn("title", result)
 
+    def test_stale_track_on_appys_player_after_riff_was_playing(self):
+        # Riff played R; Appy's player still shows its old song S1 for a moment after the
+        # play request. S1 differs from R but is not the new song.
+        riff = FakeRiff(now={"title": "R", "artist": "Riff song", "album": ""})
+        appy = FakeRiff(now={"title": "S1", "artist": "Old", "album": ""}, status="Paused")
+        sp = FakeSpotify(search={"playlist": [{"name": "Gym", "uri": "spotify:playlist:g"}]})
+        dj = DJ(riff, sp, sleep=lambda s: None, own_player=appy)
+        result = json.loads(dj.play_music("gym", "playlist"))
+        self.assertNotIn("title", result)
+        self.assertEqual(result["context"], "Gym")
+
     def test_new_track_and_context_are_reported(self):
         class Switching(FakeRiff):
             def now_playing(self):
@@ -581,6 +592,37 @@ class DuckerTests(unittest.TestCase):
         self.fire_last()
         self.assertAlmostEqual(appy._volume, 0.6)
         self.assertAlmostEqual(riff._volume, 0.8)
+
+    def test_failed_restore_keeps_the_volume_and_retries(self):
+        # A D-Bus hiccup during the restore must not make the ducked level the new normal
+        from riff import RiffError
+
+        class Flaky(FakeRiff):
+            fail = True
+
+            def set_volume(self, v):
+                if v > 0.6 and self.fail:
+                    self.fail = False
+                    raise RiffError("Riff didn't answer.")
+                super().set_volume(v)
+
+        riff = Flaky(volume=0.8)
+        ducker = Ducker(riff, timer=FakeTimer, run=lambda fn: fn())
+        ducker.hold("appy")
+        ducker.release("appy")
+        FakeTimer.made[-1].fire()  # fails
+        self.assertAlmostEqual(riff._volume, 0.5)
+        self.assertAlmostEqual(ducker.saved_volume(), 0.8)
+        FakeTimer.made[-1].fire()  # the retry
+        self.assertAlmostEqual(riff._volume, 0.8)
+
+    def test_nothing_ducks_after_shutdown(self):
+        # Ctrl+C mid-reply: queued sentences may still report "playing" after the restore
+        self.ducker.hold("appy")
+        self.ducker.close()
+        self.assertAlmostEqual(self.riff._volume, 0.8)
+        self.ducker.hold("appy")
+        self.assertAlmostEqual(self.riff._volume, 0.8)
 
     def test_riff_errors_are_swallowed(self):
         self.ducker.hold("appy")

@@ -115,6 +115,21 @@ class LibraryTests(unittest.TestCase):
                                                             "next": None})})
         self.assertEqual(sp.music_vocabulary(), ["Prince", "Kiss", "Radiohead", "Gym"])
 
+    def test_music_vocabulary_keeps_room_for_playlists(self):
+        # 50 liked artists must not crowd out the playlist names
+        def tracks(req):
+            items = [{"track": {"uri": f"spotify:track:{i}", "artists": [{"name": f"Artist {i}"}]}}
+                     for i in range(50)]
+            return 200, {"items": items, "next": None}
+
+        sp, _ = client({("GET", "/v1/me/tracks"): tracks,
+                        ("GET", "/v1/me/playlists"): (200, {"items": [{"name": f"List {i}", "uri": "u"}
+                                                                      for i in range(15)], "next": None})})
+        names = sp.music_vocabulary()
+        self.assertEqual(len(names), 40)
+        self.assertEqual(names[:30], [f"Artist {i}" for i in range(30)])
+        self.assertEqual(names[30:], [f"List {i}" for i in range(10)])
+
     def test_user_id_is_cached(self):
         sp, api = client({("GET", "/v1/me"): (200, {"id": "tudor"})})
         self.assertEqual(sp.user_id(), "tudor")

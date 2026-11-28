@@ -9,6 +9,8 @@ from player import BackgroundPlayer
 
 
 class FakeProc:
+    pid = 1234
+
     def __init__(self, exits_on_terminate=True):
         self.exits_on_terminate = exits_on_terminate
         self.terminated = self.killed = False
@@ -96,6 +98,44 @@ class BackgroundPlayerTests(unittest.TestCase):
 
     def test_stop_without_start_is_harmless(self):
         self.player().stop()
+
+    def test_dies_with_appy(self):
+        # PR_SET_PDEATHSIG: if Appy crashes or is killed, the kernel stops spotifyd too
+        self.login()
+        self.player().start()
+        self.assertTrue(callable(self.launched[0][1].get("preexec_fn")))
+
+    def test_pid_and_pidfile(self):
+        self.login()
+        self.proc.pid = 4242
+        player = self.player()
+        player.start()
+        self.assertEqual(player.pid(), 4242)
+        self.assertEqual((self.cache / "spotifyd.pid").read_text(), "4242")
+        player.stop()
+        self.assertIsNone(player.pid())
+        self.assertFalse((self.cache / "spotifyd.pid").exists())
+
+    def test_kills_a_leftover_spotifyd_first(self):
+        # One left behind by an Appy that died before it could stop it
+        self.login()
+        (self.cache / "spotifyd.pid").write_text("777")
+        killed = []
+        player = BackgroundPlayer(binary=self.binary, cache=self.cache, popen=self.popen,
+                                  cmdline=lambda pid: f"{self.binary} --no-daemon --cache-path {self.cache}",
+                                  kill=lambda pid, sig: killed.append(pid))
+        player.start()
+        self.assertEqual(killed, [777])
+
+    def test_leaves_unrelated_processes_alone(self):
+        self.login()
+        (self.cache / "spotifyd.pid").write_text("777")
+        killed = []
+        player = BackgroundPlayer(binary=self.binary, cache=self.cache, popen=self.popen,
+                                  cmdline=lambda pid: "/usr/bin/firefox",
+                                  kill=lambda pid, sig: killed.append(pid))
+        player.start()
+        self.assertEqual(killed, [])
 
     def test_authenticate_runs_spotifyd_auth(self):
         runs = []

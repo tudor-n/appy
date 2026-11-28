@@ -195,11 +195,19 @@ class Riff(MprisPlayer):
 
 class SpotifydPlayer(MprisPlayer):
     """Appy's background player. Its MPRIS name carries spotifyd's PID and only exists
-    while it is the playback device, so it's looked up on every check."""
+    while it is the playback device. With `pid()` (BackgroundPlayer.pid) only Appy's own
+    instance counts, never a leftover or hand-started spotifyd."""
 
     NOT_RUNNING = "My music player isn't playing anything."
 
+    def __init__(self, bus=None, pid: Callable[[], int | None] | None = None):
+        super().__init__(bus)
+        self._pid = pid
+
     def _resolve(self) -> str | None:
+        if self._pid is not None:
+            pid = self._pid()
+            return f"{SPOTIFYD_PREFIX}instance{pid}" if pid else None
         return next((n for n in self._bus.list_names() if n.startswith(SPOTIFYD_PREFIX)), None)
 
 

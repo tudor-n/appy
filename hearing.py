@@ -79,17 +79,21 @@ def _words(text: str) -> list[str]:
 
 
 def is_prompt_echo(text: str, prompt: str, hotwords: str | None = None) -> bool:
-    """Is this transcript just Whisper repeating its prompt or hotwords (it does that
-    when it can't make out the audio)? Three or more words, all a run of the prompt, or
-    all hotwords."""
+    """Is this transcript just Whisper repeating its prompt or its hotwords (it does that
+    when it can't make out the audio)? Three or more words that are a run of the prompt,
+    or a run of the hotword list spanning at least two of its names: a single name on its
+    own ("The Rolling Stones") is real speech."""
     words = _words(text)
     if len(words) < 3:
         return False
-    joined = " ".join(words)
-    if f" {joined} " in f" {' '.join(_words(prompt))} ":
+    joined = f" {' '.join(words)} "
+    if joined in f" {' '.join(_words(prompt))} ":
         return True
-    hot = set(_words(hotwords or ""))
-    return bool(hot) and all(w in hot for w in words)
+    names = [" ".join(_words(n)) for n in (hotwords or "").split(",")]
+    names = [n for n in names if n]
+    if not names or joined not in f" {' '.join(names)} ":
+        return False
+    return not any(joined in f" {n} " for n in names)  # within one name: not an echo
 
 
 def filter_transcript(text: str) -> str | None:

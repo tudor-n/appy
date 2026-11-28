@@ -502,8 +502,23 @@ class MainShutdownTests(unittest.TestCase):
 
         src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
         final = src[src.rindex("    finally:\n"):]
-        first = final.splitlines()[1].strip()
-        self.assertTrue(first.startswith("ducker.restore_now()"), first)
+        first, second = (line.strip() for line in final.splitlines()[1:3])
+        self.assertTrue(first.startswith("ducker.close()"), first)
+        self.assertTrue(second.startswith("background.stop()"), second)
+
+    def test_sigterm_runs_the_shutdown(self):
+        # bin/appy's SIGTERM would otherwise skip `finally` and leave spotifyd running
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        self.assertIn("signal.signal(signal.SIGTERM", src)
+
+    def test_appys_player_is_found_by_its_pid(self):
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        self.assertIn("SpotifydPlayer(pid=background.pid)", src)
+        self.assertIn("own_player=appy_player", src)
 
     def test_volume_steps_use_the_ducker_level(self):
         from pathlib import Path

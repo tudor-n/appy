@@ -1,6 +1,7 @@
 import math
 import os
 import queue
+import signal
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -38,7 +39,14 @@ def load_system_prompt() -> str:
     return prompt_path.read_text(encoding="utf-8").strip()
 
 
+def _sigterm_as_interrupt(signum, frame):
+    raise KeyboardInterrupt  # so `finally` runs: music back up, spotifyd stopped
+
+
 def main():
+    # bin/appy sends SIGTERM if Ctrl+C takes more than 5 s; the default handler would
+    # skip the cleanup below and leave the "Appy" player running
+    signal.signal(signal.SIGTERM, _sigterm_as_interrupt)
     turn_queue: queue.Queue[tuple[str, str]] = queue.Queue()
 
     # Reasoning effort is switchable at runtime from the UI's effort picker
@@ -97,7 +105,8 @@ def main():
         print(f"[music] background player off: {background.problem}")
     # Pause/skip/volume/ducking go to whichever is playing (his player first when both are)
     riff = Riff()
-    music = ActivePlayer([SpotifydPlayer(), riff])
+    appy_player = SpotifydPlayer(pid=background.pid)  # his own instance only
+    music = ActivePlayer([appy_player, riff])
 
     def pause_riff():
         """Appy's player took over; Spotify doesn't stop Riff by itself."""
@@ -108,7 +117,8 @@ def main():
             pass
 
     spotify = Spotify(TokenStore()) if os.getenv("SPOTIFY_CLIENT_ID", "").strip() else None
-    dj = DJ(music, spotify, player_running=background.running, pause_others=pause_riff)
+    dj = DJ(music, spotify, player_running=background.running, pause_others=pause_riff,
+            own_player=appy_player)
     tools.set_dj(dj)
     # Riff goes quiet while Tudor talks to Appy and while Appy answers
     ducker = Ducker(music)
@@ -297,14 +307,14 @@ def main():
         reason = "error"
         raise
     finally:
-        ducker.restore_now()  # first: the launcher SIGTERMs us 5 s after Ctrl+C
+        ducker.close()  # first: the launcher SIGTERMs us 5 s after Ctrl+C
+        background.stop()  # before the slow parts (log upload), so no "Appy" device lingers
         log.end(reason=reason)
         if review_box["review"]:
             review_box["review"].stop()
         if memory:
             uploaded = memory.upload_log(log.path)
             print(f"[memory] log {'uploaded' if uploaded else 'kept locally'}")
-        background.stop()
         ear.stop()
         speaker.close()
 

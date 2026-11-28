@@ -194,6 +194,15 @@ class SpotifydPlayerTests(unittest.TestCase):
         self.assertEqual(bus.bus_name, "org.mpris.MediaPlayer2.spotifyd.instance4242")
         self.assertTrue(player.is_playing())
 
+    def test_uses_only_its_own_instance(self):
+        # A leftover or hand-started spotifyd must not be mistaken for Appy's
+        bus = SpotifydBus(["org.mpris.MediaPlayer2.spotifyd.instance111",
+                           "org.mpris.MediaPlayer2.spotifyd.instance4242"])
+        player = SpotifydPlayer(bus=bus, pid=lambda: 4242)
+        self.assertTrue(player.is_running())
+        self.assertEqual(bus.bus_name, "org.mpris.MediaPlayer2.spotifyd.instance4242")
+        self.assertFalse(SpotifydPlayer(bus=bus, pid=lambda: None).is_running())
+
     def test_not_running_without_the_name(self):
         player = SpotifydPlayer(bus=SpotifydBus(["rs.spotifyd.instance4242"]))
         self.assertFalse(player.is_running())

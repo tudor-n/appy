@@ -136,6 +136,18 @@ class PromptEchoTests(unittest.TestCase):
             with self.subTest(real=real):
                 self.assertFalse(is_prompt_echo(real, WHISPER_PROMPT, hotwords="Kiss, Prince"))
 
+    def test_library_names_said_alone_are_real_speech(self):
+        # "Which artist?" "The Rolling Stones." must not be thrown away as an echo
+        from hearing import WHISPER_PROMPT, is_prompt_echo
+
+        hot = "Rage Against the Machine, The Rolling Stones, Of Monsters and Men, Queen, Prince"
+        for real in ["The Rolling Stones.", "Rage Against the Machine.", "bring me the stones",
+                     "the queen and the prince", "Of Monsters and Men"]:
+            with self.subTest(real=real):
+                self.assertFalse(is_prompt_echo(real, WHISPER_PROMPT, hotwords=hot))
+        self.assertTrue(is_prompt_echo("The Rolling Stones, Of Monsters and Men, Queen.",
+                                       WHISPER_PROMPT, hotwords=hot))
+
 
 @unittest.skipIf(filter_transcript is None, "hearing deps unavailable")
 class HotwordTests(unittest.TestCase):
