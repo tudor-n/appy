@@ -251,6 +251,17 @@ class ActivePlayerTests(unittest.TestCase):
         self.assertIs(active.current(), riff)
         self.assertFalse(active.is_playing())
 
+    def test_observe_remembers_what_tudor_played_by_hand(self):
+        # Appy's player played last via Appy; then Tudor played Riff himself and paused it.
+        # "resume" should go back to Riff.
+        appy, riff = StubPlayer("appy", status="Playing"), StubPlayer("riff")
+        active = ActivePlayer([appy, riff])
+        active.current()
+        appy._status, riff._status = "Paused", "Playing"
+        active.observe()  # the periodic look
+        riff._status = "Paused"
+        self.assertIs(active.current(), riff)
+
     def test_falls_back_to_first_running(self):
         appy, riff = StubPlayer("appy", running=False), StubPlayer("riff")
         self.assertIs(ActivePlayer([appy, riff]).current(), riff)

@@ -121,6 +121,7 @@ def main():
     riff = Riff()
     appy_player = SpotifydPlayer(pid=background.pid)  # his own instance only
     music = ActivePlayer([appy_player, riff])
+    music.watch()  # so "resume" follows what Tudor last played, also by hand in Riff
 
     def pause_riff():
         """Appy's player took over; Spotify doesn't stop Riff by itself."""

@@ -219,6 +219,26 @@ class ActivePlayer:
         self.players = players
         self._last = None
 
+    def observe(self) -> None:
+        """Note which player is playing right now (called every few seconds by `watch`),
+        so "resume" goes back to the one Tudor last played, even by hand in Riff."""
+        for p in self.players:
+            try:
+                playing = p.is_playing()
+            except Exception:
+                playing = False
+            if playing:
+                self._last = p
+                return
+
+    def watch(self, interval: float = 3.0) -> None:
+        """Run `observe` in the background for the rest of the run."""
+        def loop():
+            while True:
+                time.sleep(interval)
+                self.observe()
+        threading.Thread(target=loop, daemon=True, name="player-watch").start()
+
     def current(self):
         for p in self.players:
             if p.is_playing():
