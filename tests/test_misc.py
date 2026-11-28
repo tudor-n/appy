@@ -277,6 +277,85 @@ class ForcedCallTests(unittest.TestCase):
             self.assertEqual(tools.weather_day(text, thursday), day, text)
 
 
+class MusicForcedCallTests(unittest.TestCase):
+    def setUp(self):
+        tools.set_dj(object())  # any DJ: forcing only checks that music is set up
+
+    def tearDown(self):
+        tools.set_dj(None)
+
+    def forced(self, text, **kw):
+        call = tools.forced_call(text, frozenset(), **kw)
+        return (call.name, call.fallback_args) if call else None
+
+    def test_music_commands(self):
+        control = lambda action: ("music_control", {"action": action})  # noqa: E731
+        play = lambda **args: ("play_music", args)  # noqa: E731
+        cases = {
+            "Pause.": control("pause"),
+            "pause the music": control("pause"),
+            "Appy, stop the music please": control("pause"),
+            "resume": control("resume"),
+            "unpause it": control("resume"),
+            "Play.": control("resume"),
+            "Skip.": control("next"),
+            "skip this song": control("next"),
+            "next song": control("next"),
+            "next track please": control("next"),
+            "previous song": control("previous"),
+            "go back a song": control("previous"),
+            "turn it up": control("volume_up"),
+            "louder!": control("volume_up"),
+            "turn it down": control("volume_down"),
+            "quieter please": control("volume_down"),
+            "what's playing?": control("now_playing"),
+            "What song is this?": control("now_playing"),
+            "what's this song": control("now_playing"),
+            "play my liked songs": play(kind="liked"),
+            "play some music": play(kind="liked"),
+            "Play my gym playlist.": play(query="gym", kind="playlist"),
+            "play the late night coding playlist": play(query="late night coding", kind="playlist"),
+            "play some Radiohead": play(query="Radiohead", kind="artist"),
+            "play something by Daft Punk": play(query="Daft Punk", kind="artist"),
+            "queue Paranoid Android": play(query="Paranoid Android", kind="track", queue=True),
+            "add Hello by Adele to the queue": play(query="Hello by Adele", kind="track", queue=True),
+            "Play Karma Police.": play(query="Karma Police", kind="track"),
+            "hey appy, can you play Bohemian Rhapsody": play(query="Bohemian Rhapsody", kind="track"),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.forced(text), expected)
+
+    def test_music_mentions_do_not_force(self):
+        for text in ["I was listening to music earlier", "my sister plays guitar",
+                     "what should I play tonight", "let's play a game", "can we play twenty questions",
+                     "the next step is hard", "don't stop believing in yourself", "skip the small talk"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.forced(text))
+
+    def test_strict_music_rejects_long_lyrics(self):
+        lyric = "don't stop, play it again, play it all night long baby"
+        self.assertIsNone(self.forced(lyric, strict_music=True))
+        self.assertIsNone(self.forced("play that funky music white boy, play that funky music",
+                                      strict_music=True))
+        self.assertEqual(self.forced("skip", strict_music=True), ("music_control", {"action": "next"}))
+        self.assertEqual(self.forced("play my gym playlist", strict_music=True),
+                         ("play_music", {"query": "gym", "kind": "playlist"}))
+
+    def test_long_requests_are_fine_when_not_strict(self):
+        self.assertEqual(self.forced("play that funky music white boy, play that funky music"),
+                         ("play_music", {"query": "that funky music white boy, play that funky music",
+                                         "kind": "track"}))
+
+    def test_no_dj_no_music_forcing(self):
+        tools.set_dj(None)
+        self.assertIsNone(self.forced("skip"))
+        self.assertIsNone(self.forced("play Karma Police"))
+
+    def test_weather_still_forced_with_dj(self):
+        self.assertEqual(self.forced("what's the weather")[0], "get_weather")
+
+
 class WeatherCardTests(unittest.TestCase):
     def result(self, **current):
         cur = {"temp_c": 21.4, "condition": "clear sky", "code": 0, "is_day": True, **current}

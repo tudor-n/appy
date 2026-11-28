@@ -427,6 +427,74 @@ _FORGET = re.compile(
 )
 _FORGET_TRAILER = re.compile(r"(\s+(anymore|any more|please))?[\s.!?]*$", re.IGNORECASE)
 
+# Clear music commands, addressed to Appy at the start of the message ("skip", "Appy,
+# play my gym playlist", "can you turn it up"). Forced like weather, because Gemma tends
+# to answer "skipped!" without calling anything. Matched against the whole message (after
+# the same filler/"appy"/"can you" prefix as _FORGET), so a sentence that merely mentions
+# music ("I was listening to music") or games ("let's play a game") isn't forced.
+_MUSIC_PREFIX = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|so|and|also|hey|well|yo)[,.!]?\s+)*(?:appy[,.:!]?\s+)?"
+    r"(?:please\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?)?",
+    re.IGNORECASE,
+)
+_MUSIC_TRAILER = re.compile(r"[\s,]*(?:please|appy|thanks)?[\s.!?]*$", re.IGNORECASE)
+_SONG = r"(?:the\s+)?(?:song|track|one|music|tune)"
+_MUSIC_CONTROLS = [
+    (re.compile(rf"(?:pause|stop)(?:\s+(?:it|this|that|{_SONG}|the\s+music))?"), "pause"),
+    (re.compile(r"pause"), "pause"),
+    (re.compile(rf"(?:resume|unpause)(?:\s+(?:it|{_SONG}|playing))?"), "resume"),
+    (re.compile(r"play|play\s+(?:it|the\s+music)\s+again|keep\s+playing"), "resume"),
+    (re.compile(rf"(?:skip|next)(?:\s+(?:it|this|that|{_SONG}|this\s+(?:song|track|one)))?|"
+                rf"play\s+the\s+next\s+(?:song|track|one)"), "next"),
+    (re.compile(rf"previous(?:\s+(?:song|track|one))?|go\s+back(?:\s+(?:a|one)(?:\s+(?:song|track))?)?|"
+                rf"last\s+(?:song|track)|play\s+the\s+(?:previous|last)\s+(?:song|track|one)"), "previous"),
+    (re.compile(r"turn\s+(?:it|this|the\s+music|the\s+volume)\s+up|turn\s+up\s+the\s+(?:music|volume)|"
+                r"louder|volume\s+up"), "volume_up"),
+    (re.compile(r"turn\s+(?:it|this|the\s+music|the\s+volume)\s+down|turn\s+down\s+the\s+(?:music|volume)|"
+                r"quieter|softer|volume\s+down"), "volume_down"),
+    (re.compile(r"what(?:'s|\s+is)\s+(?:this(?:\s+song)?|playing|the\s+song(?:\s+playing)?)|"
+                r"what\s+song\s+is\s+(?:this|playing)|who(?:'s|\s+is)\s+(?:this|singing)"), "now_playing"),
+]
+_PLAY_LIKED = re.compile(r"play\s+(?:my\s+)?(?:liked\s+songs|likes|favou?rites)|"
+                         r"play\s+(?:some\s+)?music|play\s+something")
+_PLAY_PLAYLIST = re.compile(r"play\s+(?:my|the)\s+(?P<x>.+?)\s+playlist")
+_PLAY_ARTIST = re.compile(r"play\s+(?:some|something\s+by|some\s+music\s+by|songs\s+by)\s+(?P<x>.+)")
+_QUEUE = re.compile(r"(?:queue(?:\s+up)?\s+(?P<x>.+?)(?:\s+next)?|add\s+(?P<y>.+?)\s+to\s+(?:the|my)\s+queue)")
+_PLAY_TRACK = re.compile(r"play\s+(?P<x>.+)")
+_NOT_MUSIC = re.compile(r"play\s+(?:a\s+|an\s+)?(?:game|games|round|with|around|along|trivia|"
+                        r"twenty\s+questions|20\s+questions|it\s+cool)\b")
+# HEARING-WORKAROUND(respeaker): while the mic hears music, only short commands count
+STRICT_MUSIC_MAX_WORDS = 6
+
+
+def music_call(user_text: str, strict: bool = False) -> "ForcedCall | None":
+    """The music tool a clear command must call, or None. `strict` (the mic hears the
+    music) also requires a short message, so a sung lyric doesn't skip the song."""
+    text = user_text.replace("’", "'").strip()
+    if strict and len(text.split()) > STRICT_MUSIC_MAX_WORDS:
+        return None
+    rest = _MUSIC_PREFIX.sub("", text, count=1)
+    rest = _MUSIC_TRAILER.sub("", rest)
+    low = rest.lower()
+    for pattern, action in _MUSIC_CONTROLS:
+        if pattern.fullmatch(low):
+            return ForcedCall("music_control", {"action": action})
+    if _NOT_MUSIC.match(low):
+        return None
+    if _PLAY_LIKED.fullmatch(low):
+        return ForcedCall("play_music", {"kind": "liked"})
+    for pattern, kind in ((_PLAY_PLAYLIST, "playlist"), (_PLAY_ARTIST, "artist")):
+        if m := pattern.fullmatch(low):
+            return ForcedCall("play_music", {"query": rest[m.start("x"):m.end("x")], "kind": kind})
+    if m := _QUEUE.fullmatch(low):
+        group = "x" if m.group("x") else "y"
+        query = rest[m.start(group):m.end(group)]
+        return ForcedCall("play_music", {"query": query, "kind": "track", "queue": True})
+    if m := _PLAY_TRACK.fullmatch(low):
+        return ForcedCall("play_music", {"query": rest[m.start("x"):m.end("x")], "kind": "track"})
+    return None
+
+
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "a": 1}
 
@@ -458,9 +526,12 @@ class ForcedCall:
     fallback_args: dict
 
 
-def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | None:
+def forced_call(user_text: str, recent_tools: frozenset[str],
+                strict_music: bool = False) -> ForcedCall | None:
     """The call the next turn must make: memory_forget for a clear request to forget
-    something (only while memory is on), get_weather for a clear weather question.
+    something (only while memory is on), a music tool for a clear music command (only
+    while the DJ is set up; `strict_music`: see music_call), get_weather for a clear
+    weather question.
 
     Gemma often answers weather follow-ups from its earlier reply instead of calling the
     tool (no card, and for "in 3 hours" made-up or refused answers), whatever the
@@ -472,6 +543,8 @@ def forced_call(user_text: str, recent_tools: frozenset[str]) -> ForcedCall | No
     if _memory is not None and (forget := _FORGET.match(user_text.replace("\u2019", "'"))):
         what = _FORGET_TRAILER.sub("", forget.group("what")).strip()
         return ForcedCall("memory_forget", {"slug": "core", "text": what})
+    if _dj is not None and (music := music_call(user_text, strict=strict_music)):
+        return music
     weather = bool(_WEATHER_WORDS.search(user_text)) or (
         "get_weather" in recent_tools and bool(_TIME_FOLLOW_UP.search(user_text))
     )
