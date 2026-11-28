@@ -80,25 +80,36 @@ Set `APPY_DUMP_COMPACTION=1` to also write each compaction's exact prompt and th
 came back to `<session>.compaction-N.txt` next to the log; `COMPACT_AT=2500` makes it happen
 sooner when testing.
 
-## Music (Riff + Spotify)
+## Music (Spotify, Riff)
 
-Appy can drive [Riff](https://flathub.org/apps/dev.diegovsky.Riff) (the GTK Spotify client,
-Premium account): "play Karma Police", "put on some Radiohead", "play my gym playlist",
-"play my liked songs", "queue Paranoid Android", "skip", "pause", "turn it up", "what's
-playing?". Pause, skip, volume and "what's playing" talk to Riff directly over MPRIS and
-work without any setup. Playing things by name goes through Spotify's Web API as you,
-which needs a one-time setup:
+Appy is a DJ: "play Karma Police", "put on some Radiohead", "play my gym playlist", "play my
+liked songs", "queue Paranoid Android", "skip", "pause", "turn it up", "what's playing?".
 
-1. At [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), create an
-   app (any name; tick "Web API"). Add the redirect URI `http://127.0.0.1:8898/callback`.
-2. Put its client ID in `.env` as `SPOTIFY_CLIENT_ID` (no secret needed).
-3. Run `appy spotify-login` and approve in the browser. The refresh token is saved to
-   `~/.config/appy/spotify.json`, readable only by you.
+- **Playing by name** goes to Appy's own background player,
+  [spotifyd](https://github.com/Spotifyd/spotifyd), which shows up in Spotify as the device
+  **Appy**. It starts with Appy and stops when he quits. (Riff, the GTK Spotify client,
+  can't be told to play a specific song.)
+- **Pause, skip, volume and "what's playing"** go over MPRIS to whichever player is
+  playing: Appy's, or [Riff](https://flathub.org/apps/dev.diegovsky.Riff) when you've put
+  something on yourself. To move Appy's music into Riff, pick "This Device" in Riff's
+  Device Selector (Preferences > Experimental Features).
+
+Setup, once:
+
+1. Install spotifyd: download `spotifyd-linux-x86_64-full.tar.gz` and its `.sha512` from
+   the [latest release](https://github.com/Spotifyd/spotifyd/releases), check it with
+   `sha512sum -c`, and put the `spotifyd` binary at `~/.local/bin/spotifyd`.
+2. At [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), create an
+   app (any name; tick "Web API") with the redirect URI `http://127.0.0.1:8898/callback`.
+   Put its client ID in `.env` as `SPOTIFY_CLIENT_ID` (no secret needed).
+3. Run `appy spotify-login` and approve twice in the browser: once for search and playing
+   (saved to `~/.config/appy/spotify.json`), once for the background player (saved in
+   `~/.cache/appy/spotifyd/`).
 
 Spotify-made playlists (Discover Weekly, Daily Mixes, ...) can't be played: Spotify doesn't
 give new apps access to them.
 
-Riff is turned down to a quarter while you talk to Appy and while he answers. Add this to
+The music is turned down to a quarter while you talk to Appy and while he answers. Add this to
 `prompt.txt` (it's gitignored, so it isn't in the repo):
 
 ```
