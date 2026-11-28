@@ -353,12 +353,58 @@ class RiffStateTests(DJTestCase):
         self.assertEqual(self.dj(riff=FakeRiff(status="Playing")).riff_state(), "playing")
 
 
+class PlayResultTests(DJTestCase):
+    def test_stale_track_is_not_reported_for_a_playlist(self):
+        # Seen live: the J-pop playlist reported the previous song (No One Like You)
+        sp = FakeSpotify(search={"playlist": [{"name": "Japanese TikTok Songs", "uri": "spotify:playlist:j"}]})
+        riff = FakeRiff(now={"title": "No One Like You", "artist": "Scorpions", "album": "x"})
+        result = self.run_tool(self.dj(riff=riff, spotify=sp).play_music, "J-pop", "playlist")
+        self.assertEqual(result["playing"], "Japanese TikTok Songs")
+        self.assertEqual(result["context"], "Japanese TikTok Songs")
+        self.assertNotIn("title", result)
+
+    def test_new_track_and_context_are_reported(self):
+        class Switching(FakeRiff):
+            def now_playing(self):
+                self.reads = getattr(self, "reads", 0) + 1
+                return {"title": "Old", "artist": "A", "album": ""} if self.reads == 1 else \
+                    {"title": "Ichiban", "artist": "B", "album": ""}
+
+        sp = FakeSpotify(search={"playlist": [{"name": "Japanese TikTok Songs", "uri": "spotify:playlist:j"}]})
+        result = self.run_tool(self.dj(riff=Switching(), spotify=sp).play_music, "J-pop", "playlist")
+        self.assertEqual((result["title"], result["artist"], result["context"]),
+                         ("Ichiban", "B", "Japanese TikTok Songs"))
+
+    def test_liked_and_album_have_a_context_but_tracks_dont(self):
+        sp = FakeSpotify(search={"track": [HELLO], "album": [{"name": "25", "uri": "spotify:album:25",
+                                                               "artist": "Adele"}]})
+        dj = self.dj(spotify=sp)
+        self.assertEqual(self.run_tool(dj.play_music, "", "liked")["context"], "Liked Songs")
+        self.assertEqual(self.run_tool(dj.play_music, "25", "album")["context"], "25")
+        self.assertNotIn("context", self.run_tool(dj.play_music, "hello", "track"))
+
+
 class MusicCardTests(DJTestCase):
+    def test_card_shows_the_playlist(self):
+        dj = self.dj()
+        card = dj.music_card("play_music", json.dumps(
+            {"playing": "Gym", "queued": False, "title": "Pain", "artist": "Three Days Grace",
+             "context": "Gym"}))
+        self.assertEqual(card, {"widget": "music", "title": "Pain", "artist": "Three Days Grace",
+                                "state": "playing", "context": "Gym"})
+
+    def test_card_with_only_the_playlist_known(self):
+        card = self.dj().music_card("play_music", json.dumps(
+            {"playing": "Japanese TikTok Songs", "queued": False, "context": "Japanese TikTok Songs"}))
+        self.assertEqual(card, {"widget": "music", "title": "Japanese TikTok Songs", "artist": "",
+                                "state": "playing", "context": None})
+
     def test_music_card_for_play_and_now_playing_only(self):
         dj = self.dj(riff=FakeRiff(now={"title": "Hello", "artist": "Adele", "album": "25"}))
         played = dj.play_music("hello", "track")
         self.assertEqual(dj.music_card("play_music", played),
-                         {"widget": "music", "title": "Hello", "artist": "Adele", "state": "playing"})
+                         {"widget": "music", "title": "Hello", "artist": "Adele", "state": "playing",
+                          "context": None})
         now = dj.music_card("music_control", dj.music_control("now_playing"))
         self.assertEqual(now["title"], "Hello")
         self.assertIsNone(dj.music_card("music_control", dj.music_control("pause")))

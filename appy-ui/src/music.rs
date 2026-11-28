@@ -26,6 +26,7 @@ pub struct MusicCard {
     state: Rc<Cell<PlaybackState>>,
     title: Label,
     artist: Label,
+    context: Label,
 }
 
 impl MusicCard {
@@ -54,6 +55,11 @@ impl MusicCard {
             .max_width_chars(14)
             .build();
         artist.add_css_class("music-artist");
+        let context = Label::builder()
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(14)
+            .build();
+        context.add_css_class("music-context");
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.set_valign(Align::Center);
@@ -62,6 +68,7 @@ impl MusicCard {
         root.append(&glyph);
         root.append(&title);
         root.append(&artist);
+        root.append(&context);
         let shell = CardShell::new();
         shell.root.append(&root);
 
@@ -71,6 +78,7 @@ impl MusicCard {
             state,
             title,
             artist,
+            context,
         }
     }
 
@@ -80,6 +88,11 @@ impl MusicCard {
         self.title.set_text(&track.title);
         self.artist.set_text(&track.artist);
         self.artist.set_visible(!track.artist.is_empty());
+        // A playlist/album line makes room by keeping the title to one line
+        let context = track.context.as_deref().unwrap_or("");
+        self.context.set_text(context);
+        self.context.set_visible(!context.is_empty());
+        self.title.set_lines(if context.is_empty() { 2 } else { 1 });
         self.shell.root.set_tooltip_text(Some(&Self::tooltip(track)));
     }
 
@@ -89,6 +102,10 @@ impl MusicCard {
             track.title.clone()
         } else {
             format!("{} by {}", track.title, track.artist)
+        };
+        let what = match &track.context {
+            Some(context) => format!("{what} · {context}"),
+            None => what,
         };
         match track.state {
             PlaybackState::Playing => what,
@@ -149,6 +166,7 @@ mod tests {
             title: "Karma Police".into(),
             artist: artist.into(),
             state,
+            context: None,
         }
     }
 

@@ -184,7 +184,7 @@ DEMO_TURNS = [
      "focused"),
     ("play Karma Police",
      [{"type": "widget", "widget": "music", "title": os.getenv("MOCK_TITLE", "Karma Police"), "artist": "Radiohead",
-       "state": os.getenv("MOCK_MUSIC", "playing")}],
+       "state": os.getenv("MOCK_MUSIC", "playing"), "context": os.getenv("MOCK_CONTEXT") or None}],
      "Karma Police, coming up.", "happy"),
     ("ugh. ok, remind me what PSU I have on the bench?", [],
      "A Riden RD6024: 60 volts, 24 amps, the one you control over USB.", "happy"),

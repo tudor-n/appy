@@ -23,7 +23,7 @@ CONTROL_ACTIONS = ("pause", "resume", "next", "previous", "volume_up", "volume_d
 PLAYER_DEVICE_HINT = "appy"
 VOLUME_STEP = 0.15
 DEVICE_POLLS = 5  # spotifyd may still be connecting: look this many times, 1 s apart
-NOW_PLAYING_WAIT_S = 2.0
+NOW_PLAYING_WAIT_S = 4.0  # a playlist can take >2 s to load on spotifyd (seen live)
 LIKED_FALLBACK = 100
 CARD_STATES = ("playing", "paused")  # the `state` values of the music card
 # How far the music goes down while someone talks. Riff and spotifyd map MPRIS volume
@@ -92,7 +92,9 @@ class DJ:
             target = self._find(query, kind)
             if target is None:
                 return _error(f"I couldn't find {query} on Spotify.")
-            label, uri, hit = target
+            label, uri, hit, name = target
+            # what the card shows under the song: the playlist or album it's from
+            context = name if kind in ("playlist", "album") else None
             if queue:
                 self.spotify.queue(uri, device)
                 return json.dumps({"playing": label, "queued": True})
@@ -104,7 +106,7 @@ class DJ:
             else:
                 self.spotify.play(device, context_uri=uri)
             self._pause_others()
-            return self._started(label, before, hit)
+            return self._started(label, before, hit, context)
         except (SpotifyError, SpotifyAuthError, RiffError) as e:
             return _error(str(e))
 
@@ -117,15 +119,15 @@ class DJ:
                     return d["id"]
         return None
 
-    def _find(self, query: str, kind: str) -> tuple[str, str, dict | None] | None:
-        """(what to call it, its URI, the track hit for a track) or None."""
+    def _find(self, query: str, kind: str) -> tuple[str, str, dict | None, str] | None:
+        """(what to call it, its URI, the track hit for a track, its bare name) or None."""
         if kind == "playlist":
             mine = self.spotify.my_playlists()
             q = query.lower()
             match = next((p for p in mine if p["name"].lower() == q), None) or \
                 next((p for p in mine if q in p["name"].lower()), None)
             if match:
-                return match["name"], match["uri"], None
+                return match["name"], match["uri"], None, match["name"]
         hits = self.spotify.search(query, kind)
         if not hits:
             return None
@@ -134,7 +136,7 @@ class DJ:
             label = f"{hit['name']} by {hit['artist']}"
         else:
             label = hit["name"]
-        return label, hit["uri"], hit if kind == "track" else None
+        return label, hit["uri"], hit if kind == "track" else None, hit["name"]
 
     def _play_liked(self, device: str) -> str:
         before = self._now()
@@ -147,7 +149,7 @@ class DJ:
             self.spotify.play(device, uris=uris)
             self.spotify.shuffle(True, device)
         self._pause_others()
-        return self._started("your liked songs", before, None)
+        return self._started("your liked songs", before, None, "Liked Songs")
 
     def _now(self) -> dict | None:
         try:
@@ -155,8 +157,11 @@ class DJ:
         except RiffError:
             return None
 
-    def _started(self, label: str, before: dict | None, hit: dict | None) -> str:
-        """The play_music result, naming the track Riff actually started if it says."""
+    def _started(self, label: str, before: dict | None, hit: dict | None,
+                 context: str | None = None) -> str:
+        """The play_music result, naming the track the player actually started. A track
+        that never changed from `before` is the old one still showing: left out, never
+        reported as the new one (seen live: a playlist reported the previous song)."""
         now = None
         waited = 0.0
         while waited < NOW_PLAYING_WAIT_S:
@@ -165,11 +170,13 @@ class DJ:
                 break
             self._sleep(0.25)
             waited += 0.25
-        if hit and not (now and now != before):
-            now = {"title": hit["name"], "artist": hit.get("artist", "")}
+        if not (now and now != before):
+            now = {"title": hit["name"], "artist": hit.get("artist", "")} if hit else None
         result = {"playing": label, "queued": False}
         if now:
             result.update(title=now["title"], artist=now.get("artist", ""))
+        if context:
+            result["context"] = context
         return json.dumps(result)
 
     # music_control
@@ -221,14 +228,19 @@ class DJ:
     # the overlay's card
 
     def music_card(self, tool_name: str, result: str) -> dict | None:
-        """The `music` widget for a tool result, or None if that result gets no card."""
+        """The `music` widget for a tool result, or None if that result gets no card.
+        `context` is the playlist/album it plays from; with no track known yet, that name
+        is the card's title instead."""
         if tool_name not in ("play_music", "music_control"):
             return None
         try:
             data = json.loads(result)
         except (TypeError, ValueError):
             return None
-        if not isinstance(data, dict) or "error" in data or not data.get("title"):
+        if not isinstance(data, dict) or "error" in data:
+            return None
+        title, context = data.get("title"), data.get("context")
+        if not title and not context:
             return None
         if tool_name == "play_music":
             if data.get("queued"):
@@ -236,8 +248,10 @@ class DJ:
             state = "playing"
         else:
             state = data.get("state", "playing")
-        return {"widget": "music", "title": data["title"], "artist": data.get("artist", ""),
-                "state": state if state in CARD_STATES else "paused"}
+        return {"widget": "music", "title": title or context,
+                "artist": data.get("artist", "") if title else "",
+                "state": state if state in CARD_STATES else "paused",
+                "context": context if title else None}
 
 
 class Ducker:

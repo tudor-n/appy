@@ -229,6 +229,9 @@ pub struct MusicReport {
     pub title: String,
     pub artist: String,
     pub state: PlaybackState,
+    /// The playlist or album it plays from, if any (a small third line on the card).
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -449,6 +452,18 @@ mod tests {
             (track.title.as_str(), track.artist.as_str(), track.state),
             ("Karma Police", "Radiohead", PlaybackState::Playing)
         );
+    }
+
+    #[test]
+    fn music_widget_context_is_optional() {
+        let ev: BackendEvent = serde_json::from_str(
+            r#"{"type":"widget","widget":"music","title":"Pain","artist":"Three Days Grace","state":"playing","context":"Gym"}"#,
+        )
+        .unwrap();
+        let BackendEvent::Widget(Widget::Music(track)) = ev else {
+            panic!("wrong variant: {ev:?}");
+        };
+        assert_eq!(track.context.as_deref(), Some("Gym"));
     }
 
     #[test]
