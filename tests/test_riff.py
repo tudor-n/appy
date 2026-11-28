@@ -48,11 +48,6 @@ class RiffTransportTests(unittest.TestCase):
         riff.previous()
         self.assertEqual([c[0] for c in bus.calls], ["Play", "Pause", "Next", "Previous"])
 
-    def test_open_uri_passes_the_uri(self):
-        bus = FakeBus()
-        Riff(bus=bus).open_uri("spotify:track:abc")
-        self.assertEqual(bus.calls, [("OpenUri", "spotify:track:abc")])
-
     def test_not_running_raises(self):
         riff = Riff(bus=FakeBus(owner=False))
         with self.assertRaises(RiffNotRunning):
@@ -115,37 +110,6 @@ class RiffTransportTests(unittest.TestCase):
         self.assertIsNone(Riff(bus=FakeBus(props={"Metadata": {}})).now_playing())
 
 
-class RiffLaunchTests(unittest.TestCase):
-    def test_ensure_running_launches_and_waits(self):
-        polls = {"n": 0}
-
-        def owner():
-            polls["n"] += 1
-            return polls["n"] >= 3
-
-        launches = []
-        clock = FakeClock()
-        riff = Riff(bus=FakeBus(owner=owner), launcher=lambda: launches.append(1),
-                    clock=clock, sleep=clock.sleep)
-        riff.ensure_running(timeout=10.0)
-        self.assertEqual(launches, [1])
-
-    def test_ensure_running_times_out(self):
-        launches = []
-        clock = FakeClock()
-        riff = Riff(bus=FakeBus(owner=False), launcher=lambda: launches.append(1),
-                    clock=clock, sleep=clock.sleep)
-        with self.assertRaises(RiffError):
-            riff.ensure_running(timeout=10.0)
-        self.assertEqual(launches, [1])
-        self.assertGreaterEqual(clock.now, 10.0)
-
-    def test_ensure_running_noop_when_running(self):
-        launches = []
-        Riff(bus=FakeBus(), launcher=lambda: launches.append(1)).ensure_running()
-        self.assertEqual(launches, [])
-
-
 class VariantTests(unittest.TestCase):
     def test_unwraps_metadata_variants(self):
         raw = ("a{sv}", {"xesam:title": ("s", "X"), "xesam:artist": ("as", ["A", "B"])})
@@ -185,7 +149,7 @@ class JeepneyBusTests(unittest.TestCase):
         bus = JeepneyBus(connect=lambda: conn)
         for method in ("Play", "Pause", "Next", "Previous"):
             bus.call(method)
-        bus.call("OpenUri", "spotify:track:x", signature="s")
+        bus.call("Seek", 5_000_000, signature="x")
         self.assertEqual(len(conn.sent), 5)
 
     def test_dbus_error_reply_becomes_riff_error(self):
@@ -204,14 +168,6 @@ class JeepneyBusTests(unittest.TestCase):
         self.assertTrue(conns[0].closed)
         bus.call("Play")  # a fresh connection
         self.assertEqual(len(conns[1].sent), 1)
-
-    def test_launch_failure_is_a_riff_error(self):
-        def no_flatpak():
-            raise FileNotFoundError("flatpak")
-
-        riff = Riff(bus=FakeBus(owner=False), launcher=no_flatpak)
-        with self.assertRaises(RiffError):
-            riff.ensure_running()
 
 
 class SpotifydBus(FakeBus):

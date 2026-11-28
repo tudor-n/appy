@@ -66,9 +66,6 @@ class ProtocolDriftTests(unittest.TestCase):
             def is_running(self):
                 return True
 
-            def ensure_running(self):
-                pass
-
             def status(self):
                 return "Playing"
 

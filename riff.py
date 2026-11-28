@@ -5,7 +5,6 @@ follows whichever of them is playing.
 Transport, volume and "what's playing" go through here: local, instant, and no Spotify
 login needed. Searching and starting something specific goes through spotify.py.
 """
-import subprocess
 import threading
 import time
 from typing import Callable
@@ -13,7 +12,6 @@ from typing import Callable
 BUS_NAME = "org.mpris.MediaPlayer2.dev.diegovsky.Riff"
 OBJECT_PATH = "/org/mpris/MediaPlayer2"
 PLAYER = "org.mpris.MediaPlayer2.Player"
-FLATPAK_ID = "dev.diegovsky.Riff"
 RIFF_IDLE_TITLE = "Not playing"
 # spotifyd takes this name (+ its PID) once it is the playback device
 SPOTIFYD_PREFIX = "org.mpris.MediaPlayer2.spotifyd."
@@ -26,15 +24,6 @@ class RiffError(Exception):
 class RiffNotRunning(RiffError):
     def __init__(self, message: str = "Riff isn't open."):
         super().__init__(message)
-
-
-def _launch_riff():
-    subprocess.Popen(
-        ["flatpak", "run", FLATPAK_ID],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
 
 
 def _variant(value):
@@ -171,9 +160,6 @@ class MprisPlayer:
     def previous(self):
         self._call("Previous")
 
-    def open_uri(self, uri: str):
-        self._call("OpenUri", uri, signature="s")
-
     def volume(self) -> float:
         return float(self._get("Volume"))
 
@@ -200,31 +186,11 @@ class MprisPlayer:
 
 
 class Riff(MprisPlayer):
+    """Tudor's Riff. It can't be told to play a specific song (its MPRIS OpenUri isn't
+    implemented), so it's only ever controlled, never started or launched, by Appy."""
+
     BUS_NAME = BUS_NAME
     NOT_RUNNING = "Riff isn't open."
-
-    def __init__(self, bus=None, launcher: Callable[[], None] | None = None,
-                 clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep):
-        super().__init__(bus)
-        self._launch = launcher or _launch_riff
-        self._clock = clock
-        self._sleep = sleep
-
-    def ensure_running(self, timeout: float = 10.0) -> None:
-        """Start Riff if it isn't open, and wait for it to show up on the bus."""
-        if self.is_running():
-            return
-        try:
-            self._launch()
-        except OSError as e:  # e.g. flatpak missing
-            raise RiffError("Riff didn't start.") from e
-        deadline = self._clock() + timeout
-        while self._clock() < deadline:
-            self._sleep(0.25)
-            if self.is_running():
-                return
-        raise RiffError("Riff didn't start.")
 
 
 class SpotifydPlayer(MprisPlayer):

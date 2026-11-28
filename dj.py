@@ -1,8 +1,9 @@
 """Appy's DJ: the play_music and music_control tools, and the now-playing card.
 
-Transport goes to Riff over MPRIS (riff.py); finding and starting music by name goes
-through the Spotify Web API (spotify.py), aimed at Riff's Spotify Connect device. If Riff
-doesn't show up as a device, tracks and playlists are handed to Riff's MPRIS OpenUri.
+Finding and starting music by name goes through the Spotify Web API (spotify.py), aimed
+at Appy's own background player (spotifyd, player.py), the Spotify Connect device "Appy";
+Riff can't be told to play a specific song. Transport, volume and "what's playing" go
+over MPRIS (riff.py) to whichever player is playing, his or Tudor's Riff (ActivePlayer).
 Tool results are JSON for the LLM and never contain Spotify URIs or device IDs.
 """
 import json
@@ -18,10 +19,10 @@ from spotify_auth import NOT_LOGGED_IN, SpotifyAuthError
 PLAY_KINDS = ("track", "artist", "album", "playlist", "liked")
 CONTROL_ACTIONS = ("pause", "resume", "next", "previous", "volume_up", "volume_down",
                    "set_volume", "shuffle_on", "shuffle_off", "now_playing")
-# Riff's Spotify Connect device is found by this (case-insensitive) part of its name
-RIFF_DEVICE_HINT = "riff"
+# Appy's background player is found among Spotify's devices by this part of its name
+PLAYER_DEVICE_HINT = "appy"
 VOLUME_STEP = 0.15
-DEVICE_POLLS = 5  # after launching Riff, check for its device this many times, 1 s apart
+DEVICE_POLLS = 5  # spotifyd may still be connecting: look this many times, 1 s apart
 NOW_PLAYING_WAIT_S = 2.0
 LIKED_FALLBACK = 100
 CARD_STATES = ("playing", "paused")  # the `state` values of the music card
@@ -32,9 +33,13 @@ def _error(message: str) -> str:
 
 
 class DJ:
-    def __init__(self, riff: Riff, spotify: Spotify | None,
-                 sleep: Callable[[float], None] = time.sleep):
+    def __init__(self, riff, spotify: Spotify | None,
+                 sleep: Callable[[float], None] = time.sleep,
+                 player_running: Callable[[], bool] = lambda: True):
+        """`riff`: the MPRIS side (an ActivePlayer in main); `player_running()`: whether
+        the background player process is up (no point waiting for its device if not)."""
         self.riff = riff
+        self._player_running = player_running
         self.spotify = spotify
         self._sleep = sleep
         self._volume_hook: Callable[[float], bool] | None = None
@@ -66,10 +71,12 @@ class DJ:
             return _error("I can only queue single songs.")
         if self.spotify is None:
             return _error(NOT_LOGGED_IN)
+        if not self._player_running():
+            return _error("My music player isn't set up.")
         try:
-            launched = not self.riff.is_running()
-            self.riff.ensure_running()
-            device = self._riff_device(launched)
+            device = self._player_device()
+            if device is None:
+                return _error("My music player isn't running.")
             if kind == "liked":
                 return self._play_liked(device)
             target = self._find(query, kind)
@@ -80,23 +87,20 @@ class DJ:
                 self.spotify.queue(uri, device)
                 return json.dumps({"playing": label, "queued": True})
             before = self._now()
-            if device:
-                if kind == "track":
-                    self.spotify.play(device, uris=[uri])
-                else:
-                    self.spotify.play(device, context_uri=uri)
+            if kind == "track":
+                self.spotify.play(device, uris=[uri])
             else:
-                self.riff.open_uri(uri)
+                self.spotify.play(device, context_uri=uri)
             return self._started(label, before, hit)
         except (SpotifyError, SpotifyAuthError, RiffError) as e:
             return _error(str(e))
 
-    def _riff_device(self, launched: bool) -> str | None:
-        for attempt in range(DEVICE_POLLS if launched else 1):
+    def _player_device(self) -> str | None:
+        for attempt in range(DEVICE_POLLS):
             if attempt:
                 self._sleep(1.0)
             for d in self.spotify.devices():
-                if RIFF_DEVICE_HINT in d["name"].lower() and d.get("id"):
+                if PLAYER_DEVICE_HINT in d["name"].lower() and d.get("id"):
                     return d["id"]
         return None
 
@@ -119,7 +123,7 @@ class DJ:
             label = hit["name"]
         return label, hit["uri"], hit if kind == "track" else None
 
-    def _play_liked(self, device: str | None) -> str:
+    def _play_liked(self, device: str) -> str:
         before = self._now()
         try:
             self.spotify.play(device, context_uri=f"spotify:user:{self.spotify.user_id()}:collection")
@@ -245,6 +249,7 @@ class Ducker:
         self._reasons: set[str] = set()
         self._saved: float | None = None  # the volume to restore; None = not ducked
         self._ducked_to: float | None = None
+        self._target = None  # the player that was turned down
         self._pending = None
         if run is None:
             self._jobs: queue.Queue = queue.Queue()
@@ -281,14 +286,27 @@ class Ducker:
             print(f"[music] ducking failed: {type(e).__name__}: {e}", flush=True)
             return None
 
+    def _playing_player(self):
+        """The player making sound now (one of an ActivePlayer's), or None."""
+        players = getattr(self.riff, "players", [self.riff])
+        return next((p for p in players if p.is_playing()), None)
+
     def _hold(self, reason: str) -> None:
         with self._lock:
             self._cancel_pending()
             self._reasons.add(reason)
-            if self._saved is not None or not self.riff.is_playing():
+            playing = self._playing_player()
+            if self._saved is not None:
+                if playing is None or playing is self._target:
+                    return
+                # Playback moved to the other player (Appy started a song over Riff):
+                # give the old one its volume back and duck the new one
+                self._restore_target()
+            if playing is None:
                 return
-            saved = self.riff.volume()
-            self.riff.set_volume(saved * self.level)
+            saved = playing.volume()
+            playing.set_volume(saved * self.level)
+            self._target = playing
             self._saved, self._ducked_to = saved, saved * self.level
 
     def _release(self, reason: str) -> None:
@@ -311,7 +329,7 @@ class Ducker:
             if self._saved is None:
                 return False
             try:
-                self.riff.set_volume(level * self.level)
+                self._target.set_volume(level * self.level)
             except Exception:  # Riff went away: nothing ducked any more
                 self._saved = self._ducked_to = None
                 return False
@@ -337,7 +355,14 @@ class Ducker:
             self._pending = None
             if self._reasons or self._saved is None:
                 return
-            saved, ducked_to = self._saved, self._ducked_to
-            self._saved = self._ducked_to = None
-            if abs(self.riff.volume() - ducked_to) <= self.TOLERANCE:
-                self.riff.set_volume(saved)
+            self._restore_target()
+
+    def _restore_target(self) -> None:
+        """Give the ducked player its volume back, unless it was changed by hand."""
+        target, saved, ducked_to = self._target, self._saved, self._ducked_to
+        self._target = self._saved = self._ducked_to = None
+        try:
+            if abs(target.volume() - ducked_to) <= self.TOLERANCE:
+                target.set_volume(saved)
+        except RiffNotRunning:
+            pass  # closed meanwhile

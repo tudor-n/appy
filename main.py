@@ -18,7 +18,7 @@ from hearing import Ear
 from memory_client import MemoryClient, system_prompt
 from memory_review import MemoryReview
 from note_attach import NoteAttacher
-from riff import Riff
+from riff import ActivePlayer, Riff, SpotifydPlayer
 from spotify import Spotify
 from spotify_auth import TokenStore
 from session_log import SessionLogger, default_logs_dir
@@ -93,14 +93,16 @@ def main():
     background = BackgroundPlayer()
     if not background.start():
         print(f"[music] background player off: {background.problem}")
-    riff = Riff()
+    # Pause/skip/volume/ducking go to whichever is playing (his player first when both are)
+    music = ActivePlayer([SpotifydPlayer(), Riff()])
     spotify = Spotify(TokenStore()) if os.getenv("SPOTIFY_CLIENT_ID", "").strip() else None
-    dj = DJ(riff, spotify)
+    dj = DJ(music, spotify, player_running=background.running)
     tools.set_dj(dj)
     # Riff goes quiet while Tudor talks to Appy and while Appy answers
-    ducker = Ducker(riff)
+    ducker = Ducker(music)
     dj.set_volume_hook(ducker.on_volume_change, ducker.saved_volume)
-    print(f"[music] Riff via MPRIS; Spotify {'on' if spotify else 'off (SPOTIFY_CLIENT_ID not set)'}")
+    print(f"[music] Riff + background player via MPRIS; Spotify "
+          f"{'on' if spotify else 'off (SPOTIFY_CLIENT_ID not set)'}")
 
     def on_audio(state: str):
         status.set_audio(state)
@@ -123,7 +125,7 @@ def main():
 
     ear = Ear(on_speech_start=on_speech_start, on_speech_discarded=on_speech_discarded,
               # HEARING-WORKAROUND(respeaker): cap turns while the mic hears music
-              utterance_cap=lambda: hearing_workaround.utterance_cap(riff))
+              utterance_cap=lambda: hearing_workaround.utterance_cap(music))
     ear.start()
 
     def show_tool_card(name: str, result: str):
@@ -254,7 +256,7 @@ def main():
                     force=tools.forced_call(
                         user_input, agent.recent_tools,
                         # HEARING-WORKAROUND(respeaker): only short music commands count
-                        strict_music=hearing_workaround.strict_music(source, riff)),
+                        strict_music=hearing_workaround.strict_music(source, music)),
                 )
                 speaker.wait()
             finally:

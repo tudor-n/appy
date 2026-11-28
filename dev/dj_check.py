@@ -1,5 +1,6 @@
-"""Live check: can Appy start music in Riff? Needs SPOTIFY_CLIENT_ID in .env, a finished
-`appy spotify-login`, and Riff open and logged in. Plays a few seconds of music.
+"""Live check: can Appy play music on his background player (spotifyd)? Needs
+SPOTIFY_CLIENT_ID in .env and a finished `appy spotify-login` (both logins). Starts its
+own spotifyd, plays a few seconds of music, then stops it.
 
     .venv/bin/python dev/dj_check.py
 """
@@ -14,7 +15,9 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
-from riff import Riff, RiffError  # noqa: E402
+from dj import PLAYER_DEVICE_HINT  # noqa: E402
+from player import BackgroundPlayer  # noqa: E402
+from riff import ActivePlayer, Riff, RiffError, SpotifydPlayer  # noqa: E402
 from spotify import Spotify, SpotifyError  # noqa: E402
 from spotify_auth import SpotifyAuthError, TokenStore  # noqa: E402
 
@@ -32,36 +35,49 @@ def step(name, fn):
 
 
 def main():
-    riff, sp = Riff(), Spotify(TokenStore())
-    step("riff running", riff.is_running)
-    volume = step("riff volume", riff.volume)
-    if volume is not None:
-        step("riff volume set (0.5, read back)", lambda: (riff.set_volume(0.5), time.sleep(0.3),
-                                                          round(riff.volume(), 2))[-1])
-        step("riff volume restore", lambda: riff.set_volume(volume))
-    devices = step("spotify devices", sp.devices) or []
-    match = next((d for d in devices if "riff" in d["name"].lower()), None)
-    print(f"       riff device: {match}")
-    hit = (step("search 'Karma Police'", lambda: sp.search("Karma Police", "track", 1)) or [None])[0]
-    device_id = match["id"] if match else None
-    if hit:
-        if step("web api play on riff device", lambda: sp.play(device_id, uris=[hit["uri"]])) is None:
-            pass
-        time.sleep(3)
-        step("  -> riff now playing", riff.now_playing)
+    background = BackgroundPlayer()
+    if not background.start():
+        print(f"[FAIL] background player: {background.problem}")
+        return 1
+    try:
+        sp, appy, riff = Spotify(TokenStore()), SpotifydPlayer(), Riff()
+        active = ActivePlayer([appy, riff])
+        device = None
+        for _ in range(10):
+            time.sleep(1)
+            device = next((d for d in sp.devices() if PLAYER_DEVICE_HINT in d["name"].lower()), None)
+            if device:
+                break
+        print(f"[{'ok' if device else 'FAIL'}]   appy device: {device and device['name']}")
+        if not device:
+            return 1
+        hit = (step("search 'Karma Police'", lambda: sp.search("Karma Police", "track", 1)) or [None])[0]
+        if hit:
+            step("play on appy", lambda: sp.play(device["id"], uris=[hit["uri"]]))
+            time.sleep(4)
+            step("  -> appy mpris running", appy.is_running)
+            step("  -> appy now playing", appy.now_playing)
+            step("  -> riff still playing?", riff.is_playing)
+            step("  -> active player", lambda: type(active.current()).__name__)
+            volume = step("appy volume", appy.volume)
+            if volume is not None:
+                step("appy volume set 0.3 (read back)",
+                     lambda: (appy.set_volume(0.3), time.sleep(0.5), round(appy.volume(), 2))[-1])
+                step("appy volume restore", lambda: appy.set_volume(volume))
+            step("queue", lambda: sp.queue(hit["uri"], device["id"]))
+            step("next (mpris)", appy.next)
+            time.sleep(2)
+            step("  -> appy now playing", appy.now_playing)
         user = step("user id", sp.user_id)
         if user:
-            step("web api play liked collection",
-                 lambda: sp.play(device_id, context_uri=f"spotify:user:{user}:collection"))
-            time.sleep(3)
-            step("  -> riff now playing", riff.now_playing)
-        step("riff OpenUri (track)", lambda: riff.open_uri(hit["uri"]))
-        time.sleep(3)
-        step("  -> riff now playing", riff.now_playing)
-        step("web api queue", lambda: sp.queue(hit["uri"], device_id))
-    playlists = step("my playlists (count)", lambda: len(sp.my_playlists()))
-    step("riff pause", riff.pause)
-    return 0 if playlists is not None else 1
+            step("play liked collection",
+                 lambda: sp.play(device["id"], context_uri=f"spotify:user:{user}:collection"))
+            time.sleep(4)
+            step("  -> appy now playing", appy.now_playing)
+        step("pause (mpris)", appy.pause)
+        return 0
+    finally:
+        background.stop()
 
 
 if __name__ == "__main__":
